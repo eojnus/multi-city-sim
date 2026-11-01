@@ -4,7 +4,7 @@
 - 修复日期：2026-11-01
 - 工作区：`C:\CODING-worktrees\first-playable`
 - 分支：`feature/first-playable`
-- 修复提交：见文末（本报告随修复提交一起入库；最终 HEAD 以 `git log -1` 为准）
+- 功能修复提交：`d3966e80d0096b89840bce6bb2ce60b911d9eaa7`（短号 `d3966e8`）
 - 未推送远程；未合并 `main` / `develop`；未重做地图视角。
 
 ## 1. 玩家持股分红
@@ -174,7 +174,7 @@
 ## 8. Git
 
 - 基线：`306f16a`
-- 本次修复提交：见最终交付回复与 `git log -1`。
+- 本次功能修复提交：`d3966e80d0096b89840bce6bb2ce60b911d9eaa7`（短号 `d3966e8`）。本报告随后作为文档提交追加，最终 HEAD 以 `git log -1` 为准。
 - 工作区：`C:\CODING-worktrees\first-playable`；分支：`feature/first-playable`。
 - 未推送远程；未合并 `main` / `develop`；未重写历史。
 
