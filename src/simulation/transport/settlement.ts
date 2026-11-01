@@ -24,12 +24,48 @@ import { intercityTradeSupportPayment } from '../policies/policies';
  * - 成交时买方按成交价全额付款并取得货物；卖方暂不入账；
  * - 期末按“城市对”汇总本月运输需求 / 网络容量，得到统一的惩罚比例；
  * - 卖方实际所得 = 该笔成交额 × (1 − 惩罚比例)；
- * - 差额记为“容量不足造成的贸易收益损失”，不进入任何主体收入，
- *   不从企业已有现金额外扣款，也不向政府或运输方收取罚金。
+ * - 差额退回买方（暂定方案），使买方净支付等于卖方实际所得；
+ *   不向卖方额外扣款，也不把差额变成政府或运输方的收入。
+ *   差额仍记为“容量不足造成的贸易收益损失”（相对原销售金额）。
  *
- * 这样买方付款、卖方所得与损失三项恒等：gross = proceeds + loss。
- * 另一种可选方案（买方也少付）尚未确认，因此未采用。
+ * 这样买卖双方的实际收付款恒等：买方净支付 = 卖方所得 = gross − loss。
+ * 另一种可选方案（买方按原价支付、差额作为无主体损失）尚未确认，因此未采用。
  */
+/**
+ * 把跨城交易的差额退回买方（暂定方案）。
+ * 企业买方退回现金并冲减本月采购支出；居民买方退回城市居民可支配收入并冲减消费支出。
+ * 只处理资金账目，不改变库存或交易数量。
+ */
+function refundIntercityBuyer(
+  world: WorldState,
+  sale: PendingIntercitySale,
+  amount: number,
+  ledgers: WorldLedgers,
+): void {
+  const refund = round2(Math.max(0, amount));
+  if (refund <= 0) return;
+  if (sale.buyerCompanyId === 'households') {
+    const buyerCity = world.cities.find((city) => city.id === sale.toCityId);
+    if (buyerCity) {
+      buyerCity.householdIncomeLastMonth = round2(buyerCity.householdIncomeLastMonth + refund);
+      buyerCity.lastMonth.consumerSpend = round2(
+        Math.max(0, buyerCity.lastMonth.consumerSpend - refund),
+      );
+    }
+    const ledger = ledgers[sale.toCityId]?.[sale.good];
+    if (ledger) {
+      ledger.spend = round2(Math.max(0, ledger.spend - refund));
+    }
+    return;
+  }
+  const buyerCompany = world.companies.find((company) => company.id === sale.buyerCompanyId);
+  if (!buyerCompany) return;
+  buyerCompany.cash = round2(buyerCompany.cash + refund);
+  buyerCompany.lastMonth.inputCost = round2(
+    Math.max(0, buyerCompany.lastMonth.inputCost - refund),
+  );
+}
+
 export function settleTransportMonth(
   world: WorldState,
   config: DemoConfig,
@@ -84,12 +120,14 @@ export function settleTransportMonth(
       lossTotal = round2(lossTotal + loss);
 
       if (!seller) {
-        // 理论上不会出现（企业倒闭时清理待结算销售）；保留明确告警，不凭空补钱。
+        // 理论上不会出现（企业倒闭时清理待结算销售）；仍把付款退回买方，
+        // 不让资金无解释地消失，也不凭空补钱给不存在的卖方。
         log.push({
           tick: world.time.tick,
           kind: 'warning',
-          message: `跨城销售结算失败：卖方 ${sale.sellerCompanyId} 已不存在，${gross.toFixed(0)} 付款无法入账。`,
+          message: `跨城销售结算失败：卖方 ${sale.sellerCompanyId} 已不存在，${gross.toFixed(0)} 付款已退回买方。`,
         });
+        refundIntercityBuyer(world, sale, gross, ledgers);
         trades.push({
           tick: world.time.tick,
           path: sale.path,
@@ -103,6 +141,7 @@ export function settleTransportMonth(
           grossValue: gross,
           sellerProceeds: 0,
           capacityLoss: gross,
+          buyerRefund: gross,
           penaltyRate,
           demand,
           capacity,
@@ -115,6 +154,11 @@ export function settleTransportMonth(
       if (sale.good === seller.recipeOutput) {
         seller.lastMonth.exported = round2(seller.lastMonth.exported + sale.qty);
       }
+
+      // 【暂定】容量不足时把差额退回买方：买方此前按原价付款，期末净支付应等于卖方所得。
+      // 不向卖方额外扣款，也不把差额变成政府/运输方收入。
+      const buyerRefund = loss;
+      refundIntercityBuyer(world, sale, buyerRefund, ledgers);
 
       // 跨城贸易支持：财政补偿卖方该笔容量损失（不是罚款，也不是凭空收入）。
       let subsidy = 0;
@@ -142,6 +186,7 @@ export function settleTransportMonth(
         grossValue: gross,
         sellerProceeds: proceeds,
         capacityLoss: loss,
+        buyerRefund,
         penaltyRate,
         demand,
         capacity,

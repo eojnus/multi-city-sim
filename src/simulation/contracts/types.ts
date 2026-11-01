@@ -682,6 +682,7 @@ export interface FiscalEntry {
     | 'transportMaintenance'
     | 'debtForgiven'
     | 'liquidationProceeds'
+    | 'dividendIncome'
     | 'electionFee';
   /** 正数为财政收入，负数为财政支出。 */
   amount: number;
@@ -786,6 +787,11 @@ export interface TransportTradeRecord {
   sellerProceeds: number;
   /** 收益损失 = grossValue - sellerProceeds，不计入任何主体收入。 */
   capacityLoss: number;
+  /**
+   * 买方退款（暂定结算）：容量不足时买方先按原价付款，期末把该笔差额退回买方，
+   * 使买方净支付等于卖方实际所得。旧存档的历史记录可能没有该字段。
+   */
+  buyerRefund?: number;
   penaltyRate: number;
   demand: number;
   capacity: number;

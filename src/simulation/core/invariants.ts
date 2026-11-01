@@ -371,6 +371,9 @@ function checkGovernance(world: WorldState): string[] {
     if (control.operator !== 'management' && !holderValid(control.operator)) {
       problems.push(`${control.companyId}: 经营者持有人无效`);
     }
+    if (control.operator !== 'management' && control.operator.type === 'city') {
+      problems.push(`${control.companyId}: 城市政府不能直接担任企业经营层（暂定）`);
+    }
   }
   return problems;
 }
@@ -581,8 +584,14 @@ function checkTransport(world: WorldState): string[] {
     if (trade.sellerProceeds > trade.grossValue + 0.01) {
       problems.push('跨城结算卖方所得超过买方付款');
     }
-    if (Math.abs(trade.grossValue - (trade.sellerProceeds + trade.capacityLoss)) > 0.05) {
-      problems.push('跨城结算账目不平：付款 != 卖方所得 + 收益损失');
+    // 新记录带买方退款；旧存档历史记录没有该字段，按“退款=容量损失”兼容校验。
+    const buyerRefund = trade.buyerRefund ?? trade.capacityLoss;
+    if (buyerRefund < -0.01) problems.push('跨城结算买方退款为负');
+    if (Math.abs(buyerRefund - trade.capacityLoss) > 0.05) {
+      problems.push('跨城结算买方退款与容量损失不一致');
+    }
+    if (Math.abs(trade.grossValue - (trade.sellerProceeds + buyerRefund)) > 0.05) {
+      problems.push('跨城结算账目不平：付款 != 卖方所得 + 买方退款');
     }
     if (!(trade.penaltyRate >= 0 && trade.penaltyRate <= 1)) {
       problems.push('跨城结算惩罚比例越界');

@@ -386,6 +386,7 @@ describe('15 项政策逐项验证：起始条件 → 财政变化 → 实际模
     const finance: FinanceResult = {
       investorDividendsByCity: {},
       investorDistributionByCity: {},
+      cityDividendsByCity: {},
       dividendsByCity: {},
       playerDividends: 0,
       playerDividendsByCompany: {},

@@ -159,6 +159,7 @@ const FISCAL_KIND_LABELS: Record<string, string> = {
   transportMaintenance: '交通维护',
   debtForgiven: '债务减免',
   liquidationProceeds: '企业退出清算',
+  dividendIncome: '政府股息收入',
   electionFee: '参选费用',
 };
 
@@ -266,6 +267,10 @@ function holderLabel(store: GameStore, holder: HolderRef | 'management'): string
   if (holder.type === 'player') return '玩家';
   if (holder.type === 'company') {
     return store.world.companies.find((company) => company.id === holder.id)?.name ?? '其他企业';
+  }
+  if (holder.type === 'city') {
+    const city = store.world.cities.find((candidate) => candidate.id === holder.id);
+    return city ? `${city.name}市政府` : '城市政府';
   }
   return store.world.investors.find((group) => group.id === holder.id)?.name ?? '居民投资实体';
 }

@@ -77,24 +77,28 @@ function buy(world: WorldState, buyerCompanyId: string, qty: number) {
 }
 
 describe('城际运输容量：不是成交上限，只减少卖方收益', () => {
-  it('容量低于需求：交易仍全额成交，卖方按比例少获得收益，买方付款不变', () => {
+  it('容量低于需求：交易仍全额成交，卖方少获得收益，买方差额被退回', () => {
     const { world, seller, buyer } = tradeSetup();
     setCorridorLevel(world, 'greenfield', 'lanport', 0, 0);
     const buyerCashBefore = buyer.cash;
+    const inputCostBefore = buyer.lastMonth.inputCost;
     const result = buy(world, buyer.id, 100);
     expect(result.qty).toBe(100);
     const trade = world.transport.lastMonth.trades.find((entry) => entry.sellerCompanyId === seller.id)!;
     expect(trade).toBeDefined();
     expect(trade.qty).toBe(100);
     const gross = trade.grossValue;
-    expect(buyer.cash).toBeCloseTo(buyerCashBefore - gross, 2);
     expect(trade.penaltyRate).toBe(DEMO_CONFIG.transport.penalty.max);
     expect(trade.capacityLoss).toBeCloseTo(gross * DEMO_CONFIG.transport.penalty.max, 2);
     expect(trade.sellerProceeds).toBeCloseTo(gross - trade.capacityLoss, 2);
+    // 暂定方案：买方先按原价付款，期末差额退回；净支付 = 卖方所得。
+    expect(trade.buyerRefund).toBeCloseTo(trade.capacityLoss, 2);
+    expect(buyer.cash).toBeCloseTo(buyerCashBefore - trade.sellerProceeds, 2);
+    expect(buyer.lastMonth.inputCost).toBeCloseTo(inputCostBefore + trade.sellerProceeds, 2);
     expect(seller.cash).toBeCloseTo(trade.sellerProceeds, 2);
     // 没有对卖方额外扣款：卖方现金恰好等于其所得，不出现负值或额外罚金。
     expect(seller.cash).toBeGreaterThanOrEqual(0);
-    expect(trade.grossValue).toBeCloseTo(trade.sellerProceeds + trade.capacityLoss, 2);
+    expect(trade.grossValue).toBeCloseTo(trade.sellerProceeds + trade.buyerRefund!, 2);
     // 买方库存按成交数量增加，商品守恒。
     expect(buyer.inventory.grain).toBeCloseTo(100, 2);
     expect(seller.inventory.grain).toBeCloseTo(9_900, 2);

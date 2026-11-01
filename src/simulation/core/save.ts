@@ -1637,6 +1637,9 @@ function validateTransport(
     for (const key of ['qty', 'grossValue', 'sellerProceeds', 'capacityLoss', 'penaltyRate', 'demand', 'capacity']) {
       if (!isFiniteNumber(trade[key])) return `transport.lastMonth.trades[${index}].${key} 无效`;
     }
+    if (trade.buyerRefund !== undefined && !isFiniteNumber(trade.buyerRefund)) {
+      return `transport.lastMonth.trades[${index}].buyerRefund 无效`;
+    }
     if ((trade.sellerProceeds as number) > (trade.grossValue as number) + 0.01) {
       return `transport.lastMonth.trades[${index}] 卖方所得超过付款`;
     }

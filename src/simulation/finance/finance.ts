@@ -10,6 +10,8 @@ export interface FinanceResult {
   investorDividendsByCity: Record<string, number>;
   /** 其中返还给居民可支配收入的部分（其余留作投资资金）。 */
   investorDistributionByCity: Record<string, number>;
+  /** 政府股东取得的股息（进入对应城市财政，不计入居民收入）。 */
+  cityDividendsByCity: Record<string, number>;
   /** 兼容字段：v0.2 起等于 investorDividendsByCity（不再直接把全部股息计入居民收入）。 */
   dividendsByCity: Record<string, number>;
   playerDividends: number;
@@ -46,6 +48,7 @@ export function settleCompanyFinance(
   log: LogEntry[],
 ): FinanceResult {
   const investorDividendsByCity: Record<string, number> = {};
+  const cityDividendsByCity: Record<string, number> = {};
   const investorDistribution: Record<string, number> = {};
   const playerDividendsByCompany: Record<string, number> = {};
   const corporateTaxByCity: Record<string, number> = {};
@@ -77,7 +80,9 @@ export function settleCompanyFinance(
     totalArrears += arrears;
 
     const preTaxProfit = round2(stats.revenue - stats.inputCost - paidWages);
-    const taxOwed = round2(Math.max(0, preTaxProfit) * config.labor.corporateTaxRate);
+    // 使用企业所在城市的有效企业税率：政策调整只影响该城市企业。
+    const corporateTaxRate = clamp(city.corporateTaxRate, 0, 1);
+    const taxOwed = round2(Math.max(0, preTaxProfit) * corporateTaxRate);
     const taxPaid = round2(Math.min(company.cash, taxOwed));
     company.cash = round2(company.cash - taxPaid);
     stats.corporateTax = taxPaid;
@@ -136,6 +141,9 @@ export function settleCompanyFinance(
     for (const [cityId, amount] of Object.entries(distribution.investorByCity)) {
       investorDividendsByCity[cityId] = round2((investorDividendsByCity[cityId] ?? 0) + amount);
     }
+    for (const [cityId, amount] of Object.entries(distribution.cityByCity)) {
+      cityDividendsByCity[cityId] = round2((cityDividendsByCity[cityId] ?? 0) + amount);
+    }
     for (const [cityId, amount] of Object.entries(distribution.investorDistributionByCity)) {
       investorDistribution[cityId] = round2((investorDistribution[cityId] ?? 0) + amount);
     }
@@ -185,6 +193,7 @@ export function settleCompanyFinance(
   return {
     investorDividendsByCity,
     investorDistributionByCity: investorDistributionResult,
+    cityDividendsByCity,
     dividendsByCity: investorDividendsByCity,
     playerDividends,
     playerDividendsByCompany,

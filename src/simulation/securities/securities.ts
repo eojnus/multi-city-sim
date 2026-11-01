@@ -25,6 +25,7 @@ import type { DemoConfig } from '../../data/config';
 import { cityMarketPrices } from '../markets/markets';
 import { companySharePrice } from '../companies/company';
 import { allocateProportionally, round2 } from '../core/math';
+import { recordFiscal } from '../government/treasury';
 
 export function shareClassId(companyId: string, kind: ShareKind): string {
   return `${companyId}:${kind === 'voting' ? 'voting' : 'non-voting'}`;
@@ -48,6 +49,7 @@ export function holderExists(world: WorldState, holder: HolderRef): boolean {
   if (holder.type === 'player') return holder.id === 'player';
   if (holder.type === 'company') return world.companies.some((company) => company.id === holder.id);
   if (holder.type === 'investorGroup') return world.investors.some((group) => group.id === holder.id);
+  if (holder.type === 'city') return world.cities.some((city) => city.id === holder.id);
   return false;
 }
 
@@ -56,6 +58,9 @@ export function holderName(world: WorldState, holder: HolderRef | 'management'):
   if (holder.type === 'player') return `玩家 · ${world.player.name}`;
   if (holder.type === 'company') {
     return world.companies.find((company) => company.id === holder.id)?.name ?? holder.id;
+  }
+  if (holder.type === 'city') {
+    return world.cities.find((city) => city.id === holder.id)?.name ?? holder.id;
   }
   return world.investors.find((group) => group.id === holder.id)?.name ?? holder.id;
 }
@@ -174,9 +179,13 @@ export function holderCash(world: WorldState, holder: HolderRef): number {
   if (holder.type === 'company') {
     return world.companies.find((company) => company.id === holder.id)?.cash ?? 0;
   }
+  if (holder.type === 'city') {
+    return world.cities.find((city) => city.id === holder.id)?.treasury ?? 0;
+  }
   return world.investors.find((group) => group.id === holder.id)?.cash ?? 0;
 }
 
+/** 纯资金移动：不写财政流水；需要审计的调用方单独记录（例如股息、清算）。 */
 export function creditHolderCash(world: WorldState, holder: HolderRef, amount: number): void {
   const value = round2(amount);
   if (value === 0) return;
@@ -185,6 +194,9 @@ export function creditHolderCash(world: WorldState, holder: HolderRef, amount: n
   } else if (holder.type === 'company') {
     const company = world.companies.find((candidate) => candidate.id === holder.id);
     if (company) company.cash = round2(company.cash + value);
+  } else if (holder.type === 'city') {
+    const city = world.cities.find((candidate) => candidate.id === holder.id);
+    if (city) city.treasury = round2(city.treasury + value);
   } else {
     const group = world.investors.find((candidate) => candidate.id === holder.id);
     if (group) group.cash = round2(group.cash + value);
@@ -393,6 +405,10 @@ export interface DividendResult {
   player: number;
   companies: number;
   investors: number;
+  /** 政府股东取得的股息总额（进入对应城市财政，不计入居民投资收入）。 */
+  cities: number;
+  /** 按城市汇总的政府股东股息。 */
+  cityByCity: Record<string, number>;
   /** 居民投资实体收到的股息总额（按城市，未扣除返还部分）。 */
   investorByCity: Record<string, number>;
   /** 从投资实体资金中扣除并返还给居民可支配收入的部分（按城市）。 */
@@ -420,6 +436,8 @@ export function distributeDividend(
     player: 0,
     companies: 0,
     investors: 0,
+    cities: 0,
+    cityByCity: {},
     investorByCity: {},
     investorDistributionByCity: {},
   };
@@ -447,6 +465,17 @@ export function distributeDividend(
     }
   }
   if (payouts.length === 0) return result;
+  // 先校验所有持有人类型，避免在未知类型上只完成部分入账后抛错。
+  for (const entry of payouts) {
+    if (
+      entry.holder.type !== 'player' &&
+      entry.holder.type !== 'company' &&
+      entry.holder.type !== 'investorGroup' &&
+      entry.holder.type !== 'city'
+    ) {
+      throw new Error(`股息分配遇到未知持有人类型：${String(entry.holder.type)}`);
+    }
+  }
 
   // 以“分”（0.01 信用点）为最小单位分配，使用最大余数法，
   // 保证所有持有人所得之和严格等于企业实际扣除的股息，且结果可复现。
@@ -472,7 +501,8 @@ export function distributeDividend(
     if (entry.value <= 0) continue;
     // 居民投资实体的股息在下面拆分（留存 / 返还），不能先整笔入账再扣减，
     // 否则同一笔钱会同时留在投资账户和进入居民收入。
-    if (entry.holder.type !== 'investorGroup') {
+    // 政府股东的股息直接进入城市财政，并写财政流水；不计入居民投资收入。
+    if (entry.holder.type !== 'investorGroup' && entry.holder.type !== 'city') {
       creditHolderCash(world, entry.holder, entry.value);
     }
     if (entry.holder.type === 'player') {
@@ -489,7 +519,16 @@ export function distributeDividend(
         );
       }
       result.companies = round2(result.companies + entry.value);
-    } else {
+    } else if (entry.holder.type === 'city') {
+      const holderCity = world.cities.find((candidate) => candidate.id === entry.holder.id);
+      if (holderCity) {
+        holderCity.treasury = round2(holderCity.treasury + entry.value);
+        result.cityByCity[holderCity.id] = round2(
+          (result.cityByCity[holderCity.id] ?? 0) + entry.value,
+        );
+        result.cities = round2(result.cities + entry.value);
+      }
+    } else if (entry.holder.type === 'investorGroup') {
       const group = world.investors.find((candidate) => candidate.id === entry.holder.id);
       if (group) {
         // 返还居民的股息必须从实体资金中扣除，剩余才留作投资资金；两者互斥。
@@ -504,9 +543,29 @@ export function distributeDividend(
         result.investorDistributionByCity[group.cityId] = round2(
           (result.investorDistributionByCity[group.cityId] ?? 0) + distribution,
         );
+        result.investors = round2(result.investors + entry.value);
       }
-      result.investors = round2(result.investors + entry.value);
+    } else {
+      // 未知持有人：不改变资金。存档/不变量会拒绝此类记录。
+      throw new Error(`股息分配遇到未知持有人类型：${String(entry.holder.type)}`);
     }
+  }
+
+  // 政府股东的股息按城市汇总为一条财政流水，避免同一笔股权在两个股份类别下重复记录。
+  for (const [cityId, amount] of Object.entries(result.cityByCity)) {
+    if (amount <= 0) continue;
+    recordFiscal(
+      world,
+      {
+        tick,
+        cityId,
+        kind: 'dividendIncome',
+        amount,
+        source: `${company.name} 股息（政府持股）`,
+        companyId: company.id,
+      },
+      config,
+    );
   }
 
   result.total = round2(paidCents / 100);
@@ -540,6 +599,11 @@ export function createFinancingOffer(
   if (!holderExists(world, input.investor)) return { ok: false, error: '出资方无效' };
   if (input.investor.type === 'player' && input.investor.id !== 'player') {
     return { ok: false, error: '出资方无效' };
+  }
+  // 政府通过财政出资创办企业；不通过股票融资要约/二级市场买入（暂定，避免财政资金
+  // 进入没有财政流水的证券交易）。政府已持有的股份仍可分红与投票。
+  if (input.investor.type === 'city') {
+    return { ok: false, error: '城市政府不能作为融资要约出资方（暂定）' };
   }
   // 融资可由企业出资并获得仅分红股份（用户已确认：逐出资方约定权利）；
   // “企业买入必须有投票权”只约束股票市场买入，不约束融资。
@@ -629,6 +693,10 @@ export function placeOrder(world: WorldState, input: OrderInput): { ok: boolean;
   const shareClass = classById(world, input.shareClassId);
   if (!shareClass || shareClass.companyId !== input.companyId) {
     return { ok: false, error: '股份类别无效' };
+  }
+  if (input.holder.type === 'city') {
+    // 政府不通过二级市场买卖股票（暂定）；已有持股仍参与分红与表决。
+    return { ok: false, error: '城市政府不能直接在股票市场下单（暂定）' };
   }
   const shares = Math.round(input.shares);
   if (!Number.isFinite(shares) || shares <= 0) return { ok: false, error: '股数无效' };

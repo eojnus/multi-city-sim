@@ -31,7 +31,7 @@
 - `companies/lifecycle/lifecycle.ts`：三类主体创办、数量与投资者限制、扩产、倒闭清算与记录；`core/initializer.ts` 初始化。
 - `politics/politics.ts`：确定性候选人/领导人、任期与选举、玩家参选/演示身份、领导人行业加成与领域倾向；`politics/electionFunds.ts` 处理参选费用转账。
 - `policies/`：`definitions.ts`（15 项政策元数据）、`query.ts`（只读效果）、`policies.ts`（启动、AI 选择、月度执行、财政支出）；`government/treasury.ts` 是财政流水与支出上限的唯一入口。
-- `transport/network.ts`：政府主导的城内/城际公路铁路、建设、维护与容量；`transport/settlement.ts`：跨城路径的期末统一容量结算与账目记录；`markets/`、`trade/`、`agreements/` 只登记待结算销售，不建立第二套交易。
+- `transport/network.ts`：政府主导的城内/城际公路铁路、建设、维护与容量；`transport/settlement.ts`：跨城路径的期末统一容量结算与账目记录；`markets/`、`trade/`、`agreements/` 只登记待结算销售，不建立第二套交易。验收修复后采用【暂定】“差额退回买方”：买方净支付 = 卖方实得，差额不再无解释消失；最终账务规则仍待用户决定（见 `ACCEPTANCE_FIXES_v0.4.md`）。
 - `labor/workforce.ts`：技能最小状态；`markets/markets.ts` 使用城内配送效率；`production/production.ts` 使用技能、领导人行业加成与重点产业加成。
 - `core/save.ts`：`SAVE_FORMAT_VERSION = 4`，v1→v2→v3→v4 迁移链；新增字段的结构校验与不变量在 `core/invariants.ts`。
 - 全部数值、上限、期限与公式在 `data/config.ts`，均为【暂定】；用户已确认规则仍以上文与讨论文档为准。交付证据见 `docs/development/DELIVERY_REPORT_v0.4.md`。

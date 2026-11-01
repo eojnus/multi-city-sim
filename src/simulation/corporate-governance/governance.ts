@@ -57,6 +57,8 @@ function holderIsValid(world: WorldState, holder: HolderRef): boolean {
       return (world.companies ?? []).some((company) => company.id === holder.id);
     case 'investorGroup':
       return (world.investors ?? []).some((group) => group.id === holder.id);
+    case 'city':
+      return (world.cities ?? []).some((city) => city.id === holder.id);
     default:
       return false;
   }
@@ -75,6 +77,10 @@ function holderLabel(world: WorldState, holder: HolderRef): string {
   if (holder.type === 'investorGroup') {
     const group = (world.investors ?? []).find((candidate) => candidate.id === holder.id);
     return group?.name ?? holder.id;
+  }
+  if (holder.type === 'city') {
+    const city = (world.cities ?? []).find((candidate) => candidate.id === holder.id);
+    return city ? `${city.name}市政府` : holder.id;
   }
   return holder.id;
 }
@@ -375,7 +381,9 @@ export function autoCastVotes(world: WorldState, config: DemoConfig, tick: numbe
           ? 'for' // 居民投资实体偏好现金流（暂定）。
           : holder.type === 'company'
             ? 'against' // 企业股东倾向保留资金（暂定）。
-            : 'abstain';
+            : holder.type === 'city'
+              ? 'abstain' // 政府股东默认弃权，不自动替城市做经营决策（暂定）。
+              : 'abstain';
       castVote(world, motion.id, holder, choice, tick);
     }
   }
