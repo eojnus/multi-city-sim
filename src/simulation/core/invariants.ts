@@ -16,9 +16,16 @@ export interface GoodsAudit {
 
 export function checkInvariants(world: WorldState, audits: GoodsAudit[] = []): string[] {
   const problems: string[] = [];
+  if (!world || !Array.isArray(world.cities) || !Array.isArray(world.companies)) {
+    return ['世界结构无效：cities/companies 不是数组'];
+  }
   let worldPopulation = 0;
 
   for (const city of world.cities) {
+    if (!city || !city.population || !city.publicSector) {
+      problems.push(`${city?.name ?? '未知城市'}: 缺少 population 或 publicSector`);
+      continue;
+    }
     const p = city.population;
     worldPopulation += p.total;
     if (p.total !== p.employed + p.unemployed + p.nonLabor) {
@@ -38,6 +45,10 @@ export function checkInvariants(world: WorldState, audits: GoodsAudit[] = []): s
 
     let allocated = city.publicSector.employees;
     for (const company of world.companies) {
+      if (!company || !company.roles || !company.inventory) {
+        problems.push('企业缺少 roles/inventory');
+        continue;
+      }
       if (company.cityId !== city.id) continue;
       allocated += company.employees;
       if (!Number.isInteger(company.employees) || company.employees < 0) {
@@ -67,6 +78,10 @@ export function checkInvariants(world: WorldState, audits: GoodsAudit[] = []): s
   }
 
   for (const city of world.cities) {
+    if (!city || !city.market) {
+      problems.push(`${city?.name ?? '未知城市'}: 缺少 market`);
+      continue;
+    }
     for (const goodId of GOOD_IDS) {
       const market = city.market[goodId];
       if (!market) {
@@ -99,9 +114,19 @@ export function checkInvariants(world: WorldState, audits: GoodsAudit[] = []): s
     }
   }
 
-  if (world.player.cash < -0.01) problems.push('玩家现金为负');
-  for (const holding of world.player.holdings) {
-    if (holding.shares < 0) problems.push('玩家持股为负');
+  if (!world.player || !Array.isArray(world.player.holdings)) {
+    problems.push('玩家数据缺少 holdings');
+  } else {
+    if (world.player.cash < -0.01) problems.push('玩家现金为负');
+    if (world.player.lastDividend !== undefined && world.player.lastDividend < -0.01) {
+      problems.push('玩家最近分红为负');
+    }
+    if (world.player.dividendsReceived !== undefined && world.player.dividendsReceived < -0.01) {
+      problems.push('玩家累计分红为负');
+    }
+    for (const holding of world.player.holdings) {
+      if (holding.shares < 0) problems.push('玩家持股为负');
+    }
   }
 
   for (const audit of audits) {

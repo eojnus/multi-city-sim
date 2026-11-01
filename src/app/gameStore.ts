@@ -44,6 +44,8 @@ export class GameStore {
   lastSavedAt: string | null = null;
   lastError: string | null = null;
   lastAutoSaveError: string | null = null;
+  autosaveDisabled = false;
+  autosaveDisabledReason: string | null = null;
   layouts: Record<string, CityLayout> = {};
   private listeners = new Set<() => void>();
   private toastId = 0;
@@ -246,13 +248,15 @@ export class GameStore {
     const id = ++this.toastId;
     this.toasts.push({ id, kind, message });
     if (this.toasts.length > 4) this.toasts.shift();
-    window.setTimeout(() => {
+    setTimeout(() => {
       this.toasts = this.toasts.filter((toast) => toast.id !== id);
       this.emit();
     }, kind === 'error' ? 6500 : 4200);
   }
 
   async autosave(): Promise<void> {
+    // 损坏的自动存档会保留原文件，直到玩家显式载入有效存档或开始新世界。
+    if (this.autosaveDisabled) return;
     const text = serializeSave(this.world);
     const result = await this.bridge.write('autosave', text);
     if (result.ok) {
@@ -278,17 +282,28 @@ export class GameStore {
   }
 
   async loadSlot(slot: string): Promise<boolean> {
-    const read = await this.bridge.read(slot);
-    if (!read.ok || !read.text) {
-      this.toast(`读取失败：${read.error ?? '存档不存在'}；当前进度未被覆盖。`, 'error');
+    try {
+      const read = await this.bridge.read(slot);
+      if (!read.ok || !read.text) {
+        this.toast(`读取失败：${read.error ?? '存档不存在'}；当前进度未被覆盖。`, 'error');
+        this.emit();
+        return false;
+      }
+      return this.loadFromText(read.text, slot);
+    } catch (error) {
+      this.toast(`读取失败：${(error as Error).message}；当前进度未被覆盖。`, 'error');
       this.emit();
       return false;
     }
-    return this.loadFromText(read.text, slot);
   }
 
   loadFromText(text: string, sourceLabel = '存档'): boolean {
-    const parsed = parseSave(text);
+    let parsed: ReturnType<typeof parseSave>;
+    try {
+      parsed = parseSave(text);
+    } catch (error) {
+      parsed = { ok: false, error: `存档校验异常：${(error as Error).message}` };
+    }
     if (!parsed.ok || !parsed.world) {
       this.toast(`读取失败：${parsed.error ?? '未知错误'}；当前进度未被覆盖。`, 'error');
       this.emit();
@@ -302,6 +317,10 @@ export class GameStore {
     this.selectedCompanyId = null;
     this.autoRunning = false;
     this.lastError = null;
+    // 玩家显式读取了有效存档，允许自动存档恢复；损坏原文件在此之前一直保留。
+    this.autosaveDisabled = false;
+    this.autosaveDisabledReason = null;
+    this.lastAutoSaveError = null;
     this.rebuildLayouts();
     const date = parsed.save?.savedAt ? new Date(parsed.save.savedAt).toLocaleString('zh-CN') : '未知时间';
     this.lastSavedAt = parsed.save?.savedAt ?? null;
@@ -327,13 +346,22 @@ export class GameStore {
   }
 
   async tryRestoreAutosave(): Promise<boolean> {
-    const read = await this.bridge.read('autosave');
+    let read: Awaited<ReturnType<SaveBridge['read']>>;
+    try {
+      read = await this.bridge.read('autosave');
+    } catch (error) {
+      this.disableAutosave(`读取自动存档失败：${(error as Error).message}`);
+      return false;
+    }
     if (!read.ok || !read.text) return false;
-    const parsed = parseSave(read.text);
+    let parsed: ReturnType<typeof parseSave>;
+    try {
+      parsed = parseSave(read.text);
+    } catch (error) {
+      parsed = { ok: false, error: `存档校验异常：${(error as Error).message}` };
+    }
     if (!parsed.ok || !parsed.world) {
-      this.lastError = parsed.error ?? '自动存档损坏';
-      this.toast(`自动存档损坏：${parsed.error ?? '未知错误'}；已开始新世界。`, 'warning');
-      this.emit();
+      this.disableAutosave(parsed.error ?? '自动存档损坏');
       return false;
     }
     this.simulation = new Simulation(parsed.world);
@@ -341,8 +369,24 @@ export class GameStore {
     this.selectedCityId = this.world.cities[0]?.id ?? null;
     this.view = 'region';
     this.lastSavedAt = parsed.save?.savedAt ?? null;
+    this.autosaveDisabled = false;
+    this.autosaveDisabledReason = null;
+    this.lastAutoSaveError = null;
     this.emit();
     return true;
+  }
+
+  private disableAutosave(reason: string): void {
+    // 不删除、不重命名、不覆盖损坏文件；给玩家保留用其他工具恢复的机会。
+    this.autosaveDisabled = true;
+    this.autosaveDisabledReason = reason;
+    this.lastAutoSaveError = `自动存档已暂停：${reason}`;
+    this.lastError = `自动存档损坏：${reason}`;
+    this.toast(
+      `自动存档损坏：${reason}；已暂停自动写入并保留原文件，当前为新世界。可读取其他存档或手动保存。`,
+      'warning',
+    );
+    this.emit();
   }
 
   resetWorld(): void {
@@ -354,6 +398,9 @@ export class GameStore {
     this.selectedCompanyId = null;
     this.autoRunning = false;
     this.lastError = null;
+    this.autosaveDisabled = false;
+    this.autosaveDisabledReason = null;
+    this.lastAutoSaveError = null;
     this.rebuildLayouts();
     this.toast('已开始新的世界；旧的手动存档仍保留。', 'info');
     void this.autosave();

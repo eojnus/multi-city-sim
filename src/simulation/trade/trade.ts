@@ -3,7 +3,7 @@ import type { DemoConfig } from '../../data/config';
 import { RECIPES } from '../../data/demo-data';
 import { round2 } from '../core/math';
 import { productionTarget } from '../production/production';
-import { ensureLiquidity } from '../companies/credit';
+import { creditAvailable } from '../companies/credit';
 
 /**
  * 点对点跨城市企业贸易。先校验双方城市、商品、库存、需求与资金，
@@ -38,25 +38,43 @@ export function executeTradeRoutes(
     const price = toCity.market[route.good]?.price ?? 0;
     if (price <= 0) continue;
 
+    // 先计算“现金 + 可用信贷”能买到的数量。融资只在最终提交点发生，
+    // 因此资金不足导致交易不成立时不会留下债务或现金变化。
+    const availableCredit = creditAvailable(importer, config);
+    const maxAffordableQty =
+      price > 0
+        ? Math.floor(((Math.max(0, importer.cash) + availableCredit) / price) * 100) / 100
+        : 0;
     let qty = Math.min(
       route.monthlyTarget,
       exporter.inventory[route.good] ?? 0,
       importerNeed,
+      maxAffordableQty,
     );
     qty = Math.floor(qty * 100) / 100;
     if (qty < 1) continue;
-    let value = round2(qty * price);
+    const value = round2(qty * price);
     if (value <= 0) continue;
-    ensureLiquidity(importer, value, config);
-    if (importer.cash < value) {
-      qty = Math.floor((importer.cash / price) * 100) / 100;
-      value = round2(qty * price);
+    const borrowNeeded = round2(Math.max(0, value - importer.cash));
+    if (borrowNeeded > availableCredit + 1e-6) continue;
+
+    // 所有条件都已确认，再提交融资、货物、资金和成交记录。
+    const exporterStock = exporter.inventory[route.good] ?? 0;
+    if (exporterStock < qty || importer.cash + borrowNeeded < value - 1e-6) continue;
+
+    const importerCashBefore = importer.cash;
+    const importerDebtBefore = importer.debt;
+    if (borrowNeeded > 0) {
+      importer.cash = round2(importer.cash + borrowNeeded);
+      importer.debt = round2(importer.debt + borrowNeeded);
     }
-    if (qty < 1) continue;
+    if (importer.cash + 1e-6 < value) {
+      importer.cash = importerCashBefore;
+      importer.debt = importerDebtBefore;
+      continue;
+    }
 
     // ---- 原子提交 ----
-    const exporterStock = exporter.inventory[route.good] ?? 0;
-    if (exporterStock < qty || importer.cash < value) continue;
     exporter.inventory[route.good] = round2(exporterStock - qty);
     importer.inventory[route.good] = round2((importer.inventory[route.good] ?? 0) + qty);
     exporter.cash = round2(exporter.cash + value);

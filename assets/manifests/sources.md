@@ -4,7 +4,7 @@
 
 | 资源 | 用途 | 官方来源 | 实际状态 | 运行时路径 |
 | --- | --- | --- | --- | --- |
-| Rasak Modern Tilesets | 计划中的首选城市视觉 | https://rasak.itch.io/rasak-modern | **未下载（blocked-manual-download）**：itch.io “Name Your Own Price” 需人工完成购买/下载流程；未绕过、未伪造。手动步骤见 `asset-sources.json` 与 `ASSET_REPORT.md` 第 7 节。 | 无 |
+| Rasak Modern Tilesets | 计划中的首选城市视觉 | https://rasak.itch.io/rasak-modern | **未下载（blocked-manual-download）**：itch.io “Name Your Own Price” 需人工完成购买/下载流程；未绕过、未伪造。2026-11-01 复核页面为 HTTP 200，文件 `Rasaks_Modern_Tileset.rar` 15 MB，页面标签 48×48 / RPG Maker MV/MZ / orthogonal；官方截图呈现俯视/3/4 建筑立面、水平垂直道路，**不是菱形等距**。手动步骤见 `asset-sources.json` 与 `ASSET_REPORT.md` 第 7 节。 | 无 |
 | Kenney UI Pack (2.0) | 界面按钮、图标、字体 | https://kenney.nl/assets/ui-pack | 已下载并核验：CC0 1.0，包内 License.txt 原文已保留；4 个按钮、4 个图标/分隔线、Kenney Future 字体已进入运行时。 | `public/assets/ui/` |
 | Kenney Roguelike Modern City (2.0) | 独立备用城市方案（当前城市地图实际使用） | https://kenney.nl/assets/roguelike-modern-city | 已下载并核验：CC0 1.0；`tilemap_packed.png` 592×448，16×16，37×28=1036 tiles，**实测 spacing=0、margin=0**（Tilesheet.txt 的 1px 描述属于未分发的 `tilemap.png`）。作为当前唯一城市图块体系。 | `public/assets/city/kenney-modern-city-tilemap.png` |
 | Modern City Extension | Kenney 备用体系扩展 | https://opengameart.org/content/modern-city-extension | 已下载并核验尺寸 896×736；CC0 声明；状态 `downloaded-verified-reference-only`，**未复制进运行时、未混入主场景**。 | 仅 `assets/source-packs/`（gitignored） |

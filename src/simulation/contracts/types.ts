@@ -232,6 +232,10 @@ export interface PlayerState {
   homeCityId: string;
   cash: number;
   holdings: PlayerHolding[];
+  /** 最近一次月度结算中玩家实际收到的股息（演示字段，旧存档可缺省）。 */
+  lastDividend?: number;
+  /** 至今累计收到的股息，便于界面在日志被裁剪后仍可见（旧存档可缺省）。 */
+  dividendsReceived?: number;
   note: string;
 }
 

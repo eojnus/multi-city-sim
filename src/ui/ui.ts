@@ -345,6 +345,13 @@ export class GameUI {
 
   private syncSaveNote(): void {
     if (!this.saveNote || !this.saveDot) return;
+    if (this.store.autosaveDisabled) {
+      this.saveNote.textContent = '自动存档已暂停';
+      this.saveNote.title = `自动存档已暂停：${this.store.autosaveDisabledReason ?? '检测到损坏文件'}；原文件保留，可读取其他存档或手动保存。`;
+      this.saveDot.classList.add('is-error');
+      this.saveDot.classList.remove('is-pending');
+      return;
+    }
     const error = this.store.lastAutoSaveError;
     if (this.resetSavePending && !error && this.store.lastSavedAt === this.resetSaveStamp) {
       this.saveNote.textContent = '新世界 · 尚未自动存档';

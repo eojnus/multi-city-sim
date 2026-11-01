@@ -203,6 +203,8 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
       homeCityId: config.player.homeCityId,
       cash: config.player.startingCash,
       holdings: [],
+      lastDividend: 0,
+      dividendsReceived: 0,
       note: config.player.note,
     },
     history: [],

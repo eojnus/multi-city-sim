@@ -847,6 +847,7 @@ export function renderCompanyDetail(
               <tr><td>利息</td><td>${money(lastMonth.interestPaid)}</td></tr>
               <tr><td>公司税</td><td>${money(lastMonth.corporateTax)}</td></tr>
               <tr><td>股息</td><td>${money(lastMonth.dividendsPaid)}</td></tr>
+              <tr><td>其中玩家</td><td title="按本月实际股息 × 当前持股比例估算；实际入账见事件日志">${money(lastMonth.dividendsPaid * stake)}</td></tr>
               <tr><td>出口</td><td>${qty(lastMonth.exported)} 单位</td></tr>
               <tr class="total"><td>利润</td><td class="${signClass(lastMonth.profit)}">${signedMoney(lastMonth.profit)}</td></tr>
             </tbody>
@@ -965,6 +966,7 @@ export function renderRightCity(store: GameStore, state: PanelState): string {
 
 export function renderLogDock(store: GameStore, collapsed: boolean): string {
   const totals = worldTotals(store.world, store.playerNetWorth);
+  const lastDividend = store.world.player.dividendsReceived ?? store.world.player.lastDividend ?? 0;
   const logs = store.world.log.slice(-14).reverse();
   const history = store.world.history.slice(-18).map((point) => point.gdp);
   return `
@@ -995,6 +997,7 @@ export function renderLogDock(store: GameStore, collapsed: boolean): string {
         <div class="snap"><span>失业</span><b title="失业率 ${pct(totals.unemploymentRate)}">${num(totals.unemployed)}</b></div>
         <div class="snap is-gdp"><span>世界 GDP</span><b>${money(totals.gdp)}</b></div>
         <div class="snap is-net"><span>玩家净值</span><b>${money(totals.netWorth)}</b></div>
+        <div class="snap is-player" title="玩家至今累计实际收到的股息（不是企业股息总额）"><span>累计玩家分红</span><b>${money(lastDividend)}</b></div>
       </div>
       <ol class="log-list" data-scroll="log" aria-label="最近事件日志">
         ${

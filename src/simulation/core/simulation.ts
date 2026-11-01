@@ -28,6 +28,7 @@ import { round2 } from './math';
 import { deepClone } from './save';
 
 function resetCompanyMonth(world: WorldState): void {
+  world.player.lastDividend = 0;
   for (const company of world.companies) {
     company.lastMonth = {
       revenue: 0,

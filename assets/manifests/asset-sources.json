@@ -12,10 +12,10 @@
       "downloadedAt": null,
       "verifiedAt": null,
       "localPath": null,
-      "license": "unknown-not-verified",
+      "license": "page-text-only; bundle LICENSE/README not verified (not downloaded)",
       "licenseVerified": false,
       "runtimeUsed": false,
-      "notes": "NOT downloaded. Automated retrieval is not possible without completing the itch.io purchase/download flow, and that flow must not be bypassed. No Rasak image, screenshot or derived file exists in this repository; nothing from Rasak is shipped or referenced at runtime.",
+      "notes": "Re-checked official page on 2026-11-01: page loads (HTTP 200), but download still requires the manual itch.io purchase/Name-Your-Own-Price flow. No archive, tile image, screenshot, or derived asset is retained in this repository. Package-level license/spec/views cannot be verified until a human obtains the .rar.",
       "manualSteps": [
         "1. Open https://rasak.itch.io/rasak-modern in a browser.",
         "2. Click 'Download Now'.",
@@ -26,7 +26,32 @@
         "7. Manually confirm the real tile specification (claimed 48x48) by reading the pack README and measuring a sample tile; do not trust the claim alone.",
         "8. Only after license + spec are confirmed, add entries to assets/manifests/asset-catalog.json and copy an approved subset into public/assets/.",
         "9. Do not publish the original Rasak images to a public repository without permission from the author."
-      ]
+      ],
+      "lastCheckedAt": "2026-11-01",
+      "officialPageObservation": {
+        "httpStatus": 200,
+        "pageUpdated": "2026-10-27T15:13:00Z",
+        "price": "Name Your Own Price (min 0)",
+        "downloadControl": "Download Now -> /purchase",
+        "listedFile": "Rasaks_Modern_Tileset.rar (15 MB)",
+        "tags": [
+          "2D",
+          "48x48",
+          "asset-pack",
+          "modern",
+          "pixel-art",
+          "RPG Maker MV",
+          "RPG Maker MZ",
+          "tileset"
+        ],
+        "description": "over 40 modern tilesets; commercial/non-commercial use and editing allowed with credit to Rasak"
+      },
+      "viewAssessment": {
+        "grid": "orthogonal (square) grid, 48x48 per page tags",
+        "projection": "top-down / 3/4 front-facing RPG Maker-style buildings; not diamond isometric",
+        "compatibility": "Requires full tileset/map-scale replacement; not compatible with current 16x16 Kenney tile grid or its 44x32 layout without re-authoring.",
+        "recommendation": "If adopted, use ordinary oblique (斜俯视) orthogonal projection, not diamond isometric. Do not mix with Kenney in the same city scene. Decision deferred; no map rework in this fix."
+      }
     },
     {
       "sourceId": "kenney-ui-pack",

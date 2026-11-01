@@ -15,7 +15,8 @@ export function settleGovernment(
 ): void {
   for (const city of [...world.cities].sort((a, b) => a.id.localeCompare(b.id))) {
     const privateWages = finance.privateWagesByCity[city.id] ?? 0;
-    const dividends = finance.dividendsByCity[city.id] ?? 0;
+    // finance.dividendsByCity 已扣除玩家按持股取得的部分，避免重复计入居民收入。
+    const residentDividends = finance.dividendsByCity[city.id] ?? 0;
     const corporateTax = finance.corporateTaxByCity[city.id] ?? 0;
     const publicGross = round2(
       city.publicSector.employees * city.publicSector.wageRate,
@@ -45,7 +46,7 @@ export function settleGovernment(
       privateWages * (1 - city.incomeTaxRate) +
         publicGross * (1 - city.incomeTaxRate) +
         benefitsPaid +
-        dividends,
+        residentDividends,
     );
 
     city.treasury = round2(treasury);

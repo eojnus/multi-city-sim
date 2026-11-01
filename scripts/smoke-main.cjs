@@ -132,6 +132,32 @@ app.whenReady().then(async () => {
   const cashAfterInvest = await read(win, 'window.__lanwan.store.world.player.cash');
   const holdingAfterInvest = await read(win, 'window.__lanwan.store.world.player.holdings.length');
 
+  // 持股份红：推进 12 个月，检查玩家现金与分红事件日志
+  const dividendEvidence = await win.webContents.executeJavaScript(`(() => {
+    const s = window.__lanwan.store;
+    const before = s.world.player.cash;
+    let firstDividend = null;
+    for (let i = 0; i < 12; i++) {
+      s.tick();
+      if (!firstDividend && (s.world.player.lastDividend ?? 0) > 0) {
+        firstDividend = { date: s.dateLabel, amount: s.world.player.lastDividend, logs: s.world.log.filter((entry) => entry.kind === 'player' && entry.message.includes('分红')).slice(-1) };
+      }
+    }
+    const logs = s.world.log.filter((entry) => entry.kind === 'player' && entry.message.includes('分红'));
+    return {
+      before,
+      after: s.world.player.cash,
+      firstDividend,
+      lastDividend: s.world.player.lastDividend ?? 0,
+      dividendsReceived: s.world.player.dividendsReceived ?? 0,
+      dividends: logs.map((entry) => ({ tick: entry.tick, message: entry.message })),
+      holding: s.world.player.holdings.map((entry) => ({ companyId: entry.companyId, shares: entry.shares })),
+      date: s.dateLabel,
+    };
+  })()`);
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  const dividendShot = await capture(win, 'smoke-player-dividend.png');
+
   // 自动运行开关
   const clickedPause = await click(win, '[data-testid="btn-pause"]');
   await new Promise((resolve) => setTimeout(resolve, 300));
@@ -185,6 +211,44 @@ app.whenReady().then(async () => {
   const smallShot = await capture(win, 'smoke-small-window.png');
   const smallOverflow = await read(win, `({ w: innerWidth, scrollW: document.documentElement.scrollWidth, overflowX: document.documentElement.scrollWidth > innerWidth + 2 })`);
 
+  // 损坏自动存档：新窗口读取，不覆盖原文件
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  const autosavePath = path.join(savesDir, 'autosave.json');
+  const manualPath = path.join(savesDir, 'manual-1.json');
+  const corruptSave = JSON.parse(fs.readFileSync(manualPath, 'utf8'));
+  delete corruptSave.world.cities[0].publicSector;
+  fs.writeFileSync(autosavePath, JSON.stringify(corruptSave), 'utf8');
+  const corruptBytesBefore = fs.readFileSync(autosavePath, 'utf8');
+  const win2 = new BrowserWindow({
+    width: 1200, height: 820, show: true, backgroundColor: '#08111d',
+    webPreferences: {
+      preload: path.join(root, 'dist/electron/preload.js'),
+      nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false,
+    },
+  });
+  await win2.loadFile(path.join(root, 'dist/renderer/index.html'));
+  const corruptReady = await waitFor(win2, 'window.__lanwan && window.__lanwan.store', 15000);
+  await new Promise((resolve) => setTimeout(resolve, 1800));
+  const corruptStartup = await read(win2, `(() => ({
+    ready: Boolean(window.__lanwan?.store),
+    autosaveDisabled: window.__lanwan.store.autosaveDisabled,
+    reason: window.__lanwan.store.autosaveDisabledReason,
+    note: document.querySelector('#hud-save-note')?.textContent ?? null,
+    bodyHasWarning: document.body.innerText.includes('自动存档损坏') || document.body.innerText.includes('自动存档已暂停'),
+    date: window.__lanwan.store.dateLabel,
+  }))()`);
+  await click(win2, '[data-testid="btn-tick"]');
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  const corruptBytesAfter = fs.readFileSync(autosavePath, 'utf8');
+  const corruptAfterTick = await read(win2, `({
+    autosaveDisabled: window.__lanwan.store.autosaveDisabled,
+    date: window.__lanwan.store.dateLabel,
+    bytesPreserved: false,
+  })`);
+  const corruptShot = await capture(win2, 'smoke-corrupt-autosave.png');
+  corruptAfterTick.bytesPreserved = corruptBytesBefore === corruptBytesAfter;
+  win2.destroy();
+
   console.log(JSON.stringify({
     ready,
     uiReady,
@@ -218,11 +282,13 @@ app.whenReady().then(async () => {
       selectedDistrict,
       probeResults,
     },
+    dividendEvidence,
     saveResult,
     reload: { reloadedReady, dateBeforeReload, dateAfterReload, restoredToast },
     smallOverflow,
+    corruptStartup: { ...corruptStartup, ready: corruptReady, afterTick: corruptAfterTick, bytesPreserved: corruptBytesBefore === corruptBytesAfter },
     errors,
-    screenshots: [regionShot, cityShot, cityAfterShot, modalShot, buildingShot, smallShot],
+    screenshots: [regionShot, cityShot, cityAfterShot, modalShot, buildingShot, smallShot, dividendShot, corruptShot],
   }, null, 2));
   win.destroy();
   app.quit();

@@ -2279,7 +2279,7 @@ a {
 
 .snapshot-strip {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 2px;
   padding: 4px;
   border: 1px solid rgba(124, 196, 205, 0.11);
@@ -2325,6 +2325,10 @@ a {
 
 .snap.is-net b {
   color: var(--teal);
+}
+
+.snap.is-player b {
+  color: var(--gold);
 }
 
 .log-list {

@@ -191,3 +191,24 @@ modern-city-extension-city_extension.png 86204  558d3c65248971e977832d4cc364ecf3
 - Rasak 需人工走完 itch.io 流程后再核验与接入。
 - Pulse 若要评估，需先做许可核验。
 - 若启用 Modern City Extension，需要一次性替换城市图块体系并同步三个 manifest。
+
+## 12. Rasak 复核与视角评估（2026-11-01，验收修复轮次）
+
+**取得状态：仍未下载。** 官方页面 https://rasak.itch.io/rasak-modern 在 2026-11-01 复核为 HTTP 200；页面显示：
+
+- Updated：2026-10-27 15:13 UTC
+- 价格：**Name Your Own Price**（最低 0），点击 `Download Now` 进入 `/purchase`
+- 文件：`Rasaks_Modern_Tileset.rar`（15 MB）
+- 标签：2D、**48×48**、asset pack、modern、pixel art、**RPG Maker MV / MZ**、tileset
+- 作者说明：超过 40 个现代 tileset；允许商业/非商业使用与编辑，需署名 Rasak
+- 这些是**页面文字**，不等于随包 LICENSE/README 已核验；**包级条款、图集尺寸、间距、图块网格仍未核验**。
+
+**下载阻塞与人工步骤：** 同第 7 节；itch.io 的 Name Your Own Price 购买/下载流程需要人工完成。未绕过、未自动提交任何表单，也没有保留任何 Rasak 图片、截图或派生文件。原始 .rar 仍需人工获取后放入 gitignored 的 `assets/source-packs/rasak-modern/`，再核验包内许可与规格。
+
+**视角判断（仅从官方页面截图与标签，不修改地图）：**
+
+- 官方截图呈现**正交方格网格**、水平/垂直道路、俯视/3/4 建筑立面（RPG Maker 风格），**不是菱形等距（diamond isometric）**。
+- 与当前 Kenney 16×16 顶视图块体系不兼容：如果采用 Rasak，需要整体替换为 48×48 的正交图块、重排 44×32 城市布局、重设相机与交互尺度；不能与 Kenney 混搭。
+- 若未来采用“斜俯视”，**普通斜俯视（orthogonal 2.5D / 3/4 立面）比菱形等距更接近 Rasak 的素材形态**；菱形等距需要另一套真正的等距图块和坐标/碰撞/点击体系。当前先保留 Kenney 顶视方案，不擅自重做地图视角。
+
+**结论：** 首版仍使用已核验的 Kenney 备用体系；Rasak 的“已取得/已核验/已集成”均不能声称。视角选型需架构负责人决定，建议在人工作品到手并检查完整图块后再做。

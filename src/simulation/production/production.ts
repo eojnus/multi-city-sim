@@ -45,15 +45,20 @@ export function runInputPurchasing(
 
     const target = productionTarget(company);
     if (target <= 0) continue;
+    const shortages = recipe.inputs.map((input) => {
+      const required = round2(target * input.qty);
+      const inStock = company.inventory[input.good] ?? 0;
+      return { input, shortage: Math.max(0, round2(required - inStock)) };
+    });
+    if (shortages.every((entry) => entry.shortage <= 0)) continue;
+
     const wage = monthlyWageBill(company);
+    // 只有确实需要采购时才申请营运资金信贷，避免“无需采购却新增债务”。
     ensureLiquidity(company, wage * 1.5, config);
     const wageReserve = wage * config.company.wageReserveMonths * 0.5;
     let budget = Math.max(0, company.cash - wageReserve);
 
-    for (const input of recipe.inputs) {
-      const required = round2(target * input.qty);
-      const inStock = company.inventory[input.good] ?? 0;
-      const shortage = Math.max(0, round2(required - inStock));
+    for (const { input, shortage } of shortages) {
       if (shortage <= 0 || budget <= 0) continue;
       const price = city.market[input.good]?.price ?? 1;
       const affordable = Math.min(shortage, budget / Math.max(0.01, price));
