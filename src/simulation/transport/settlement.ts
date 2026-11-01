@@ -33,7 +33,7 @@ import { intercityTradeSupportPayment } from '../policies/policies';
  */
 /**
  * 把跨城交易的差额退回买方（暂定方案）。
- * 企业买方退回现金并冲减本月采购支出；居民买方退回城市居民可支配收入并冲减消费支出。
+ * 企业买方退回现金并冲减本月采购支出；居民退款交给财政结算合入下期可用资金。
  * 只处理资金账目，不改变库存或交易数量。
  */
 function refundIntercityBuyer(
@@ -41,13 +41,12 @@ function refundIntercityBuyer(
   sale: PendingIntercitySale,
   amount: number,
   ledgers: WorldLedgers,
-): void {
+): number {
   const refund = round2(Math.max(0, amount));
-  if (refund <= 0) return;
+  if (refund <= 0) return 0;
   if (sale.buyerCompanyId === 'households') {
     const buyerCity = world.cities.find((city) => city.id === sale.toCityId);
     if (buyerCity) {
-      buyerCity.householdIncomeLastMonth = round2(buyerCity.householdIncomeLastMonth + refund);
       buyerCity.lastMonth.consumerSpend = round2(
         Math.max(0, buyerCity.lastMonth.consumerSpend - refund),
       );
@@ -56,14 +55,15 @@ function refundIntercityBuyer(
     if (ledger) {
       ledger.spend = round2(Math.max(0, ledger.spend - refund));
     }
-    return;
+    return buyerCity ? refund : 0;
   }
   const buyerCompany = world.companies.find((company) => company.id === sale.buyerCompanyId);
-  if (!buyerCompany) return;
+  if (!buyerCompany) return 0;
   buyerCompany.cash = round2(buyerCompany.cash + refund);
   buyerCompany.lastMonth.inputCost = round2(
     Math.max(0, buyerCompany.lastMonth.inputCost - refund),
   );
+  return 0;
 }
 
 export function settleTransportMonth(
@@ -71,7 +71,7 @@ export function settleTransportMonth(
   config: DemoConfig,
   log: LogEntry[],
   ledgers: WorldLedgers,
-): void {
+): Record<string, number> {
   const pending = [...world.transport.pendingSales].sort(
     (a, b) =>
       a.corridorKey.localeCompare(b.corridorKey) ||
@@ -93,6 +93,13 @@ export function settleTransportMonth(
   let freightSubsidy = 0;
   let totalDemand = 0;
   let totalCapacity = 0;
+  const householdRefunds: Record<string, number> = {};
+  const refundBuyer = (sale: PendingIntercitySale, amount: number): void => {
+    const residentRefund = refundIntercityBuyer(world, sale, amount, ledgers);
+    if (residentRefund > 0) {
+      householdRefunds[sale.toCityId] = round2((householdRefunds[sale.toCityId] ?? 0) + residentRefund);
+    }
+  };
 
   for (const key of [...groups.keys()].sort((a, b) => a.localeCompare(b))) {
     const sales = groups.get(key)!;
@@ -127,7 +134,7 @@ export function settleTransportMonth(
           kind: 'warning',
           message: `跨城销售结算失败：卖方 ${sale.sellerCompanyId} 已不存在，${gross.toFixed(0)} 付款已退回买方。`,
         });
-        refundIntercityBuyer(world, sale, gross, ledgers);
+        refundBuyer(sale, gross);
         trades.push({
           tick: world.time.tick,
           path: sale.path,
@@ -158,7 +165,7 @@ export function settleTransportMonth(
       // 【暂定】容量不足时把差额退回买方：买方此前按原价付款，期末净支付应等于卖方所得。
       // 不向卖方额外扣款，也不把差额变成政府/运输方收入。
       const buyerRefund = loss;
-      refundIntercityBuyer(world, sale, buyerRefund, ledgers);
+      refundBuyer(sale, buyerRefund);
 
       // 跨城贸易支持：财政补偿卖方该笔容量损失（不是罚款，也不是凭空收入）。
       let subsidy = 0;
@@ -238,7 +245,7 @@ export function settleTransportMonth(
     intracity,
     trades,
     note:
-      '城际容量按城市对期末统一核算；买方付款不变，卖方所得按容量比例减少，差额记为收益损失（暂定方案）。',
+      '城际容量按城市对期末统一核算；卖方所得按容量比例减少，差额暂定退回买方。',
   };
   world.transport.pendingSales = [];
 
@@ -250,4 +257,5 @@ export function settleTransportMonth(
       message: `跨城运输容量不足：${overloaded.length} 条城市联系出现收益损失，合计 ${lossTotal.toFixed(0)}${freightSubsidy > 0 ? `（贸易支持补偿 ${freightSubsidy.toFixed(0)}）` : ''}。`,
     });
   }
+  return householdRefunds;
 }

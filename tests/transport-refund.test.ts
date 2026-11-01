@@ -12,6 +12,10 @@ import { settleTransportMonth } from '../src/simulation/transport/settlement';
 import { advanceTransportConstruction, startCorridorUpgrade } from '../src/simulation/transport/network';
 import { parseSave, serializeSave } from '../src/simulation/core/save';
 import { checkInvariants } from '../src/simulation/core/invariants';
+import { settleGovernment } from '../src/simulation/government/fiscal';
+import { collectInvestableFunds } from '../src/simulation/investors/investors';
+import { runConsumerMarket } from '../src/simulation/markets/consumer';
+import { appointPlayerMayor } from '../src/simulation/politics/politics';
 
 const PRICE = 101.6;
 
@@ -74,8 +78,8 @@ function contractSetup() {
   return { world, seller, buyer };
 }
 
-function settle(world: WorldState, ledgers = createWorldLedgers(world)): void {
-  settleTransportMonth(world, DEMO_CONFIG, [], ledgers);
+function settle(world: WorldState, ledgers = createWorldLedgers(world)): Record<string, number> {
+  return settleTransportMonth(world, DEMO_CONFIG, [], ledgers);
 }
 
 /** 手工交易不会经过月度 finalizeMarkets；在断言不变量前同步期末库存缓存。 */
@@ -302,22 +306,65 @@ describe('修复三：跨城超载结算的买卖双方资金流', () => {
       DEMO_CONFIG,
     );
     expect(purchase.qty).toBeGreaterThan(0);
-    settle(world, ledgers);
+    const refunds = settle(world, ledgers);
     const trade = world.transport.lastMonth.trades[0]!;
     expect(trade.path).toBe('householdPurchase');
     expect(trade.buyerCompanyId).toBe('households');
     expect(trade.grossValue).toBeCloseTo(purchase.spend, 2);
     expect(trade.sellerProceeds).toBeCloseTo(purchase.spend * (1 - trade.penaltyRate), 2);
     expect(trade.buyerRefund).toBeCloseTo(purchase.spend - trade.sellerProceeds, 2);
-    expect(city.householdIncomeLastMonth).toBeCloseTo(
-      100_000 + (trade.buyerRefund ?? 0),
-      2,
-    );
+    expect(refunds.lanport).toBeCloseTo(trade.buyerRefund!, 2);
     expect(city.lastMonth.consumerSpend).toBeCloseTo(
       Math.max(0, 10_160 - (trade.buyerRefund ?? 0)),
       2,
     );
     expect(seller.cash).toBeCloseTo(trade.sellerProceeds, 2);
+    const control = structuredClone(world);
+    const finance = {
+      investorDividendsByCity: {}, investorDistributionByCity: {}, cityDividendsByCity: {},
+      dividendsByCity: {}, playerDividends: 0, playerDividendsByCompany: {},
+      corporateTaxByCity: {}, privateWagesByCity: {}, wageArrears: 0,
+    };
+    settleGovernment(world, finance, DEMO_CONFIG, [], refunds);
+    settleGovernment(control, finance, DEMO_CONFIG, []);
+    const controlCity = control.cities.find((entry) => entry.id === 'lanport')!;
+    expect(city.householdIncomeLastMonth - controlCity.householdIncomeLastMonth).toBeCloseTo(trade.buyerRefund!, 2);
+    expect(city.lastMonth.householdIncome).toBe(controlCity.lastMonth.householdIncome);
+    collectInvestableFunds(world, DEMO_CONFIG, []);
+    collectInvestableFunds(control, DEMO_CONFIG, []);
+    const availableDifference = city.householdIncomeLastMonth - controlCity.householdIncomeLastMonth;
+    const investmentDifference = city.lastMonth.investableContribution - controlCity.lastMonth.investableContribution;
+    expect(availableDifference + investmentDifference).toBeCloseTo(trade.buyerRefund!, 2);
+  });
+
+  it('居民退款经过完整月度结算与存档后仍进入下期可用预算，且不计为新收入', () => {
+    const config = DEMO_CONFIG;
+    const sim = Simulation.create(config);
+    const world = sim.state;
+    const city = world.cities.find((entry) => entry.id === 'lanport')!;
+    expect(appointPlayerMayor(world, city.id).ok).toBe(true);
+    const seller = world.companies.find((entry) => entry.id === 'gf-grain')!;
+    for (const company of world.companies) company.inventory.grain = 0;
+    seller.inventory.grain = 1_000;
+    city.market.grain.price = PRICE;
+    setCapacity(world, 0);
+    const ledgers = createWorldLedgers(world);
+    const purchase = executeIntercityPurchase(world, city, ledgers.lanport!, 'grain', 100, 10_160, { consumer: true }, config);
+    expect(purchase.qty).toBeGreaterThan(0);
+    syncMarketStock(world);
+    const tick = sim.tick();
+    expect(tick.ok).toBe(true);
+    const refunds = world.transport.lastMonth.trades
+      .filter((trade) => trade.buyerCompanyId === 'households' && trade.toCityId === city.id)
+      .reduce((sum, trade) => sum + (trade.buyerRefund ?? 0), 0);
+    expect(refunds).toBeGreaterThan(0);
+    expect(city.householdIncomeLastMonth + city.lastMonth.investableContribution)
+      .toBeCloseTo(city.lastMonth.householdIncome + refunds, 2);
+    const restored = parseSave(serializeSave(world));
+    expect(restored.ok, restored.error).toBe(true);
+    const restoredCity = restored.world!.cities.find((entry) => entry.id === city.id)!;
+    const nextBudget = runConsumerMarket(restored.world!, restoredCity, createWorldLedgers(restored.world!)[city.id]!, config).budget;
+    expect(nextBudget).toBeCloseTo(city.householdIncomeLastMonth * config.consumer.propensity, 2);
   });
 
   it('读档时仍未结算的跨城交易按新规则结算，旧存档不会被静默改写', () => {

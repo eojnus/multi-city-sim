@@ -16,6 +16,7 @@ export function settleGovernment(
   finance: FinanceResult,
   config: DemoConfig,
   log: LogEntry[],
+  householdRefunds: Readonly<Record<string, number>> = {},
 ): void {
   for (const city of [...world.cities].sort((a, b) => a.id.localeCompare(b.id))) {
     const privateWages = finance.privateWagesByCity[city.id] ?? 0;
@@ -82,7 +83,8 @@ export function settleGovernment(
     );
 
     city.treasury = round2(treasury);
-    city.householdIncomeLastMonth = householdIncome;
+    // 退款不是新增收入，但应进入下期可支配资金，不能被本月收入覆盖。
+    city.householdIncomeLastMonth = round2(householdIncome + (householdRefunds[city.id] ?? 0));
     city.lastMonth = {
       ...city.lastMonth,
       householdIncome,

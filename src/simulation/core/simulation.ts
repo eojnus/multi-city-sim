@@ -232,7 +232,7 @@ export class Simulation {
       this.state.lastTick.externalExports = externalExports;
 
       // 11. 跨城运输结算：统一按城市对计算容量惩罚，卖方所得在此时入账。
-      settleTransportMonth(this.state, this.config, logs, ledgers);
+      const householdRefunds = settleTransportMonth(this.state, this.config, logs, ledgers);
 
       // 12. 价格与市场统计
       finalizeMarkets(this.state, ledgers, this.config);
@@ -250,7 +250,7 @@ export class Simulation {
       openDividendPolicyMotion(this.state, this.config, this.state.time.tick);
 
       // 15. 城市财政与居民收入（供下一月消费）
-      settleGovernment(this.state, finance, this.config, logs);
+      settleGovernment(this.state, finance, this.config, logs, householdRefunds);
       for (const city of this.state.cities) recordMigrationReports(this.state, city);
       this.collectMayorNotices(logs);
 
