@@ -3,6 +3,7 @@ dist/
 out/
 release/
 coverage/
+artifacts/
 .env
 .env.*
 *.log
