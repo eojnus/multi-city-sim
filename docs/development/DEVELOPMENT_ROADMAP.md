@@ -8,7 +8,7 @@
 
 - 技术方向已确定：TypeScript + Phaser + Electron；地图表现与人口、经济等模拟规则分离。
 - 已有一版可运行原型：三座城市的区域地图、可进入的城市街区、时间推进、人口和企业、商品生产与市场、跨城贸易、简化 GDP、玩家注资与分红、正常存读档。
-- 当前可运行原型位于 `C:\CODING-worktrees\first-playable`，分支 `feature/first-playable`；截至本次验收提交为 `575fc20`。`C:\CODING` 当前为 `main`，`main` 与 `develop` 仍停留在初始项目资料，**尚未合并原型**。
+- 当前可运行原型位于 `C:\CODING-worktrees\first-playable`，分支 `feature/first-playable`；截至本次验收提交为 `575fc20`。`C:\CODING` 的 `main` 已保存共同计划，`develop` 仍为初始基线；两者**均尚未合并原型代码**。新机制开发使用 `C:\CODING-worktrees\mechanisms-foundation`，分支 `feature/mechanisms-foundation`，以初版和已确认计划为基础。
 - 2026-11-01 复验：构建及 21 项自动测试通过；桌面地图、注资、时间推进、正常存读档及损坏 JSON 数据中的缺字段情形已检查；固定演示世界额外推进 240 个月时守恒检查未报错。这些结果不代表所有场景或经济平衡已经完成。
 - 目前城市场景使用 Kenney 备用资源和俯视风格；Kenney UI 已集成。Rasak 主资源尚未取得、核验或集成。
 - 科技、政治、房地产目前主要为初始状态展示；国家、军事、外交等系统不在当前原型范围。
