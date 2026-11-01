@@ -36,6 +36,8 @@ export interface PlayerNoticeInput {
   priority?: 'normal' | 'important';
   companyId?: string;
   cityId?: string;
+  /** vote 通知可携带议案 ID，以登记日快照判断玩家是否真的有权投票。 */
+  motionId?: string;
   title: string;
   body: string;
 }
@@ -89,6 +91,20 @@ export function playerControlsCompany(world: WorldState, companyId: string): boo
   );
 }
 
+/** 玩家在某议案登记日快照中的投票权股数；无议案或不在快照内为 0。 */
+function motionEligibilityForPlayer(
+  world: WorldState,
+  motionId: string,
+  companyId: string,
+): number {
+  const motion = (world.governance?.motions ?? []).find((entry) => entry.id === motionId);
+  if (!motion || motion.companyId !== companyId) return 0;
+  const entry = (motion.eligible ?? []).find(
+    (candidate) => candidate.holder.type === 'player' && candidate.holder.id === 'player',
+  );
+  return entry?.shares ?? 0;
+}
+
 function companyAudienceVisible(
   world: WorldState,
   config: DemoConfig,
@@ -97,17 +113,21 @@ function companyAudienceVisible(
 ): boolean {
   const threshold = config.notifications.majorStakeThreshold;
   switch (input.kind) {
-    case 'vote':
-      // 无投票权持有人不收到表决通知。
+    case 'vote': {
+      // 有议案时以登记日快照为准（卖出后仍可投票、买入后不获得本次票权）；
+      // 没有议案信息时退化为“当前持有投票权股份”。
+      if (input.motionId) {
+        return motionEligibilityForPlayer(world, input.motionId, companyId) > 0;
+      }
       return playerVotingSharesOf(world, companyId) > 0;
+    }
     case 'dividend':
       // 任意一类股份（含仅分红）都可收到分红通知。
       return playerStakeOf(world, companyId) > 0;
     case 'major':
-      if (playerStakeOf(world, companyId) >= threshold) return true;
-      if (playerControlsCompany(world, companyId)) return true;
-      // 控制权/董事会变化等“重要”事件：有投票权的少量持股人也可知情。
-      return input.priority === 'important' && playerVotingSharesOf(world, companyId) > 0;
+      // 少量持股（无论有投票权还是仅分红）都应获知企业重大变化；
+      // 5% 阈值只约束日常经营/融资类信息，不约束重大变化。
+      return playerStakeOf(world, companyId) > 0 || playerControlsCompany(world, companyId);
     case 'market':
     case 'agreement':
       return (

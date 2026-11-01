@@ -282,6 +282,14 @@ function checkGovernance(world: WorldState): string[] {
   const problems: string[] = [];
   if (!world.governance) return ['世界缺少 governance 数据'];
   const companyIds = new Set(world.companies.map((company) => company.id));
+  const votingIssued = new Map<string, number>();
+  for (const shareClass of world.securities?.classes ?? []) {
+    if (shareClass.kind !== 'voting') continue;
+    votingIssued.set(
+      shareClass.companyId,
+      (votingIssued.get(shareClass.companyId) ?? 0) + shareClass.issuedShares,
+    );
+  }
   const holderValid = (holder: { type: string; id: string }): boolean => {
     if (holder.type === 'player') return holder.id === 'player';
     if (holder.type === 'company') return companyIds.has(holder.id);
@@ -300,8 +308,49 @@ function checkGovernance(world: WorldState): string[] {
   for (const motion of world.governance.motions) {
     if (!companyIds.has(motion.companyId)) problems.push('议案引用了不存在的企业');
     if (!holderValid(motion.proposedBy)) problems.push(`议案 ${motion.id} 的提案人无效`);
+    if (!Array.isArray(motion.eligible)) {
+      problems.push(`议案 ${motion.id}: 缺少登记日投票权快照`);
+      continue;
+    }
+    const eligibility = new Map<string, number>();
+    let eligibleTotal = 0;
+    for (const entry of motion.eligible) {
+      if (!holderValid(entry.holder)) {
+        problems.push(`议案 ${motion.id}: 登记日持有人无效`);
+        continue;
+      }
+      if (!(entry.shares >= 0)) problems.push(`议案 ${motion.id}: 登记日股数为负`);
+      const key = `${entry.holder.type}:${entry.holder.id}`;
+      if (eligibility.has(key)) {
+        problems.push(`议案 ${motion.id}: 登记日快照存在重复持有人 ${key}`);
+      }
+      eligibility.set(key, entry.shares);
+      eligibleTotal += entry.shares;
+    }
+    const issued = votingIssued.get(motion.companyId) ?? 0;
+    // 已结束议案可能由旧规则创建，其历史票重按当时持股记录；不要求其快照合计等于当前发行量。
+    if (motion.status === 'open' && eligibleTotal > issued + 0.05) {
+      problems.push(
+        `议案 ${motion.id}: 登记日投票权合计 ${eligibleTotal} 超过发行量 ${issued}`,
+      );
+    }
+    const seenVoters = new Set<string>();
     for (const vote of motion.votes) {
-      if (!holderValid(vote.holder)) problems.push(`议案 ${motion.id} 的投票人无效`);
+      if (!holderValid(vote.holder)) {
+        problems.push(`议案 ${motion.id} 的投票人无效`);
+        continue;
+      }
+      const key = `${vote.holder.type}:${vote.holder.id}`;
+      if (seenVoters.has(key)) {
+        problems.push(`议案 ${motion.id}: 同一持有人出现多张表决票`);
+      }
+      seenVoters.add(key);
+      const entitled = eligibility.get(key);
+      if (entitled === undefined) {
+        problems.push(`议案 ${motion.id}: 投票人 ${key} 不在登记日快照内`);
+      } else if (vote.votingShares > entitled + 0.01) {
+        problems.push(`议案 ${motion.id}: 投票人 ${key} 票数超过登记日持股`);
+      }
       if (vote.votingShares < -0.01) problems.push(`议案 ${motion.id} 的票数为负`);
     }
   }

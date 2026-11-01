@@ -2,8 +2,8 @@
 // 这些类型描述的是“演示方案 v0.2”的数据结构，不代表最终策划规则。
 // v0.2 新增证券/治理/居民投资/协议/通知数据；旧 v1 存档由 core/save.ts 迁移。
 
-export const SAVE_FORMAT_VERSION = 2;
-export const GAME_VERSION = '0.2.0';
+export const SAVE_FORMAT_VERSION = 3;
+export const GAME_VERSION = '0.2.1';
 
 export type GoodId =
   | 'grain'
@@ -401,6 +401,12 @@ export interface MotionVote {
   tick: number;
 }
 
+/** 议案登记日的投票权快照：议案创建时的持有人与股数。 */
+export interface VotingEntitlement {
+  holder: HolderRef;
+  shares: number;
+}
+
 export interface Motion {
   id: string;
   companyId: string;
@@ -413,6 +419,12 @@ export interface Motion {
   /** dividendPolicy: { ratio }；operatorAppointment: { operatorType, operatorId }。 */
   params: Record<string, number | string>;
   status: 'open' | 'passed' | 'rejected';
+  /**
+   * 表决权登记日快照（创建议案时记录）。
+   * 只有快照内的持有人可投票；票重按快照股数计算。
+   * 这是演示规则：议案期间的股份转让不会把同一批股票的票数转给新持有人。
+   */
+  eligible: VotingEntitlement[];
   votes: MotionVote[];
   decidedTick: number | null;
   result: string;

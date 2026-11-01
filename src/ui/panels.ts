@@ -1138,8 +1138,10 @@ export function renderCompanyDetail(
       motion.votes.find(
         (vote) => vote.holder.type === 'player' && vote.holder.id === 'player',
       )?.vote ?? null;
+    // 以议案登记日快照判断能否投票：登记日后买入或已卖出的股份不改变本次票权。
+    const eligibleShares = store.motionEligibility(motion.id);
     const voteButtons =
-      motion.status === 'open' && canVote
+      motion.status === 'open' && eligibleShares > 0
         ? `<div class="motion-actions" role="group" aria-label="对「${esc(motion.title)}」投票">
             ${(['for', 'against', 'abstain'] as const)
               .map(
@@ -1152,12 +1154,18 @@ export function renderCompanyDetail(
                   data-vote="${vote}"
                   data-focus-key="motion-${esc(motion.id)}-${vote}"
                   aria-pressed="${playerVote === vote}"
-                  title="${VOTE_LABELS[vote]}（演示：按你的表决权计票）"
+                  title="${VOTE_LABELS[vote]}（按登记日快照 ${num(eligibleShares)} 股计票）"
                 >${VOTE_LABELS[vote]}</button>`,
               )
               .join('')}
           </div>`
         : '';
+    const snapshotHint =
+      motion.status === 'open' && canVote && eligibleShares <= 0
+        ? '<p class="fin-hint">你在本议案登记日之后才取得投票权（或已转出），本次不能投票；下一项议案会按新的持股重新登记。</p>'
+        : motion.status === 'open' && eligibleShares > 0
+          ? `<p class="fin-hint">登记日票权 ${num(eligibleShares)} 股 · 登记股东 ${num(motion.eligible.length)} 名。</p>`
+          : '';
     const result =
       motion.status !== 'open' && motion.result
         ? `<p class="motion-result">${esc(motion.result)}</p>`
@@ -1174,6 +1182,7 @@ export function renderCompanyDetail(
           <span>反对 ${againstVotes.length} 票 · ${num(againstWeight)} 权</span>
         </div>
         <p class="motion-note">${esc(motion.note)}</p>
+        ${snapshotHint}
         ${result}
         ${voteButtons}
       </article>`;
@@ -1491,7 +1500,12 @@ export function renderCompanyDetail(
               </div>`
             : ''
         }
-        ${canVote ? '' : '<p class="fin-hint">你没有该公司的表决权，不会收到表决要求。</p>'}
+        <p class="fin-hint">表决按议案创建时的登记日快照计票：期间股份转手不会让同一批票被重复使用（演示规则）。</p>
+        ${
+          canVote || openMotions.some((motion) => store.motionEligibility(motion.id) > 0)
+            ? ''
+            : '<p class="fin-hint">你没有该公司的表决权，不会收到表决要求。</p>'
+        }
       </section>
 
       <section class="detail-subsection" data-testid="company-trading">

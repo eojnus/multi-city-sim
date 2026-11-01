@@ -32,6 +32,7 @@ import {
   closeMotions,
   ensureGovernance,
   openDividendPolicyMotion,
+  playerEligibleShares,
   refreshBoards,
 } from '../corporate-governance/governance';
 import {
@@ -45,7 +46,7 @@ import {
   planCompanyOrders,
   planInvestorOrders,
 } from '../investors/investors';
-import { matchOrders, playerVotingShares } from '../securities/securities';
+import { matchOrders, playerStakeOf } from '../securities/securities';
 import { notifyPlayer } from '../notifications/notifications';
 
 function blankStats(): CompanyMonthlyStats {
@@ -385,7 +386,8 @@ export class Simulation {
 
     for (const motion of this.state.governance.motions) {
       if (motion.status !== 'open') continue;
-      if (playerVotingShares(this.state, motion.companyId) <= 0) continue;
+      // 以议案登记日快照为准：议案创建后买入股份的玩家不获得本次表决权。
+      if (playerEligibleShares(this.state, motion) <= 0) continue;
       const company = this.state.companies.find((candidate) => candidate.id === motion.companyId);
       if (!company) continue;
       // 同一企业同一时间只保留一条未读表决通知，避免每月重复提醒。
@@ -401,21 +403,23 @@ export class Simulation {
         kind: 'vote',
         priority: 'important',
         companyId: company.id,
+        motionId: motion.id,
         title: `${company.name} 有股东表决待你参与`,
-        body: `${motion.title} 将于第 ${motion.closesAtTick} 期计票；你有投票权，可在企业页面选择赞成、反对或弃权。`,
+        body: `${motion.title} 将于第 ${motion.closesAtTick} 期计票；你在登记日持有投票权，可在企业页面选择赞成、反对或弃权。`,
       });
     }
 
     for (const motion of decidedMotions) {
       const company = this.state.companies.find((candidate) => candidate.id === motion.companyId);
       if (!company) continue;
-      if (playerVotingShares(this.state, company.id) <= 0) continue;
+      // 表决结果属于企业重大变化：少量持股人（含有投票权/仅分红）都应知情；
+      // 无持股且非经营者会被 notificationVisible 过滤。
       notifyPlayer(this.state, this.config, {
         audience: 'company',
         kind: 'major',
         priority: 'important',
         companyId: company.id,
-        title: `${company.name} 表决结果`,
+        title: `${company.name} 股东表决结果`,
         body: motion.result,
       });
     }
@@ -424,8 +428,9 @@ export class Simulation {
       if (company.capacity <= 0) continue;
       const changeRatio = Math.abs(company.lastMonth.capacityChange) / company.capacity;
       if (changeRatio < 0.08) continue;
-      const stake = company.totalShares > 0 ? playerVotingShares(this.state, company.id) / company.totalShares : 0;
-      if (stake < threshold && !this.playerIsOperator(company.id)) continue;
+      // 重大变化按“全部持股”判断，不要求投票权；仅分红股东也应获知。
+      const stake = playerStakeOf(this.state, company.id);
+      if (stake <= 0 && !this.playerIsOperator(company.id)) continue;
       notifyPlayer(this.state, this.config, {
         audience: 'company',
         kind: 'major',
@@ -471,7 +476,9 @@ export class Simulation {
     const company = this.state.companies.find((candidate) => candidate.id === companyId);
     if (!company) return false;
     if (this.playerIsOperator(companyId)) return true;
-    return playerVotingShares(this.state, companyId) / Math.max(1, company.totalShares) >= this.config.notifications.majorStakeThreshold;
+    return (
+      playerStakeOf(this.state, companyId) >= this.config.notifications.majorStakeThreshold
+    );
   }
 
   /** 原子买入（供未来玩家操作使用）；当前 UI 未开放直接商品交易。 */

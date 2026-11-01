@@ -92,8 +92,6 @@ export function settleCompanyFinance(
     const dividendPaid = round2(
       Math.min(company.cash, dividendOwed, Math.max(0, company.cash - reserve)),
     );
-    company.cash = round2(company.cash - dividendPaid);
-    stats.dividendsPaid = dividendPaid;
 
     const distribution = distributeDividend(
       world,
@@ -102,6 +100,10 @@ export function settleCompanyFinance(
       world.time.tick,
       config,
     );
+    // 以实际可分出的金额扣款：无股东或最小货币单位不足时不会凭空扣走资金。
+    const actualPaid = distribution.total;
+    company.cash = round2(company.cash - actualPaid);
+    stats.dividendsPaid = actualPaid;
     if (distribution.player > 0) {
       playerDividends = round2(playerDividends + distribution.player);
       playerDividendsByCompany[company.id] = distribution.player;
@@ -109,14 +111,14 @@ export function settleCompanyFinance(
       log.push({
         tick: world.time.tick,
         kind: 'player',
-        message: `${company.name} 分红 ${dividendPaid.toFixed(2)}；玩家按 ${(stake * 100).toFixed(2)}% 持股获得 ${distribution.player.toFixed(2)} 信用点。`,
+        message: `${company.name} 分红 ${actualPaid.toFixed(2)}；玩家按 ${(stake * 100).toFixed(2)}% 持股获得 ${distribution.player.toFixed(2)} 信用点。`,
       });
     }
-    if (distribution.total > 0 && distribution.total !== dividendPaid) {
+    if (actualPaid !== dividendPaid && dividendPaid > 0) {
       log.push({
         tick: world.time.tick,
         kind: 'warning',
-        message: `${company.name} 股息分配存在舍入差异：应付 ${dividendPaid.toFixed(2)}，实付 ${distribution.total.toFixed(2)}。`,
+        message: `${company.name} 股息按最小货币单位分配后实付 ${actualPaid.toFixed(2)}（计划 ${dividendPaid.toFixed(2)}），差额未从企业扣除。`,
       });
     }
     for (const [cityId, amount] of Object.entries(distribution.investorByCity)) {

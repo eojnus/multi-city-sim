@@ -1,5 +1,7 @@
 # 交付报告 v0.2：企业股权、居民投资、协议与通知机制
 
+> 历史报告：对应提交 `be16b84`。表决快照、股息分币与重大变化通知的后续修复见 `DELIVERY_REPORT_v0.3.md`。
+
 日期：2026-11-01 ｜ 工作区：`C:\CODING-worktrees\mechanisms-foundation` ｜ 分支：`feature/mechanisms-foundation`
 基线：`08aefb4` ｜ 最终提交：本报告随交付提交一同提交，提交号见交付说明。
 

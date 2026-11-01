@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { Simulation } from '../src/simulation/core/simulation';
 import { DEMO_CONFIG } from '../src/data/config';
 import { castVote, proposeOperatorMotion } from '../src/simulation/corporate-governance/governance';
+import { issueShares } from '../src/simulation/securities/securities';
+import { groupsOfCity, groupHolder } from '../src/simulation/investors/investors';
 import { visibleNotifications } from '../src/simulation/notifications/notifications';
 import { checkInvariants } from '../src/simulation/core/invariants';
 
@@ -80,5 +82,74 @@ describe('机制联动：表决、通知与企业决策', () => {
     const notices = visibleNotifications(sim.state);
     expect(notices.filter((notice) => notice.kind === 'vote')).toHaveLength(0);
     expect(notices.filter((notice) => notice.audience === 'city')).toHaveLength(0);
+    expect(notices.filter((notice) => notice.audience === 'company')).toHaveLength(0);
+  });
+
+  it('少量仅分红股东收到重大变化，但不会收到要求投票的通知', () => {
+    const sim = Simulation.create();
+    const world = sim.state;
+    const company = world.companies.find((entry) => entry.id === 'lp-food')!;
+    const group = groupsOfCity(world, company.cityId)[0]!;
+    issueShares(world, company, 'nonVoting', { type: 'player', id: 'player' }, 10, 0);
+
+    const motion = proposeOperatorMotion(
+      world,
+      company.id,
+      groupHolder(group),
+      'management',
+      0,
+      DEMO_CONFIG,
+    );
+    expect(motion.ok, motion.error).toBe(true);
+    expect(
+      motion.motion!.eligible.some((entry) => entry.holder.type === 'player'),
+    ).toBe(false);
+
+    expect(sim.tick().ok).toBe(true);
+    let notices = visibleNotifications(world);
+    expect(notices.filter((notice) => notice.kind === 'vote')).toHaveLength(0);
+
+    expect(sim.tick().ok).toBe(true);
+    notices = visibleNotifications(world);
+    const major = notices.find(
+      (notice) => notice.kind === 'major' && notice.companyId === company.id,
+    );
+    expect(major).toBeDefined();
+    expect(major?.body).toContain('经营者');
+    expect(notices.filter((notice) => notice.kind === 'vote')).toHaveLength(0);
+  });
+
+  it('少量有投票权股东既收到表决通知，也收到表决结果', () => {
+    const sim = Simulation.create();
+    const world = sim.state;
+    const company = world.companies.find((entry) => entry.id === 'lp-food')!;
+    const group = groupsOfCity(world, company.cityId)[0]!;
+    issueShares(world, company, 'voting', { type: 'player', id: 'player' }, 10, 0);
+
+    const motion = proposeOperatorMotion(
+      world,
+      company.id,
+      groupHolder(group),
+      'management',
+      0,
+      DEMO_CONFIG,
+    );
+    expect(motion.ok, motion.error).toBe(true);
+    expect(
+      motion.motion!.eligible.find((entry) => entry.holder.type === 'player')?.shares,
+    ).toBe(10);
+
+    expect(sim.tick().ok).toBe(true);
+    const voteNotice = visibleNotifications(world).find(
+      (notice) => notice.kind === 'vote' && notice.companyId === company.id,
+    );
+    expect(voteNotice).toBeDefined();
+    expect(castVote(world, motion.motion!.id, { type: 'player', id: 'player' }, 'for', world.time.tick).ok).toBe(true);
+
+    expect(sim.tick().ok).toBe(true);
+    const resultNotice = visibleNotifications(world).find(
+      (notice) => notice.kind === 'major' && notice.companyId === company.id,
+    );
+    expect(resultNotice).toBeDefined();
   });
 });

@@ -24,7 +24,7 @@ import type {
 import type { DemoConfig } from '../../data/config';
 import { cityMarketPrices } from '../markets/markets';
 import { companySharePrice } from '../companies/company';
-import { round2 } from '../core/math';
+import { allocateProportionally, round2 } from '../core/math';
 
 export function shareClassId(companyId: string, kind: ShareKind): string {
   return `${companyId}:${kind === 'voting' ? 'voting' : 'non-voting'}`;
@@ -448,18 +448,24 @@ export function distributeDividend(
   }
   if (payouts.length === 0) return result;
 
-  // 用实际持股合计作为分母：即使镜像字段暂时不一致，也不会凭空多付股息。
-  const holdingTotal = payouts.reduce((totalShares, entry) => totalShares + entry.shares, 0);
-  if (holdingTotal <= 0) return result;
-  let paid = 0;
-  const perShare = total / holdingTotal;
+  // 以“分”（0.01 信用点）为最小单位分配，使用最大余数法，
+  // 保证所有持有人所得之和严格等于企业实际扣除的股息，且结果可复现。
+  const totalCents = Math.round(total * 100);
+  const weights = payouts.map((entry) => entry.shares);
+  const weightsTotal = weights.reduce((acc, value) => acc + value, 0);
+  if (weightsTotal <= 0) return result;
+  const allocation = allocateProportionally(totalCents, weights);
+  let paidCents = 0;
   for (let index = 0; index < payouts.length; index++) {
-    const entry = payouts[index]!;
-    const isLast = index === payouts.length - 1;
-    const value = isLast ? round2(total - paid) : round2(entry.shares * perShare);
-    const safe = Math.max(0, value);
-    entry.value = safe;
-    paid = round2(paid + safe);
+    const cents = allocation[index] ?? 0;
+    paidCents += cents;
+    payouts[index]!.value = round2(cents / 100);
+  }
+  // 理论上 allocateProportionally 已严格分配；这里保留断言式保护，避免库被替换后静默超发。
+  if (paidCents !== totalCents) {
+    throw new Error(
+      `股息分配分币合计 ${paidCents} 与应分配 ${totalCents} 不一致，已中止结算`,
+    );
   }
 
   for (const entry of payouts) {
@@ -503,10 +509,7 @@ export function distributeDividend(
     }
   }
 
-  result.total = round2(paid);
-  if (tick >= 0 && result.total > 0) {
-    // 股息归属不需要额外记录到 world；企业和居民实体已各自入账。
-  }
+  result.total = round2(paidCents / 100);
   return result;
 }
 

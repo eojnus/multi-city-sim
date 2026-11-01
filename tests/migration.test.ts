@@ -113,4 +113,73 @@ describe('旧存档（formatVersion 1）迁移', () => {
     expect(result.ok).toBe(false);
     expect(result.error).toContain('发行股数无效');
   });
+
+  it('v2 存档迁移到 v3：为议案补登记日快照，资产不变', () => {
+    const sim = Simulation.create();
+    expect(sim.tick().ok).toBe(true);
+    const before = JSON.parse(JSON.stringify(sim.state));
+    const v2 = {
+      formatVersion: 2,
+      gameVersion: '0.2.1',
+      savedAt: '2026-11-01T00:00:00.000Z',
+      world: JSON.parse(JSON.stringify(sim.state)),
+    } as Record<string, any>;
+    for (const motion of v2.world.governance.motions as Record<string, unknown>[]) {
+      delete motion.eligible;
+    }
+    expect((v2.world.governance.motions as unknown[]).length).toBeGreaterThan(0);
+
+    const result = parseSave(JSON.stringify(v2));
+    expect(result.ok, result.error).toBe(true);
+    expect(result.migratedFrom).toBe(2);
+    const world = result.world!;
+    for (const motion of world.governance.motions) {
+      expect(Array.isArray(motion.eligible)).toBe(true);
+    }
+    expect(world.player.cash).toBe(before.player.cash);
+    expect(world.time).toEqual(before.time);
+    for (const company of world.companies) {
+      const previous = before.companies.find((entry: { id: string }) => entry.id === company.id);
+      expect(company.cash).toBeCloseTo(previous.cash, 2);
+      expect(company.inventory).toEqual(previous.inventory);
+    }
+    expect(checkInvariants(world)).toEqual([]);
+  });
+
+  it('v2 旧议案的异常重复票在迁移时被压到登记日持股，不能重复计票', () => {
+    const sim = Simulation.create();
+    expect(sim.tick().ok).toBe(true);
+    const v2 = {
+      formatVersion: 2,
+      gameVersion: '0.2.1',
+      savedAt: '2026-11-01T00:00:00.000Z',
+      world: JSON.parse(JSON.stringify(sim.state)),
+    } as Record<string, any>;
+    const motions = v2.world.governance.motions as Record<string, any>[];
+    const motion = motions.find((entry) => entry.status === 'open');
+    expect(motion).toBeDefined();
+    const openMotion = motion!;
+    delete openMotion.eligible;
+    openMotion.votes = [
+      {
+        holder: { type: 'player', id: 'player' },
+        vote: 'for',
+        votingShares: 10_000_000,
+        tick: 1,
+      },
+    ];
+
+    const result = parseSave(JSON.stringify(v2));
+    expect(result.ok, result.error).toBe(true);
+    const migrated = result.world!.governance.motions.find(
+      (entry) => entry.id === openMotion.id,
+    )!;
+    expect(migrated.votes).toHaveLength(1);
+    const entitlement = migrated.eligible.find(
+      (entry) => entry.holder.type === 'player',
+    );
+    expect(entitlement).toBeDefined();
+    expect(migrated.votes[0]!.votingShares).toBeLessThanOrEqual(entitlement!.shares + 0.01);
+    expect(checkInvariants(result.world!)).toEqual([]);
+  });
 });

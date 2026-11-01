@@ -19,6 +19,7 @@ import type {
   LogEntry,
   Motion,
   MotionVote,
+  VotingEntitlement,
   WorldState,
 } from '../contracts/types';
 import type { DemoConfig } from '../../data/config';
@@ -26,7 +27,8 @@ import { allocateProportionally, clamp, round2 } from '../core/math';
 
 const MANAGEMENT_NOTE = '演示：职业经理人经营，持股不等于控制权。';
 const BOARD_NOTE = '演示规则：按投票权持股比例分配董事席位；席位不等于经营控制权。';
-const MOTION_NOTE = '暂定演示规则：议案在开放期结束后按投票权股数计票，赞成票多于反对票即通过。';
+const MOTION_NOTE =
+  '暂定演示规则：议案创建时记录投票权登记日快照，只有快照内持有人可按快照股数投票；赞成票多于反对票即通过。';
 
 const PLAYER_ID = 'player';
 
@@ -119,6 +121,32 @@ function votingHoldersOf(world: WorldState, companyId: string): { holder: Holder
 function holderVotingShares(world: WorldState, companyId: string, holder: HolderRef): number {
   const entry = votingHoldersOf(world, companyId).find((candidate) => sameHolder(candidate.holder, holder));
   return entry ? round2(entry.shares) : 0;
+}
+
+/** 创建议案时冻结的投票权登记日快照。 */
+function votingSnapshot(world: WorldState, companyId: string): VotingEntitlement[] {
+  return votingHoldersOf(world, companyId).map((entry) => ({
+    holder: { type: entry.holder.type, id: entry.holder.id },
+    shares: round2(entry.shares),
+  }));
+}
+
+/** 议案快照中某持有人的可投票股数；不在快照内为 0。 */
+export function eligibleSharesOf(motion: Motion, holder: HolderRef): number {
+  const entry = (motion.eligible ?? []).find((candidate) => sameHolder(candidate.holder, holder));
+  return entry ? round2(entry.shares) : 0;
+}
+
+/** 议案快照中的全部合格投票人（确定性顺序）。 */
+export function eligibleHoldersOf(motion: Motion): VotingEntitlement[] {
+  return [...(motion.eligible ?? [])]
+    .filter((entry) => entry.shares > 0)
+    .sort((a, b) => b.shares - a.shares || compareHolders(a.holder, b.holder));
+}
+
+/** 玩家在该议案登记日的可投票股数（用于通知与界面）。 */
+export function playerEligibleShares(_world: WorldState, motion: Motion): number {
+  return eligibleSharesOf(motion, { type: 'player', id: PLAYER_ID });
 }
 
 function ensureGovernanceState(world: WorldState): void {
@@ -275,6 +303,7 @@ export function openDividendPolicyMotion(
       closesAtTick: tick + config.governance.motionOpenTicks,
       params: { ratio: 1 },
       status: 'open',
+      eligible: votingSnapshot(world, company.id),
       votes: [],
       decidedTick: null,
       result: '',
@@ -302,9 +331,10 @@ export function castVote(
   if (motion.status !== 'open') return { ok: false, error: '议案已结束表决' };
   if (!holderIsValid(world, holder)) return { ok: false, error: '持股人无效' };
 
-  const shares = holderVotingShares(world, motion.companyId, holder);
+  // 以议案创建时的登记日快照为准：期间受让股份的新持有人不能重复使用同一批票。
+  const shares = eligibleSharesOf(motion, holder);
   if (!(shares > 0)) {
-    return { ok: false, error: '该持股人没有投票权股份，不能参与表决' };
+    return { ok: false, error: '该持股人不在本议案登记日的投票权名单内' };
   }
 
   const voteRecord: MotionVote = {
@@ -334,7 +364,8 @@ export function autoCastVotes(world: WorldState, config: DemoConfig, tick: numbe
     .sort((a, b) => a.id.localeCompare(b.id));
 
   for (const motion of openMotions) {
-    const holders = votingHoldersOf(world, motion.companyId);
+    // 只对登记日快照内的持有人自动投票；新受让人不获得本次议案的票。
+    const holders = eligibleHoldersOf(motion);
     for (const { holder } of holders) {
       if (holder.type === 'player') continue;
       const alreadyVoted = motion.votes.some((vote) => sameHolder(vote.holder, holder));
@@ -531,6 +562,7 @@ export function proposeOperatorMotion(
     closesAtTick: tick + config.governance.motionOpenTicks,
     params,
     status: 'open',
+    eligible: votingSnapshot(world, companyId),
     votes: [],
     decidedTick: null,
     result: '',

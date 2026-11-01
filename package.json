@@ -1,6 +1,6 @@
 {
   "name": "multi-city-sim",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Multi-city economic and political simulation - mechanisms foundation prototype",
   "main": "dist/electron/main.js",

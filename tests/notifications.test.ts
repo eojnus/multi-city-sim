@@ -13,6 +13,8 @@ import {
   visibleNotifications,
 } from '../src/simulation/notifications/notifications';
 import type { PlayerNoticeInput } from '../src/simulation/notifications/notifications';
+import { openDividendPolicyMotion } from '../src/simulation/corporate-governance/governance';
+import { groupsOfCity, groupHolder } from '../src/simulation/investors/investors';
 import type { ShareKind, WorldState } from '../src/simulation/contracts/types';
 
 /** 新建世界，并兼容尚未初始化 v0.2 数据节的旧 initializer。 */
@@ -131,7 +133,7 @@ describe('玩家通知的身份筛选', () => {
     expect(notifyPlayer(world, DEMO_CONFIG, input)).not.toBeNull();
   });
 
-  it('低于 5% 阈值时的日常重大变化通知被丢弃，但分红通知可见', () => {
+  it('低于 5% 阈值时仍会收到重大变化，但日常经营信息被过滤', () => {
     const world = freshWorld();
     const company = world.companies[0]!;
     resetCompanyShares(world, company.id);
@@ -145,11 +147,20 @@ describe('玩家通知的身份筛选', () => {
       audience: 'company',
       kind: 'major',
       companyId: company.id,
-      title: '月度经营变化',
-      body: '企业本月调整了排产计划。',
+      title: '董事会改选',
+      body: '公司完成董事会改选。',
     });
-    expect(notificationVisible(world, DEMO_CONFIG, major)).toBe(false);
-    expect(notifyPlayer(world, DEMO_CONFIG, major)).toBeNull();
+    expect(notificationVisible(world, DEMO_CONFIG, major)).toBe(true);
+    expect(notifyPlayer(world, DEMO_CONFIG, major)).not.toBeNull();
+
+    const market = notice({
+      audience: 'company',
+      kind: 'market',
+      companyId: company.id,
+      title: '日常融资方案',
+      body: '公司发布新的融资方案。',
+    });
+    expect(notificationVisible(world, DEMO_CONFIG, market)).toBe(false);
 
     const dividend = notice({
       audience: 'company',
@@ -160,7 +171,7 @@ describe('玩家通知的身份筛选', () => {
     });
     expect(notificationVisible(world, DEMO_CONFIG, dividend)).toBe(true);
     expect(notifyPlayer(world, DEMO_CONFIG, dividend)).not.toBeNull();
-    expect(world.notifications).toHaveLength(1);
+    expect(world.notifications).toHaveLength(2);
   });
 
   it('持股达到阈值后，重大变化通知可见', () => {
@@ -183,13 +194,41 @@ describe('玩家通知的身份筛选', () => {
     expect(notificationVisible(world, DEMO_CONFIG, major)).toBe(true);
   });
 
-  it('无投票权的小股东不因 important 标记收到重大变化通知', () => {
+  it('少量仅分红股东会收到重大变化通知，但不会收到表决通知', () => {
     const world = freshWorld();
     const company = world.companies[0]!;
     resetCompanyShares(world, company.id);
     addShareClass(world, company.id, 'nonVoting', 1_000);
     addPlayerHolding(world, company.id, 'nonVoting', 10);
 
+    const major = notice({
+      audience: 'company',
+      kind: 'major',
+      priority: 'important',
+      companyId: company.id,
+      title: '控制权变化',
+      body: '公司经营者发生变更。',
+    });
+    expect(notificationVisible(world, DEMO_CONFIG, major)).toBe(true);
+    expect(notifyPlayer(world, DEMO_CONFIG, major)).not.toBeNull();
+
+    const vote = notice({
+      audience: 'company',
+      kind: 'vote',
+      priority: 'important',
+      companyId: company.id,
+      title: '股东表决',
+      body: '请参与表决。',
+    });
+    expect(notificationVisible(world, DEMO_CONFIG, vote)).toBe(false);
+  });
+
+  it('没有持股且非经营者的玩家不会收到企业重大变化通知', () => {
+    const world = freshWorld();
+    const company = world.companies[0]!;
+    resetCompanyShares(world, company.id);
+    addShareClass(world, company.id, 'voting', 100);
+    addShareClass(world, company.id, 'nonVoting', 0);
     const input = notice({
       audience: 'company',
       kind: 'major',
@@ -199,6 +238,7 @@ describe('玩家通知的身份筛选', () => {
       body: '公司经营者发生变更。',
     });
     expect(notificationVisible(world, DEMO_CONFIG, input)).toBe(false);
+    expect(notifyPlayer(world, DEMO_CONFIG, input)).toBeNull();
   });
 
   it('有投票权的小股东可通过 important 标记获知控制权变化', () => {
@@ -353,5 +393,62 @@ describe('玩家通知的存储与已读状态', () => {
     expect(created!.body).not.toContain('模拟步骤');
     expect(created!.body).not.toContain('校验');
     expect(created!.read).toBe(false);
+  });
+
+  it('表决通知按登记日快照判断，而不是当前持股', () => {
+    const world = freshWorld();
+    const company = world.companies[0]!;
+    resetCompanyShares(world, company.id);
+    addShareClass(world, company.id, 'voting', 100);
+    addPlayerHolding(world, company.id, 'voting', 10);
+    company.lastMonth.profit = 1_000_000;
+    company.dividendPayoutRatio = 0;
+    const motion = openDividendPolicyMotion(world, DEMO_CONFIG, 0)!;
+    expect(motion).not.toBeNull();
+
+    // 卖出全部股份后，登记日投票权仍有效，表决通知仍应可见。
+    world.securities.holdings = world.securities.holdings.filter(
+      (holding) => holding.holder.type !== 'player',
+    );
+    const withMotion = notice({
+      audience: 'company',
+      kind: 'vote',
+      companyId: company.id,
+      motionId: motion.id,
+      title: '股东表决',
+      body: '请参与表决。',
+    });
+    expect(notificationVisible(world, DEMO_CONFIG, withMotion)).toBe(true);
+    expect(notificationVisible(world, DEMO_CONFIG, { ...withMotion, motionId: undefined })).toBe(
+      false,
+    );
+
+    // 议案创建后才买入：当前有股份，但不在登记日快照内，不应收到表决通知。
+    const lateWorld = freshWorld();
+    const lateCompany = lateWorld.companies[0]!;
+    resetCompanyShares(lateWorld, lateCompany.id);
+    addShareClass(lateWorld, lateCompany.id, 'voting', 100);
+    addShareClass(lateWorld, lateCompany.id, 'nonVoting', 0);
+    const lateGroup = groupsOfCity(lateWorld, lateCompany.cityId)[0]!;
+    lateWorld.securities.holdings.push({
+      companyId: lateCompany.id,
+      shareClassId: `${lateCompany.id}:voting`,
+      holder: groupHolder(lateGroup),
+      shares: 100,
+      acquiredVia: 'primary',
+      sinceTick: 0,
+    });
+    lateCompany.lastMonth.profit = 1_000_000;
+    lateCompany.dividendPayoutRatio = 0;
+    const lateMotion = openDividendPolicyMotion(lateWorld, DEMO_CONFIG, 0)!;
+    expect(lateMotion).not.toBeNull();
+    addPlayerHolding(lateWorld, lateCompany.id, 'voting', 10);
+    expect(
+      notificationVisible(lateWorld, DEMO_CONFIG, {
+        ...withMotion,
+        companyId: lateCompany.id,
+        motionId: lateMotion.id,
+      }),
+    ).toBe(false);
   });
 });

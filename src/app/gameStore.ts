@@ -34,6 +34,7 @@ import {
 import {
   castVote,
   governanceFor,
+  playerEligibleShares,
   proposeOperatorMotion,
 } from '../simulation/corporate-governance/governance';
 import {
@@ -560,6 +561,13 @@ export class GameStore {
 
   governanceView(companyId: string) {
     return governanceFor(this.world, companyId);
+  }
+
+  /** 玩家在某议案的登记日可投票股数；0 表示不能参与该次表决。 */
+  motionEligibility(motionId: string): number {
+    const motion = this.world.governance.motions.find((candidate) => candidate.id === motionId);
+    if (!motion) return 0;
+    return playerEligibleShares(this.world, motion);
   }
 
   /** 二级市场买卖：先下单再撮合；未成交部分保留为挂单（不冻结资金/股份）。 */

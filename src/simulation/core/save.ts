@@ -109,6 +109,14 @@ export function parseSave(text: string): ParseResult {
       worldValue = migration.world;
       migratedFrom = 1;
     }
+    if (formatVersion <= 2) {
+      const migration = migrateWorldV2ToV3(worldValue);
+      if (!migration.ok || !migration.world) {
+        return { ok: false, error: migration.error ?? 'v2 存档迁移失败' };
+      }
+      worldValue = migration.world;
+      if (migratedFrom === undefined) migratedFrom = 2;
+    }
 
     const structureError = validateWorldStructure(worldValue);
     if (structureError) return { ok: false, error: structureError };
@@ -282,8 +290,113 @@ export function migrateWorldV1(raw: unknown): MigrationResult {
   return { ok: true, world: world as WorldState };
 }
 
-function normalizeStats(value: Record<string, unknown>): WorldState['companies'][number]['lastMonth'] {
-  const stats = {} as WorldState['companies'][number]['lastMonth'];
+/**
+ * v2 → v3 迁移：为已有议案补上“投票权登记日快照”。
+ * - 新议案在创建时记录快照；v2 存档没有该字段。
+ * - 迁移时按当前投票权持股生成快照；若议案仍开放，把已记录的票数上限压到快照股数，
+ *   防止旧规则下“股份转手后同一批票再次投出”的重复计票继续扩大。
+ * - 已结束议案的快照仅用于存档结构与审计，不改变其结果。
+ * - 不修改任何资金、股份或企业资产。
+ */
+export function migrateWorldV2ToV3(raw: unknown): MigrationResult {
+  if (!isRecord(raw)) return { ok: false, error: '存档 world 不是对象' };
+  const world = deepClone(raw) as unknown as WorldState;
+  if (!isRecord(world.governance)) {
+    world.governance = { boards: [], motions: [], controls: [] };
+  }
+  if (!Array.isArray(world.governance.motions)) {
+    return { ok: false, error: '存档 governance.motions 无效，无法迁移表决快照' };
+  }
+  if (!world.securities || !Array.isArray(world.securities.classes)) {
+    return { ok: false, error: '存档缺少证券数据，无法迁移表决快照' };
+  }
+
+  for (const motion of world.governance.motions) {
+    const record = motion as unknown as Record<string, unknown>;
+    if (Array.isArray(record.eligible)) continue;
+    if (motion.status !== 'open') {
+      // 已结束议案：快照只用于存档结构与审计，按已记录票数还原，避免用当前持股改写历史。
+      const byHolder = new Map<
+        string,
+        { holder: { type: 'player' | 'company' | 'investorGroup'; id: string }; shares: number }
+      >();
+      for (const vote of motion.votes ?? []) {
+        const key = `${vote.holder.type}:${vote.holder.id}`;
+        const existing = byHolder.get(key);
+        if (existing) existing.shares = Math.max(existing.shares, round2(vote.votingShares));
+        else {
+          byHolder.set(key, {
+            holder: { type: vote.holder.type, id: vote.holder.id },
+            shares: round2(vote.votingShares),
+          });
+        }
+      }
+      motion.eligible = [...byHolder.values()].sort(
+        (a, b) =>
+          b.shares - a.shares ||
+          a.holder.type.localeCompare(b.holder.type) ||
+          a.holder.id.localeCompare(b.holder.id),
+      );
+      continue;
+    }
+
+    const snapshot = snapshotVotingHolders(world, motion.companyId);
+    if (Array.isArray(motion.votes)) {
+      for (const vote of motion.votes) {
+        const entitlement = snapshot.find(
+          (entry) =>
+            entry.holder.type === vote.holder.type && entry.holder.id === vote.holder.id,
+        );
+        const cap = entitlement?.shares ?? 0;
+        if (vote.votingShares > cap) vote.votingShares = round2(cap);
+        if (!entitlement) {
+          // 保留旧票记录但票重为 0：持有人当前已不在股东名册时，不会凭空产生票权。
+          snapshot.push({
+            holder: { type: vote.holder.type, id: vote.holder.id },
+            shares: 0,
+          });
+        }
+      }
+    }
+    motion.eligible = snapshot;
+  }
+
+  return { ok: true, world };
+}
+
+function snapshotVotingHolders(
+  world: WorldState,
+  companyId: string,
+): { holder: { type: 'player' | 'company' | 'investorGroup'; id: string }; shares: number }[] {
+  const votingClassIds = new Set(
+    (world.securities?.classes ?? [])
+      .filter((shareClass) => shareClass.companyId === companyId && shareClass.kind === 'voting')
+      .map((shareClass) => shareClass.id),
+  );
+  const totals = new Map<string, { holder: { type: 'player' | 'company' | 'investorGroup'; id: string }; shares: number }>();
+  for (const holding of world.securities?.holdings ?? []) {
+    if (holding.companyId !== companyId) continue;
+    if (!votingClassIds.has(holding.shareClassId)) continue;
+    if (!(holding.shares > 0)) continue;
+    const key = `${holding.holder.type}:${holding.holder.id}`;
+    const existing = totals.get(key);
+    if (existing) existing.shares = round2(existing.shares + holding.shares);
+    else {
+      totals.set(key, {
+        holder: { type: holding.holder.type, id: holding.holder.id },
+        shares: round2(holding.shares),
+      });
+    }
+  }
+  return [...totals.values()].sort(
+    (a, b) =>
+      b.shares - a.shares ||
+      a.holder.type.localeCompare(b.holder.type) ||
+      a.holder.id.localeCompare(b.holder.id),
+  );
+}
+
+function normalizeStats(value: Record<string, unknown>): WorldState['companies'][number]['lastMonth'] {  const stats = {} as WorldState['companies'][number]['lastMonth'];
   for (const key of STATS_KEYS) {
     stats[key] = isFiniteNumber(value[key]) ? (value[key] as number) : 0;
   }
@@ -929,6 +1042,24 @@ function validateGovernance(
     if (motion.status !== 'open' && motion.status !== 'passed' && motion.status !== 'rejected') {
       return `议案 ${motion.id}.status 无效`;
     }
+    if (!Array.isArray(motion.eligible)) return `议案 ${motion.id}.eligible 必须是数组`;
+    const eligibility = new Map<string, number>();
+    for (let entryIndex = 0; entryIndex < motion.eligible.length; entryIndex++) {
+      const entry = motion.eligible[entryIndex];
+      if (!isRecord(entry)) return `议案 ${motion.id}.eligible[${entryIndex}] 不是对象`;
+      const entryError = holderCheck(
+        entry.holder,
+        `governance.motions[${index}].eligible[${entryIndex}].holder`,
+      );
+      if (entryError) return entryError;
+      if (!isFiniteNumber(entry.shares) || entry.shares < 0) {
+        return `议案 ${motion.id}.eligible[${entryIndex}].shares 无效`;
+      }
+      const holder = entry.holder as Record<string, unknown>;
+      const key = `${String(holder.type)}:${String(holder.id)}`;
+      if (eligibility.has(key)) return `议案 ${motion.id}.eligible 存在重复持有人 ${key}`;
+      eligibility.set(key, entry.shares);
+    }
     if (!Array.isArray(motion.votes)) return `议案 ${motion.id}.votes 无效`;
     for (let voteIndex = 0; voteIndex < motion.votes.length; voteIndex++) {
       const vote = motion.votes[voteIndex];
@@ -940,6 +1071,15 @@ function validateGovernance(
       }
       if (!isFiniteNumber(vote.votingShares) || !isInteger(vote.tick)) {
         return `议案 ${motion.id}.votes[${voteIndex}] 数值无效`;
+      }
+      const voter = vote.holder as Record<string, unknown>;
+      const voterKey = `${String(voter.type)}:${String(voter.id)}`;
+      const entitled = eligibility.get(voterKey);
+      if (entitled === undefined) {
+        return `议案 ${motion.id} 的投票人 ${voterKey} 不在登记日快照内`;
+      }
+      if (vote.votingShares > entitled + 0.01) {
+        return `议案 ${motion.id} 的投票人 ${voterKey} 票数超过登记日持股`;
       }
     }
     if (motion.decidedTick !== null && !isInteger(motion.decidedTick)) {
