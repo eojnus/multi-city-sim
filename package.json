@@ -1,0 +1,65 @@
+{
+  "name": "multi-city-sim",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Multi-city economic and political simulation - first playable prototype",
+  "main": "dist/electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k -n renderer,electron,app \"npm:dev:renderer\" \"npm:dev:electron\" \"npm:dev:app\"",
+    "dev:renderer": "vite",
+    "dev:electron": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
+    "dev:app": "wait-on tcp:5173 dist/electron/main.js && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .",
+    "dev:web": "vite",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json --noEmit",
+    "build:renderer": "vite build",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build": "npm run typecheck && npm run build:renderer && npm run build:electron",
+    "start": "electron .",
+    "package:dir": "npm run build && electron-builder --win --x64 --dir",
+    "package": "npm run build && electron-builder --win --x64",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "smoke": "electron scripts/smoke-main.cjs",
+    "sim:report": "tsx scripts/sim-report.ts",
+    "smoke:build": "npm run build && electron scripts/smoke-main.cjs",
+    "package:cn": "cross-env ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/ electron-builder --win --x64",
+    "package:dir:cn": "cross-env ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/ electron-builder --win --x64 --dir"
+  },
+  "dependencies": {
+    "phaser": "3.90.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "concurrently": "9.2.1",
+    "cross-env": "10.1.0",
+    "electron": "38.8.6",
+    "electron-builder": "26.18.1",
+    "tsx": "4.21.0",
+    "typescript": "5.9.3",
+    "vite": "7.3.7",
+    "vitest": "3.2.7",
+    "wait-on": "9.0.1"
+  },
+  "build": {
+    "appId": "com.example.multicitysim",
+    "productName": "多城经济模拟",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
+  "author": "Multi-City Sim Team"
+}

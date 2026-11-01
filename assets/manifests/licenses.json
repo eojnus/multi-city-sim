@@ -1,0 +1,81 @@
+{
+  "verificationDate": "2026-11-01",
+  "verificationMethod": "Read each bundled License.txt verbatim and cross-checked the stated license against the source page URL recorded in asset-sources.json. No license text was inferred.",
+  "licenses": [
+    {
+      "packageId": "kenney-modern-city",
+      "name": "Kenney Roguelike Modern City (2.0)",
+      "author": "Kenney (www.kenney.nl)",
+      "licenseName": "Creative Commons Zero (CC0 1.0 Universal)",
+      "licenseUrl": "http://creativecommons.org/publicdomain/zero/1.0/",
+      "commercialUseAllowed": true,
+      "attributionRequired": false,
+      "attributionRequested": true,
+      "redistributionRestrictions": "None under CC0. The pack text states: 'This content is free to use in personal, educational and commercial projects.' Crediting Kenney is explicitly 'not mandatory'. Shipped subset may be redistributed with the application.",
+      "bundledLicenseFile": "public/assets/city/LICENSE-kenney-modern-city.txt",
+      "sourceLicenseFile": "assets/source-packs/kenney-modern-city-backup/License.txt",
+      "verifiedAt": "2026-11-01",
+      "conclusion": "May be redistributed inside the shipped application."
+    },
+    {
+      "packageId": "kenney-ui-pack",
+      "name": "Kenney UI Pack (2.0)",
+      "author": "Kenney (www.kenney.nl)",
+      "licenseName": "Creative Commons Zero (CC0 1.0 Universal)",
+      "licenseUrl": "http://creativecommons.org/publicdomain/zero/1.0/",
+      "commercialUseAllowed": true,
+      "attributionRequired": false,
+      "attributionRequested": true,
+      "redistributionRestrictions": "None under CC0. The pack text states: 'This content is free to use in personal, educational and commercial projects.' Crediting Kenney is explicitly 'not mandatory'. Shipped subset may be redistributed with the application.",
+      "bundledLicenseFile": "public/assets/ui/LICENSE-kenney-ui-pack.txt",
+      "sourceLicenseFile": "assets/source-packs/kenney-ui-pack/License.txt",
+      "verifiedAt": "2026-11-01",
+      "conclusion": "May be redistributed inside the shipped application."
+    },
+    {
+      "packageId": "modern-city-extension",
+      "name": "Modern City Extension",
+      "author": "rubberduck",
+      "licenseName": "Creative Commons Zero (CC0 1.0 Universal)",
+      "licenseUrl": "http://creativecommons.org/publicdomain/zero/1.0/",
+      "commercialUseAllowed": true,
+      "attributionRequired": false,
+      "attributionRequested": false,
+      "redistributionRestrictions": "None under CC0. Verification basis is the license declared on the OpenGameArt asset page; no license file is bundled with the single downloaded PNG, so this entry is weaker evidence than the Kenney entries. Reference-only: nothing from this pack is copied into public/assets yet.",
+      "bundledLicenseFile": null,
+      "sourceLicenseFile": null,
+      "verifiedAt": "2026-11-01",
+      "conclusion": "Acceptable as a backup reference. Not shipped in this build."
+    },
+    {
+      "packageId": "rasak-modern-tilesets",
+      "name": "Rasak Modern Tilesets",
+      "author": "unknown (not verified)",
+      "licenseName": "unknown (not verified)",
+      "licenseUrl": null,
+      "commercialUseAllowed": null,
+      "attributionRequired": null,
+      "attributionRequested": null,
+      "redistributionRestrictions": "Undetermined. Nothing obtained, so nothing may be redistributed or published. Do not mirror the original Rasak images to a public repository without the author's permission.",
+      "bundledLicenseFile": null,
+      "sourceLicenseFile": null,
+      "verifiedAt": null,
+      "conclusion": "BLOCKED. Not downloaded; no license review possible. Do not ship."
+    },
+    {
+      "packageId": "pulse-everyday-streets",
+      "name": "Pulse Everyday Streets 16x16",
+      "author": "unknown (not verified)",
+      "licenseName": "unknown (not evaluated)",
+      "licenseUrl": null,
+      "commercialUseAllowed": null,
+      "attributionRequired": null,
+      "attributionRequested": null,
+      "redistributionRestrictions": "Undetermined. Page not evaluated, nothing downloaded.",
+      "bundledLicenseFile": null,
+      "sourceLicenseFile": null,
+      "verifiedAt": null,
+      "conclusion": "NOT EVALUATED. Do not ship."
+    }
+  ]
+}

@@ -1,0 +1,120 @@
+// 集中演示参数。所有数值均为“可替换的演示方案”，不是最终策划规则。
+// 调整此处即可改变模拟节奏，业务代码不应散落魔法数字。
+
+export const DEMO_CONFIG = {
+  meta: {
+    label: '演示参数 v0.1',
+    assumptions: [
+      '1 回合 = 1 个游戏月；月度结算。',
+      '人口按群体统计，不为每个居民建立独立 AI。',
+      '劳动参与率按总人口 38% 计算（包含儿童、退休者等非劳动力，演示口径）。',
+      '居民消费使用上一月可支配收入，消费倾向 96%。',
+      '企业注资同时补充营运资金并按演示汇率提升产能，不是真实资本形成模型。',
+      '政府收入为个人所得税 + 企业所得税；财政不足时按可用资金支付福利。',
+      '城市间贸易为点对点企业交易，运输成本与物流容量尚未模拟。',
+      '游戏 GDP = 本月企业产出价值 - 中间投入价值（不含公共服务）。',
+    ],
+  },
+  simulation: {
+    startYear: 2026,
+    startMonth: 1,
+    seed: 20261101,
+    maxLogEntries: 160,
+    maxHistory: 240,
+  },
+  population: {
+    participationRate: 0.38,
+    monthlyBirthRate: 0.00045,
+    monthlyDeathRate: 0.00025,
+    naturalNoise: 0.00012,
+    migrationBaseRate: 0.00035,
+    migrationLaborShare: 0.62,
+    migrationMinVacancies: 40,
+    migrationScoreGap: 3,
+    approvalMigrationWeight: 0.08,
+  },
+  labor: {
+    publicWageRate: 4200,
+    privateWageRate: 4600,
+    unemploymentBenefit: 600,
+    nonLaborTransfer: 100,
+    incomeTaxRate: 0.14,
+    corporateTaxRate: 0.05,
+    hiringOrder: 'public-first',
+    /** 演示：企业每月最多裁减 8% 员工，避免一次性需求波动造成断崖式失业。 */
+    maxMonthlyLayoffRate: 0.08,
+  },
+  consumer: {
+    propensity: 0.96,
+    priceElasticity: 0.4,
+    employedNeedFactor: 1.0,
+    unemployedNeedFactor: 0.72,
+    nonLaborNeedFactor: 0.6,
+    minAffordability: 0.15,
+  },
+  market: {
+    initialPriceFactor: 0.95,
+    priceAdjustSpeed: 0.08,
+    maxMonthlyChange: 0.08,
+    stockSurplusThreshold: 1.6,
+    stockDiscount: 0.03,
+    minPriceFactor: 0.55,
+    maxPriceFactor: 2.2,
+  },
+  intercity: {
+    /** 区域市场补货的演示运输加成：按距离线性增加，最高 12%。 */
+    transportMarkupPerKm: 0.00025,
+    minMarkup: 0.01,
+    maxMarkup: 0.12,
+    enabled: true,
+  },
+  externalDemand: {
+    /** 区域外净出口（演示）：吸收超出目标库存的消费品，付款来自区域外。 */
+    enabled: true,
+    priceFactor: 0.9,
+    targetStockMonths: 0.45,
+    maxShareOfOutput: 0.3,
+    baselineShareOfOutput: 0.12,
+    minStockMonths: 0.2,
+    note: '区域外需求为开放经济演示设定，不对应具体国家或贸易伙伴。',
+  },
+  company: {
+    initialUtilization: 0.8,
+    minUtilization: 0.5,
+    maxUtilization: 1.05,
+    utilizationAdjust: 0.18,
+    wageReserveMonths: 1,
+    dividendPayoutRatio: 1.0,
+    capacityGrowth: 0.004,
+    capacityShrink: 0.005,
+    maxCapacityMultiple: 2.5,
+    minCapacityMultiple: 0.7,
+    shareBookCashWeight: 1,
+    shareBookCapacityValue: 0.6,
+    shareBookBase: 300_000,
+    totalSharesDefault: 2_000_000,
+    investmentCapacityGainPerCurrency: 1 / 20_000_000,
+    maxInvestmentCapacityGain: 0.15,
+    initialInventoryMonths: 1.2,
+    initialOutputMonths: 0.55,
+    initialCashWageMonths: 1.6,
+    /** 演示：企业可获得最多 3 个月工资额的营运资金信贷，月息 1%。 */
+    creditLimitWageMonths: 6,
+    creditInterestRate: 0.005,
+    debtRepaymentRate: 0.25,
+  },
+  player: {
+    name: '林澈',
+    startingCash: 2_000_000,
+    minInvestment: 50_000,
+    maxInvestment: 5_000_000,
+    homeCityId: 'lanport',
+    note: '独立投资者。初始资金和身份为演示设定，尚非最终策划。',
+  },
+  ui: {
+    tickAnimationMs: 280,
+    autoTickMs: 1400,
+  },
+} as const;
+
+export type DemoConfig = typeof DEMO_CONFIG;

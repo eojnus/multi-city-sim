@@ -1,0 +1,21 @@
+TILESET-SPEC.txt
+================
+
+Source: Kenney - Roguelike Modern City (2.0), file `Tilemap/Tilesheet.txt` (verbatim content below).
+Note: this project ships `kenney-modern-city-tilemap.png`, copied from `Tilemap/tilemap_packed.png`.
+The packed sheet is 592x448 px = 37 x 16 px by 28 x 16 px with 0 px spacing and 0 px margin
+(the packed variant has no gutter; the 1 px gutter documented below applies to the spaced
+`Tilemap/tilemap.png` variant, which is NOT shipped).
+Tile indices used by the game are therefore: index = col + row * 37, col in [0,36], row in [0,27].
+
+--- verbatim Tilesheet.txt ---
+
+Tilesheet information:
+
+Tile size                 •  16px × 16px
+Space between tiles       •  1px × 1px
+---
+Total tiles (horizontal)  •  37 tiles
+Total tiles (vertical)    •  28 tiles
+---
+Total tiles in sheet      •  1036 tiles
