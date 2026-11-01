@@ -1,56 +1,56 @@
 import type { Company, LogEntry, WorldState } from '../contracts/types';
 import type { DemoConfig } from '../../data/config';
-import { PRODUCTIVITY } from '../../data/demo-data';
-import { clamp, round2 } from '../core/math';
-import { monthlyWageBill } from '../companies/company';
+import { round2 } from '../core/math';
+import { companyStyleLabel, planCompanyDecision } from './ai/strategy';
+import { expandCompanyCapacity } from './lifecycle/lifecycle';
 
-/** 根据上月销售、库存和现金状况设定本月利用率与岗位需求。 */
+/**
+ * 企业月度经营计划：由 ai/strategy 依据风格、现金、库存、需求、
+ * 补贴与经营结果生成计划，再在此处一次性应用。
+ *
+ * 计划不绕过任何权威校验：招聘仍受失业人口限制，扩产仍受自有资金与
+ * 财政补助预算限制，生产仍受员工、产能和原料限制。
+ */
 export function planCompanies(
   world: WorldState,
   config: DemoConfig,
   log: LogEntry[],
 ): void {
   for (const company of [...world.companies].sort((a, b) => a.id.localeCompare(b.id))) {
-    const city = world.cities.find((candidate) => candidate.id === company.cityId);
-    if (!city) continue;
-    const output = company.recipeOutput;
-    const stock = company.inventory[output] ?? 0;
-    const wageBill = monthlyWageBill(company);
+    const decision = planCompanyDecision(world, company, config);
+    const previousJobs = company.jobDemand;
+    const previousUtilization = company.utilization;
 
-    // 经营计划读取上一个完整结算月：本期开始时 lastMonth 已被重置为本月累计值。
-    if (company.previousMonth.produced > 0.01) {
-      const sellRatio =
-        (company.previousMonth.sold + company.previousMonth.exported) /
-        company.previousMonth.produced;
-      company.utilization += (sellRatio - 1) * config.company.utilizationAdjust;
-    }
-    if (stock > Math.max(1, company.capacity * 0.8)) {
-      company.utilization -= 0.05;
-    }
-    if (
-      stock < Math.max(1, company.capacity * 0.15) &&
-      (city.market[output]?.unmetDemand ?? 0) > 0
-    ) {
-      company.utilization += 0.05;
-    }
-    company.utilization = round2(
-      clamp(company.utilization, config.company.minUtilization, config.company.maxUtilization),
-    );
+    company.utilization = decision.utilization;
+    company.priceFactor = decision.priceFactor;
+    company.jobDemand = decision.targetJobs;
+    company.ai.ageMonths += 1;
+    company.ai.lastPlan = decision.plan;
+    company.ai.lastDecision = decision.reasons.join('；');
+    company.ai.lastDecisionTick = world.time.tick;
 
-    const productivity = Math.max(1, PRODUCTIVITY[output] ?? 1);
-    const tech = city.technology.productivityMultiplier;
-    // 演示：岗位需求按产能而非当月利用率设定，避免短期需求波动直接造成断崖式失业。
-    let targetJobs = Math.ceil(company.capacity / (productivity * tech));
-    if (company.cash < wageBill * 1.5) targetJobs = Math.floor(targetJobs * 0.9);
-    if (company.cash < wageBill * 0.5) targetJobs = Math.floor(targetJobs * 0.7);
-    const maxJobs = Math.ceil(company.maxCapacity / Math.max(1, productivity * tech));
-    const previous = company.jobDemand;
-    company.jobDemand = clamp(targetJobs, 0, maxJobs);
-    if (Math.abs(company.jobDemand - previous) >= Math.max(5, previous * 0.03)) {
+    // 投资计划只在实际资金范围内执行；失败时保留现金。
+    const unitCost = config.companyAi.capacityCostPerUnit;
+    if (decision.investment >= unitCost) {
+      const units = Math.floor(decision.investment / unitCost);
+      const result = expandCompanyCapacity(world, company, config, log, units);
+      if (!result.ok) {
+        decision.plan.investment = 0;
+        decision.plan.reasons.push(`扩产未执行：${result.error ?? '条件不满足'}`);
+        company.ai.lastDecision = decision.plan.reasons.join('；');
+      }
+    } else if (decision.investment > 0) {
+      decision.plan.investment = 0;
+    }
+
+    const jobsChanged =
+      Math.abs(company.jobDemand - previousJobs) >= Math.max(5, previousJobs * 0.03);
+    const utilizationChanged = Math.abs(company.utilization - previousUtilization) >= 0.04;
+    if (jobsChanged || utilizationChanged) {
       log.push({
         tick: world.time.tick,
         kind: 'labor',
-        message: `${company.name} 岗位需求 ${previous} → ${company.jobDemand}（利用率 ${(company.utilization * 100).toFixed(0)}%）。`,
+        message: `${company.name} 岗位需求 ${previousJobs} → ${company.jobDemand}，利用率 ${(previousUtilization * 100).toFixed(0)}% → ${(company.utilization * 100).toFixed(0)}%（${companyStyleLabel(company.ai.style)}）。`,
       });
     }
   }

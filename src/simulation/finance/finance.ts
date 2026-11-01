@@ -85,6 +85,18 @@ export function settleCompanyFinance(
     payInterest(company, config);
     repayDebt(company, config);
     stats.profit = round2(preTaxProfit - taxPaid - stats.interestPaid);
+    if (!company.ai) {
+      company.ai = {
+        style: 'steady',
+        riskTolerance: 0.5,
+        lossMonths: 0,
+        ageMonths: 0,
+        lastPlan: null,
+        lastDecision: '尚未制定经营计划。',
+        lastDecisionTick: world.time.tick,
+      };
+    }
+    company.ai.lossMonths = stats.profit < 0 ? company.ai.lossMonths + 1 : 0;
 
     const payoutRatio = clamp(company.dividendPayoutRatio, 0, 1);
     const dividendOwed = stats.profit > 0 ? round2(stats.profit * payoutRatio) : 0;

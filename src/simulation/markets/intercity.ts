@@ -8,6 +8,7 @@ import type { DemoConfig } from '../../data/config';
 import type { CityLedgers, PurchaseResult } from './markets';
 import { offeredStock } from './markets';
 import { clamp, round2 } from '../core/math';
+import { corridorKey, recordIntercitySale } from '../transport/network';
 
 function cityDistanceKm(a: City, b: City): number {
   const dx = a.region.x - b.region.x;
@@ -100,19 +101,10 @@ export function executeIntercityPurchase(
 
     // ---- 原子提交 ----
     seller.company.inventory[goodId] = round2(currentStock - qty);
-    seller.company.cash = round2(seller.company.cash + cost);
-    seller.company.lastMonth.revenue = round2(seller.company.lastMonth.revenue + cost);
-    // 只有卖出自身产出才计入企业统计；跨城成交计出口，本地成交计内销。
+    // 跨城成交：买方先付款取得货物；卖方所得在期末按运输容量统一结算
+    // （容量不足时卖方少获得收益，不从卖方现金额外扣款）。
     const producedQty = goodId === seller.company.recipeOutput ? qty : 0;
-    if (seller.company.cityId !== buyerCityId) {
-      seller.company.lastMonth.exported = round2(
-        seller.company.lastMonth.exported + producedQty,
-      );
-    } else {
-      seller.company.lastMonth.sold = round2(
-        seller.company.lastMonth.sold + producedQty,
-      );
-    }
+    void producedQty;
 
     if (buyer) {
       buyer.cash = round2(buyer.cash - cost);
@@ -121,6 +113,19 @@ export function executeIntercityPurchase(
     } else if (!options.consumer) {
       continue;
     }
+
+    recordIntercitySale(world, {
+      tick: world.time.tick,
+      path: options.consumer ? 'householdPurchase' : 'intercityPurchase',
+      fromCityId: seller.company.cityId,
+      toCityId: buyerCityId,
+      corridorKey: corridorKey(seller.company.cityId, buyerCityId),
+      sellerCompanyId: seller.company.id,
+      buyerCompanyId: options.buyerCompanyId ?? 'households',
+      good: goodId,
+      qty,
+      grossValue: cost,
+    });
 
     ledger.intercityImported = round2(ledger.intercityImported + qty);
     ledger.spend = round2(ledger.spend + cost);
@@ -141,6 +146,7 @@ export function executeIntercityPurchase(
       qty,
       unitPrice: seller.unitPrice,
       value: cost,
+      path: options.consumer ? 'householdPurchase' : 'intercityPurchase',
     };
     world.lastTick.tradeFlows.push(flow);
   }

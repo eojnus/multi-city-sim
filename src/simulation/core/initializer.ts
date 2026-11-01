@@ -20,6 +20,9 @@ import { setCityPopulation, laborForceFor } from '../population/population';
 import { round2, allocateProportionally } from '../core/math';
 import { createInvestorGroups, groupsOfCity, groupHolder } from '../investors/investors';
 import { createShareStructure, syncAllCompanyShares } from '../securities/securities';
+import { createInitialTransport } from '../transport/network';
+import { createInitialPolitics } from '../politics/politics';
+import { freshAiState } from '../companies/lifecycle/lifecycle';
 
 function createMarket(): Record<GoodId, MarketState> {
   const market = {} as Record<GoodId, MarketState>;
@@ -84,14 +87,27 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
       migrationOut: 0,
       investorDividends: 0,
       investableContribution: 0,
+      policySpending: 0,
+      transportSpending: 0,
       note: '初始月无结算记录；首次推进后生成。',
     },
     technology: { ...seed.technology },
     politics: { ...seed.politics },
     realEstate: { ...seed.realEstate },
+    workforce: {
+      skillLevel: 0.3,
+      trainedThisMonth: 0,
+      trainedTotal: 0,
+      trainedLastTick: 0,
+    },
+    housing: {
+      units: Math.round(seed.totalPopulation * 0.32),
+      demand: Math.round(seed.totalPopulation * 0.3),
+      rentSubsidyPaid: 0,
+    },
   }));
 
-  const companies: Company[] = COMPANY_SEEDS.map((seed) => {
+  const companies: Company[] = COMPANY_SEEDS.map((seed, companyIndex) => {
     const city = cities.find((candidate) => candidate.id === seed.cityId);
     if (!city) throw new Error(`公司 ${seed.id} 的城市 ${seed.cityId} 不存在`);
     const productivity = PRODUCTIVITY[seed.recipeOutput];
@@ -162,6 +178,7 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
       },
       dividendPayoutRatio: config.governance.defaultDividendPayoutRatio,
       note: seed.note,
+      ai: { ...freshAiState(seed.id, seed.sector, companyIndex), ageMonths: 12 },
     };
     setCompanyEmployees(company, seed.employees);
     const wage = monthlyWageBill(company);
@@ -235,6 +252,20 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
     investors: [],
     agreements: [],
     notifications: [],
+    politics: { cities: [], elections: [] },
+    policies: { active: [], history: [], lastRuns: [], lastSelection: [] },
+    fiscal: { ledger: [], nextEntryId: 1 },
+    transport: {
+      links: [],
+      intracity: [],
+      pendingSales: [],
+      lastMonth: {
+        tick: 0, demand: 0, capacity: 0, overloadRatio: 0, penaltyRate: 0,
+        capacityLossTotal: 0, freightSubsidy: 0, maintenancePaid: 0,
+        corridors: [], intracity: [], trades: [], note: '尚未结算。',
+      },
+    },
+    lifecycle: { foundings: [], liquidations: [], nextFoundingNumber: 1, nextLiquidationNumber: 1 },
     history: [],
     log: [],
     lastTick: {
@@ -249,6 +280,25 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
   // 居民投资实体：先建立资金来源，再发行股份给出资方。
   createInvestorGroups(world, config);
   createInitialShareStructure(world, config);
+
+  // 政府主导的交通网络与候选人/领导人（演示规则）。
+  world.transport = createInitialTransport(world, config);
+  const politics = createInitialPolitics(world, config);
+  world.politics = politics;
+  for (const city of world.cities) {
+    const state = politics.cities.find((entry) => entry.cityId === city.id);
+    const leader = state?.leader;
+    city.politics = {
+      ...city.politics,
+      approval: 55,
+      rulingParty: leader?.party ?? city.politics.rulingParty,
+      electionInMonths: state?.termMonthsLeft ?? null,
+      status: 'active',
+      note: leader
+        ? `现任领导人：${leader.name}（${leader.party}），重点行业 ${leader.profile.sectorAffinity ?? '—'}。演示生成，不是最终选举制度。`
+        : '由 politics 模块管理。',
+    };
+  }
 
   world.history.push({
     tick: 0,

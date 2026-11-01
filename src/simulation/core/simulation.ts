@@ -48,6 +48,12 @@ import {
 } from '../investors/investors';
 import { matchOrders, playerStakeOf } from '../securities/securities';
 import { notifyPlayer } from '../notifications/notifications';
+import { advancePolitics } from '../politics/politics';
+import { autoSelectPolicies, settlePolicies } from '../policies/policies';
+import { advanceTransportConstruction } from '../transport/network';
+import { settleTransportMonth } from '../transport/settlement';
+import { checkBankruptcies, maybeFoundCompanies } from '../companies/lifecycle/lifecycle';
+import { startWorkforceMonth } from '../labor/workforce';
 
 function blankStats(): CompanyMonthlyStats {
   return {
@@ -92,9 +98,14 @@ function resetCompanyMonth(world: WorldState): void {
       migrationOut: 0,
       investorDividends: 0,
       investableContribution: 0,
+      policySpending: 0,
+      transportSpending: 0,
     };
+    startWorkforceMonth(city);
   }
   world.securities.lastTrades = [];
+  // 上期交通统计的维护支出口径保留，其余在结算时重写。
+  world.transport.lastMonth = { ...world.transport.lastMonth, maintenancePaid: 0 };
 }
 
 function advanceTime(world: WorldState): void {
@@ -163,15 +174,27 @@ export class Simulation {
       const startStock: Record<GoodId, number> = {} as Record<GoodId, number>;
       for (const goodId of GOOD_IDS) startStock[goodId] = totalStock(this.state, goodId);
 
-      // 1. 人口自然变动 + 迁移（迁移是原子操作）
+      // 1. 政治：任期、选举；非玩家政府按弱项与领导人倾向选择政策。
+      //    玩家为市长的城市由玩家选择，autoSelectPolicies 明确跳过。
+      advancePolitics(this.state, this.config, this.state.time.tick, logs);
+      autoSelectPolicies(this.state, this.config, logs);
+
+      // 2. 交通建设推进与维护（财政支出，容量在建成后提高）。
+      advanceTransportConstruction(this.state, this.config, logs);
+
+      // 3. 人口自然变动 + 迁移（迁移是原子操作）
       applyNaturalGrowth(this.state, rng, this.config, logs);
       applyMigration(this.state, rng, this.config, logs);
 
-      // 2. 企业计划与劳动力匹配
+      // 4. 企业自动经营计划与劳动力匹配（计划读取政策补贴与上月结果）
       planCompanies(this.state, this.config, logs);
-      reconcileLabor(this.state, this.config, logs);
+      const labor = reconcileLabor(this.state, this.config, logs);
 
-      // 3. 长期贸易合同与政府协议：真实转移货物与资金（世界内部，库存净额不变）
+      // 5. 企业成立与倒闭（成立资金来自出资人；倒闭不留半期状态）
+      maybeFoundCompanies(this.state, this.config, logs);
+      checkBankruptcies(this.state, this.config, logs);
+
+      // 6. 长期贸易合同与政府协议：真实转移货物与资金（世界内部，库存净额不变）
       const tradeFlows = executeTradeRoutes(this.state, this.config, logs);
       this.state.lastTick.tradeFlows.push(...tradeFlows);
 
@@ -180,13 +203,13 @@ export class Simulation {
       maybeAutoProposeAgreements(this.state, this.config, this.state.time.tick, logs);
       this.pruneAgreementHistory();
 
-      // 4. 市场期初供应（在合同/协议改变企业库存之后计算）
+      // 7. 市场期初供应（在合同/协议改变企业库存之后计算）
       const ledgers = createWorldLedgers(this.state);
 
-      // 5. 生产资料采购：本地市场 + 区域市场补货（成交后才补足融资）
+      // 8. 生产资料采购：本地市场 + 区域市场补货（成交后才补足融资）
       runInputPurchasing(this.state, ledgers, this.config, logs);
 
-      // 6. 生产：消耗库存、产出、记录增加值（受员工与产能共同限制）
+      // 9. 生产：消耗库存、产出、记录增加值（受员工、技能、政策与产能限制）
       const productionRecords = runProduction(this.state, ledgers, this.config);
       this.state.lastTick.productionRecords = productionRecords;
 
@@ -204,29 +227,35 @@ export class Simulation {
         }
       }
 
-      // 8. 区域外净出口（演示）：吸收超出目标库存的消费品
+      // 10. 区域外净出口（演示）：吸收超出目标库存的消费品
       const externalExports = runExternalDemand(this.state, ledgers, this.config);
       this.state.lastTick.externalExports = externalExports;
 
-      // 9. 价格与市场统计
+      // 11. 跨城运输结算：统一按城市对计算容量惩罚，卖方所得在此时入账。
+      settleTransportMonth(this.state, this.config, logs, ledgers);
+
+      // 12. 价格与市场统计
       finalizeMarkets(this.state, ledgers, this.config);
 
-      // 10. 治理：先计票并应用既有议案（影响本月股息政策），再重选董事
+      // 13. 治理：先计票并应用既有议案（影响本月股息政策），再重选董事
       ensureGovernance(this.state, this.config, this.state.time.tick);
       autoCastVotes(this.state, this.config, this.state.time.tick);
       const decidedMotions = closeMotions(this.state, this.config, this.state.time.tick, logs);
       refreshBoards(this.state, this.config, this.state.time.tick);
 
-      // 11. 企业财务：工资、税、按实际持股分配股息、产能
+      // 14. 企业财务：工资、税、按实际持股分配股息、产能
       const finance = settleCompanyFinance(this.state, this.config, logs);
 
-      // 11b. 基于已结算利润提出下期议案（表决期结束后生效）
+      // 14b. 基于已结算利润提出下期议案（表决期结束后生效）
       openDividendPolicyMotion(this.state, this.config, this.state.time.tick);
 
-      // 12. 城市财政与居民收入（供下一月消费）
+      // 15. 城市财政与居民收入（供下一月消费）
       settleGovernment(this.state, finance, this.config, logs);
       for (const city of this.state.cities) recordMigrationReports(this.state, city);
       this.collectMayorNotices(logs);
+
+      // 16. 政策执行：补贴、培训、纾困、研发、住房、救助等（实际财政支出与状态变化）
+      settlePolicies(this.state, this.config, { hiresByCompany: labor.hiresByCompany, log: logs });
 
       // 13. 居民可投资资金（从下月消费预算中划出，不新增货币）
       collectInvestableFunds(this.state, this.config, logs);
@@ -271,6 +300,7 @@ export class Simulation {
         let produced = 0;
         let intermediateConsumed = 0;
         let externalExported = 0;
+        let writtenOff = 0;
         for (const record of productionRecords) {
           if (record.good === goodId) produced += record.qty;
           for (const input of record.inputs) {
@@ -279,6 +309,13 @@ export class Simulation {
         }
         for (const entry of externalExports) {
           if (entry.good === goodId) externalExported += entry.qty;
+        }
+        // 倒闭企业库存按账面注销：不是被消费，也不是凭空消失，必须有显式去向。
+        for (const liquidation of this.state.lifecycle.liquidations) {
+          if (liquidation.tick !== this.state.time.tick) continue;
+          for (const entry of liquidation.inventoryWrittenOff) {
+            if (entry.good === goodId) writtenOff += entry.qty;
+          }
         }
         const tradeNet = 0;
         // 跨城市贸易是全球库存的内部转移，世界口径净额为 0。
@@ -290,6 +327,7 @@ export class Simulation {
           intermediateConsumed: round2(intermediateConsumed),
           householdConsumed: round2(householdConsumed[goodId] ?? 0),
           externalExported: round2(externalExported),
+          writtenOff: round2(writtenOff),
           endStock,
           tradeNet: round2(tradeNet),
           expectedEndStock: round2(
@@ -297,7 +335,8 @@ export class Simulation {
               produced -
               intermediateConsumed -
               (householdConsumed[goodId] ?? 0) -
-              externalExported +
+              externalExported -
+              writtenOff +
               tradeNet,
           ),
         });

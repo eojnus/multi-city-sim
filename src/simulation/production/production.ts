@@ -9,9 +9,29 @@ import { PRODUCTIVITY, RECIPES } from '../../data/demo-data';
 import { round2 } from '../core/math';
 import { monthlyWageBill } from '../companies/company';
 import { creditAvailable } from '../companies/credit';
+import { workforceSkillMultiplier } from '../labor/workforce';
+import { leaderSectorMultiplier } from '../politics/politics';
+import { keyIndustryFocus } from '../policies/query';
 
 export function productionTarget(company: Company): number {
   return Math.max(0, round2(company.capacity * company.utilization));
+}
+
+/**
+ * 政策与领导人带来的有上限生产率系数：
+ * 领导人重点行业加成 + 重点产业扶持加成（两者可叠加，均有明确上限）。
+ */
+export function companyProductivityMultiplier(
+  world: WorldState,
+  city: City,
+  company: Company,
+  config: DemoConfig = DEMO_CONFIG,
+): number {
+  const leader = leaderSectorMultiplier(world, city.id, company.sector, config);
+  const focus = keyIndustryFocus(world, city.id);
+  const industry =
+    focus.sector && focus.sector === company.sector ? 1 + Math.max(0, focus.bonus ?? 0) : 1;
+  return round2(leader * industry);
 }
 
 /** 当期员工能支撑的最大产出。员工为 0 时上限为 0，产能本身不能替代劳动力。 */
@@ -19,11 +39,16 @@ export function laborCapacity(
   company: Company,
   city: City,
   config: DemoConfig = DEMO_CONFIG,
+  world?: WorldState,
 ): number {
+  const skill = workforceSkillMultiplier(city);
+  const policy = world ? companyProductivityMultiplier(world, city, company, config) : 1;
   return round2(
     company.employees *
       (PRODUCTIVITY[company.recipeOutput] ?? 0) *
       city.technology.productivityMultiplier *
+      skill *
+      policy *
       config.production.laborCapacityFactor,
   );
 }
@@ -66,7 +91,7 @@ export function runInputPurchasing(
     const recipe = RECIPES[company.recipeOutput];
     if (!recipe || recipe.inputs.length === 0) continue;
 
-    const target = Math.min(productionTarget(company), laborCapacity(company, city, config));
+    const target = Math.min(productionTarget(company), laborCapacity(company, city, config, world));
     if (target <= 0) continue;
     const shortages = recipe.inputs.map((input) => {
       const required = round2(target * input.qty);
@@ -153,7 +178,7 @@ export function runProduction(
     if (!city || !cityLedgers) continue;
     const recipe = RECIPES[company.recipeOutput];
     if (!recipe) continue;
-    let output = Math.min(productionTarget(company), laborCapacity(company, city, config));
+    let output = Math.min(productionTarget(company), laborCapacity(company, city, config, world));
     if (output <= 0) continue;
 
     for (const input of recipe.inputs) {

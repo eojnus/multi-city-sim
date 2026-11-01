@@ -21,7 +21,7 @@ import { renderModal } from './modals';
 import { bindPieInteractions } from './charts/pie';
 import { NotificationCenter } from './notifications';
 import type { NotificationItem, SystemNotice } from './notifications';
-import type { PlayerNotification } from '../simulation/contracts/types';
+import type { PlayerNotification, PolicyId } from '../simulation/contracts/types';
 
 const SKELETON = `
   <header class="hud" aria-label="顶部控制台">
@@ -734,6 +734,59 @@ export class GameUI {
         }
         break;
       }
+      case 'start-policy': {
+        const policyId = element.dataset.policyId as PolicyId | undefined;
+        if (!policyId) break;
+        const taxDirection = element.dataset.taxDirection;
+        const transportTarget = element.dataset.transportTarget;
+        // 预算输入与政策行一一对应；税收/交通没有输入，保持不传 budget。
+        const row = element.closest<HTMLElement>('.policy-item');
+        const budgetInput =
+          row?.querySelector<HTMLInputElement>(`input[data-policy-budget="${policyId}"]`) ?? null;
+        let budget: number | undefined;
+        if (budgetInput) {
+          const raw = budgetInput.value.trim();
+          const parsed = Number(raw);
+          const fallback = Number(budgetInput.dataset.defaultBudget ?? '');
+          budget =
+            raw !== '' && Number.isFinite(parsed) && parsed > 0
+              ? parsed
+              : Number.isFinite(fallback) && fallback > 0
+                ? fallback
+                : undefined;
+        }
+        this.store.selectPolicy(policyId, {
+          ...(budget !== undefined ? { budget } : {}),
+          ...(taxDirection === 'raise' || taxDirection === 'cut'
+            ? { taxDirection }
+            : {}),
+          ...(transportTarget ? { transportTarget } : {}),
+        });
+        break;
+      }
+      case 'stop-policy': {
+        const policyId = element.dataset.policyId as PolicyId | undefined;
+        if (policyId) this.store.stopPolicy(policyId);
+        break;
+      }
+      case 'run-for-mayor':
+        if (this.store.selectedCityId) this.store.runForMayor(this.store.selectedCityId);
+        break;
+      case 'invest-transport': {
+        const target = element.dataset.target;
+        if (target) this.store.investTransport(target);
+        break;
+      }
+      case 'found-company': {
+        const founder = element.dataset.founder;
+        if (founder === 'investorGroup' || founder === 'company' || founder === 'government') {
+          this.store.foundCompany(founder, element.dataset.companyId);
+        }
+        break;
+      }
+      case 'expand-capacity':
+        if (companyId) this.store.expandCapacity(companyId);
+        break;
       case 'toggle-goods':
         this.showAllGoods = !this.showAllGoods;
         this.renderRightPanel();

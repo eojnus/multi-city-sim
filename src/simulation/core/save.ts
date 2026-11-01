@@ -10,6 +10,10 @@ import {
   syncPlayerHoldings,
 } from '../securities/securities';
 import { createInvestorGroups, groupHolder } from '../investors/investors';
+import { createInitialTransport } from '../transport/network';
+import { createInitialPolitics } from '../politics/politics';
+import { freshAiState } from '../companies/lifecycle/lifecycle';
+import { POLICY_IDS } from '../policies/definitions';
 
 export interface ParseResult {
   ok: boolean;
@@ -117,6 +121,14 @@ export function parseSave(text: string): ParseResult {
       worldValue = migration.world;
       if (migratedFrom === undefined) migratedFrom = 2;
     }
+    if (formatVersion <= 3) {
+      const migration = migrateWorldV3ToV4(worldValue);
+      if (!migration.ok || !migration.world) {
+        return { ok: false, error: migration.error ?? 'v3 存档迁移失败' };
+      }
+      worldValue = migration.world;
+      if (migratedFrom === undefined) migratedFrom = 3;
+    }
 
     const structureError = validateWorldStructure(worldValue);
     if (structureError) return { ok: false, error: structureError };
@@ -196,6 +208,8 @@ export function migrateWorldV1(raw: unknown): MigrationResult {
       migrationOut: typeof lastMonth.migrationOut === 'number' ? lastMonth.migrationOut : 0,
       investorDividends: 0,
       investableContribution: 0,
+      policySpending: 0,
+      transportSpending: 0,
       note:
         typeof lastMonth.note === 'string'
           ? lastMonth.note
@@ -318,7 +332,7 @@ export function migrateWorldV2ToV3(raw: unknown): MigrationResult {
       // 已结束议案：快照只用于存档结构与审计，按已记录票数还原，避免用当前持股改写历史。
       const byHolder = new Map<
         string,
-        { holder: { type: 'player' | 'company' | 'investorGroup'; id: string }; shares: number }
+        { holder: { type: 'player' | 'company' | 'investorGroup' | 'city'; id: string }; shares: number }
       >();
       for (const vote of motion.votes ?? []) {
         const key = `${vote.holder.type}:${vote.holder.id}`;
@@ -364,16 +378,113 @@ export function migrateWorldV2ToV3(raw: unknown): MigrationResult {
   return { ok: true, world };
 }
 
+/**
+ * v3 → v4 迁移：补齐企业 AI、技能/住房、政治、政策、财政流水、交通与企业生命周期。
+ * - 不创造资金：政策为空、财政流水为空；
+ * - 企业风格按 ID/行业确定性分配，不改变现金、库存、产能或股份；
+ * - 候选人/领导人按确定性规则生成，旧存档的玩家市长身份保留。
+ */
+export function migrateWorldV3ToV4(raw: unknown): MigrationResult {
+  if (!isRecord(raw)) return { ok: false, error: '存档 world 不是对象' };
+  if (!Array.isArray(raw.cities) || raw.cities.length === 0) {
+    return { ok: false, error: 'v3 存档缺少城市数据，无法迁移' };
+  }
+  if (!Array.isArray(raw.companies)) return { ok: false, error: 'v3 存档缺少企业数据，无法迁移' };
+  const world = deepClone(raw) as unknown as WorldState & Record<string, unknown>;
+  const config = DEMO_CONFIG;
+
+  for (const record of world.cities as unknown as Record<string, unknown>[]) {
+    if (!isRecord(record.workforce)) {
+      record.workforce = {
+        skillLevel: 0.3,
+        trainedThisMonth: 0,
+        trainedTotal: 0,
+        trainedLastTick: 0,
+      };
+    }
+    if (!isRecord(record.housing)) {
+      const population = (record.population ?? {}) as Record<string, unknown>;
+      const total = isFiniteNumber(population.total) ? population.total : 0;
+      record.housing = {
+        units: Math.round(total * 0.32),
+        demand: Math.round(total * 0.3),
+        rentSubsidyPaid: 0,
+      };
+    }
+    const lastMonth = (record.lastMonth ?? {}) as Record<string, unknown>;
+    if (!isFiniteNumber(lastMonth.policySpending)) lastMonth.policySpending = 0;
+    if (!isFiniteNumber(lastMonth.transportSpending)) lastMonth.transportSpending = 0;
+    record.lastMonth = lastMonth;
+    const technology = (record.technology ?? {}) as Record<string, unknown>;
+    if (technology.status !== 'active') technology.status = 'initial-only';
+    record.technology = technology;
+    const politicsRecord = (record.politics ?? {}) as Record<string, unknown>;
+    if (politicsRecord.status !== 'active') politicsRecord.status = 'initial-only';
+    record.politics = politicsRecord;
+  }
+
+  (world.companies as unknown as Record<string, unknown>[]).forEach((company, index) => {
+    if (isRecord(company.ai)) return;
+    const id = typeof company.id === 'string' ? company.id : `company-${index}`;
+    const sector = typeof company.sector === 'string' ? company.sector : 'food';
+    company.ai = {
+      ...freshAiState(id, sector as WorldState['companies'][number]['sector'], index),
+      ageMonths: 12,
+      lastDecision: '由 v3 存档迁移：风格按 ID 与行业确定性分配。',
+    };
+  });
+
+  const candidateWorld = world as unknown as WorldState;
+  candidateWorld.transport = createInitialTransport(candidateWorld, config);
+  const politicsState = createInitialPolitics(candidateWorld, config);
+  candidateWorld.politics = politicsState;
+  for (const city of candidateWorld.cities) {
+    const state = politicsState.cities.find((entry) => entry.cityId === city.id);
+    const leader = state?.leader;
+    if (world.player && world.player.roles?.mayorCityId === city.id) {
+      if (state) state.leader = null;
+      city.politics = {
+        ...city.politics,
+        rulingParty: '玩家执政（演示）',
+        electionInMonths: state?.termMonthsLeft ?? null,
+        status: 'active',
+        note: '玩家担任市长（演示身份）：政策由玩家选择，AI 不会代选。',
+      };
+      continue;
+    }
+    city.politics = {
+      ...city.politics,
+      electionInMonths: state?.termMonthsLeft ?? null,
+      status: 'active',
+      note: leader
+        ? `现任领导人：${leader.name}（${leader.party}），重点行业 ${leader.profile.sectorAffinity ?? '—'}。由旧存档迁移生成，不是最终选举制度。`
+        : '由 politics 模块管理。',
+    };
+  }
+
+  candidateWorld.policies = { active: [], history: [], lastRuns: [], lastSelection: [] };
+  candidateWorld.fiscal = { ledger: [], nextEntryId: 1 };
+  candidateWorld.lifecycle = {
+    foundings: [],
+    liquidations: [],
+    nextFoundingNumber: 1,
+    nextLiquidationNumber: 1,
+  };
+  candidateWorld.transport.pendingSales = [];
+
+  return { ok: true, world: candidateWorld };
+}
+
 function snapshotVotingHolders(
   world: WorldState,
   companyId: string,
-): { holder: { type: 'player' | 'company' | 'investorGroup'; id: string }; shares: number }[] {
+): { holder: { type: 'player' | 'company' | 'investorGroup' | 'city'; id: string }; shares: number }[] {
   const votingClassIds = new Set(
     (world.securities?.classes ?? [])
       .filter((shareClass) => shareClass.companyId === companyId && shareClass.kind === 'voting')
       .map((shareClass) => shareClass.id),
   );
-  const totals = new Map<string, { holder: { type: 'player' | 'company' | 'investorGroup'; id: string }; shares: number }>();
+  const totals = new Map<string, { holder: { type: 'player' | 'company' | 'investorGroup' | 'city'; id: string }; shares: number }>();
   for (const holding of world.securities?.holdings ?? []) {
     if (holding.companyId !== companyId) continue;
     if (!votingClassIds.has(holding.shareClassId)) continue;
@@ -466,7 +577,12 @@ export function validateWorldStructure(world: unknown): string | null {
 
   const holderCheck = (holder: unknown, path: string): string | null => {
     if (!isRecord(holder)) return `${path} 不是持有人对象`;
-    if (holder.type !== 'player' && holder.type !== 'company' && holder.type !== 'investorGroup') {
+    if (
+      holder.type !== 'player' &&
+      holder.type !== 'company' &&
+      holder.type !== 'investorGroup' &&
+      holder.type !== 'city'
+    ) {
       return `${path}.type 无效`;
     }
     if (typeof holder.id !== 'string') return `${path}.id 无效`;
@@ -476,6 +592,9 @@ export function validateWorldStructure(world: unknown): string | null {
     }
     if (holder.type === 'investorGroup' && !investorIds.has(holder.id)) {
       return `${path} 引用了不存在的居民投资实体 ${holder.id}`;
+    }
+    if (holder.type === 'city' && !cityIds.has(holder.id)) {
+      return `${path} 引用了不存在的城市 ${holder.id}`;
     }
     return null;
   };
@@ -491,6 +610,18 @@ export function validateWorldStructure(world: unknown): string | null {
 
   const notificationError = validateNotifications(world.notifications, companyIds, cityIds);
   if (notificationError) return notificationError;
+
+  const politicsError = validatePolitics(world.politics, cityIds);
+  if (politicsError) return politicsError;
+
+  const policyError = validatePolicies(world.policies, world.fiscal, cityIds);
+  if (policyError) return policyError;
+
+  const transportError = validateTransport(world.transport, cityIds, companyIds);
+  if (transportError) return transportError;
+
+  const lifecycleError = validateLifecycle(world.lifecycle, cityIds);
+  if (lifecycleError) return lifecycleError;
 
   for (let index = 0; index < world.tradeRoutes.length; index++) {
     const error = validateTradeRoute(world.tradeRoutes[index], index);
@@ -676,20 +807,37 @@ function validateCity(value: unknown, index: number): string | null {
   for (const key of [
     'householdIncome', 'consumerSpend', 'consumerBudget', 'benefitsPaid', 'incomeTax',
     'corporateTax', 'publicWageBill', 'gdp', 'migrationIn', 'migrationOut',
-    'investorDividends', 'investableContribution',
+    'investorDividends', 'investableContribution', 'policySpending', 'transportSpending',
   ]) {
     if (!isFiniteNumber(lastMonth[key])) return `城市 ${id}.lastMonth.${key} 必须是有限数值`;
   }
   if (typeof lastMonth.note !== 'string') return `城市 ${id}.lastMonth.note 无效`;
+
+  const workforce = value.workforce;
+  if (!isRecord(workforce)) return `城市 ${id} 缺少 workforce`;
+  for (const key of ['skillLevel', 'trainedThisMonth', 'trainedTotal', 'trainedLastTick']) {
+    if (!isFiniteNumber(workforce[key])) return `城市 ${id}.workforce.${key} 必须是有限数值`;
+  }
+  if ((workforce.skillLevel as number) < 0 || (workforce.skillLevel as number) > 1) {
+    return `城市 ${id}.workforce.skillLevel 必须在 0–1 之间`;
+  }
+
+  const housing = value.housing;
+  if (!isRecord(housing)) return `城市 ${id} 缺少 housing`;
+  for (const key of ['units', 'demand', 'rentSubsidyPaid']) {
+    if (!isFiniteNumber(housing[key])) return `城市 ${id}.housing.${key} 必须是有限数值`;
+  }
+  if ((housing.units as number) < 0) return `城市 ${id}.housing.units 不能为负`;
 
   const technology = value.technology;
   if (!isRecord(technology)) return `城市 ${id} 缺少 technology`;
   for (const key of ['level', 'researchPoints', 'productivityMultiplier']) {
     if (!isFiniteNumber(technology[key])) return `城市 ${id}.technology.${key} 必须是有限数值`;
   }
-  if (technology.status !== 'initial-only' || typeof technology.note !== 'string') {
+  if (technology.status !== 'initial-only' && technology.status !== 'active') {
     return `城市 ${id}.technology 状态无效`;
   }
+  if (typeof technology.note !== 'string') return `城市 ${id}.technology.note 无效`;
 
   const politics = value.politics;
   if (!isRecord(politics)) return `城市 ${id} 缺少 politics`;
@@ -702,9 +850,10 @@ function validateCity(value: unknown, index: number): string | null {
   ) {
     return `城市 ${id}.politics.electionInMonths 无效`;
   }
-  if (politics.status !== 'initial-only' || typeof politics.note !== 'string') {
+  if (politics.status !== 'initial-only' && politics.status !== 'active') {
     return `城市 ${id}.politics 状态无效`;
   }
+  if (typeof politics.note !== 'string') return `城市 ${id}.politics.note 无效`;
 
   const realEstate = value.realEstate;
   if (!isRecord(realEstate)) return `城市 ${id} 缺少 realEstate`;
@@ -773,6 +922,28 @@ function validateCompany(value: unknown, index: number): string | null {
   if (!isRecord(previousMonth)) return `企业 ${id} 缺少 previousMonth`;
   for (const key of STATS_KEYS) {
     if (!isFiniteNumber(previousMonth[key])) return `企业 ${id}.previousMonth.${key} 必须是有限数值`;
+  }
+
+  const ai = value.ai;
+  if (!isRecord(ai)) return `企业 ${id} 缺少 ai`;
+  if (ai.style !== 'growth' && ai.style !== 'steady' && ai.style !== 'return') {
+    return `企业 ${id}.ai.style 无效`;
+  }
+  if (!isFiniteNumber(ai.riskTolerance) || !isFiniteNumber(ai.lossMonths) || !isFiniteNumber(ai.ageMonths)) {
+    return `企业 ${id}.ai 数值字段无效`;
+  }
+  if (typeof ai.lastDecision !== 'string' || !isFiniteNumber(ai.lastDecisionTick)) {
+    return `企业 ${id}.ai 决策记录无效`;
+  }
+  if (ai.lastPlan !== null) {
+    if (!isRecord(ai.lastPlan)) return `企业 ${id}.ai.lastPlan 无效`;
+    for (const key of [
+      'tick', 'utilization', 'targetJobs', 'expectedWageCost',
+      'hiringSubsidyPerHire', 'retentionSubsidyPerEmployee', 'investment',
+    ]) {
+      if (!isFiniteNumber(ai.lastPlan[key])) return `企业 ${id}.ai.lastPlan.${key} 无效`;
+    }
+    if (!Array.isArray(ai.lastPlan.reasons)) return `企业 ${id}.ai.lastPlan.reasons 无效`;
   }
   return null;
 }
@@ -1229,7 +1400,8 @@ function validateNotifications(
       return `notifications[${index}].priority 无效`;
     }
     if (notice.companyId !== undefined) {
-      if (typeof notice.companyId !== 'string' || !companyIds.has(notice.companyId)) {
+      // 企业可能已经倒闭：通知保留历史事件文本，因此只校验字段类型。
+      if (typeof notice.companyId !== 'string' || notice.companyId.length === 0) {
         return `notifications[${index}].companyId 无效`;
       }
     }
@@ -1242,6 +1414,274 @@ function validateNotifications(
       return `notifications[${index}] 文本无效`;
     }
     if (typeof notice.read !== 'boolean') return `notifications[${index}].read 无效`;
+  }
+  return null;
+}
+
+const POLICY_ID_SET = new Set<string>(POLICY_IDS);
+
+function validatePolitics(value: unknown, cityIds: Set<string>): string | null {
+  if (!isRecord(value)) return 'world.politics 无效';
+  if (!Array.isArray(value.cities)) return 'politics.cities 必须是数组';
+  if (!Array.isArray(value.elections)) return 'politics.elections 必须是数组';
+  if (value.cities.length !== cityIds.size) return 'politics.cities 必须覆盖全部城市';
+  const seenCities = new Set<string>();
+  for (let index = 0; index < value.cities.length; index++) {
+    const state = value.cities[index];
+    if (!isRecord(state)) return `politics.cities[${index}] 不是对象`;
+    if (typeof state.cityId !== 'string' || !cityIds.has(state.cityId)) {
+      return `politics.cities[${index}].cityId 无效`;
+    }
+    if (seenCities.has(state.cityId)) return `politics.cities 重复城市 ${state.cityId}`;
+    seenCities.add(state.cityId);
+    if (!Array.isArray(state.candidates) || state.candidates.length === 0) {
+      return `politics.cities[${index}].candidates 无效`;
+    }
+    const ids = new Set<string>();
+    for (const candidate of state.candidates) {
+      if (!isRecord(candidate)) return `politics.cities[${index}] 候选人不是对象`;
+      if (typeof candidate.id !== 'string' || ids.has(candidate.id)) {
+        return `politics.cities[${index}] 候选人 ID 无效或重复`;
+      }
+      ids.add(candidate.id);
+      if (typeof candidate.name !== 'string' || typeof candidate.party !== 'string') {
+        return `候选人 ${candidate.id} 文本字段无效`;
+      }
+      if (!isRecord(candidate.profile)) return `候选人 ${candidate.id}.profile 无效`;
+      if (!isRecord(candidate.profile.domainLeanings)) {
+        return `候选人 ${candidate.id}.profile.domainLeanings 无效`;
+      }
+      for (const leaning of Object.values(candidate.profile.domainLeanings)) {
+        if (!isFiniteNumber(leaning) || leaning < 0 || leaning > 1) {
+          return `候选人 ${candidate.id} 领域倾向越界`;
+        }
+      }
+      if (
+        candidate.profile.sectorAffinity !== null &&
+        typeof candidate.profile.sectorAffinity !== 'string'
+      ) {
+        return `候选人 ${candidate.id}.profile.sectorAffinity 无效`;
+      }
+      if (!isFiniteNumber(candidate.popularity)) return `候选人 ${candidate.id}.popularity 无效`;
+      if (typeof candidate.note !== 'string') return `候选人 ${candidate.id}.note 无效`;
+    }
+    if (state.leader !== null) {
+      if (!isRecord(state.leader) || typeof state.leader.id !== 'string' || !ids.has(state.leader.id)) {
+        return `politics.cities[${index}].leader 无效`;
+      }
+    }
+    if (!isFiniteNumber(state.termMonthsLeft) || state.termMonthsLeft < 0) {
+      return `politics.cities[${index}].termMonthsLeft 无效`;
+    }
+    if (!isFiniteNumber(state.electionCount)) return `politics.cities[${index}].electionCount 无效`;
+    if (state.lastElectionTick !== null && !isFiniteNumber(state.lastElectionTick)) {
+      return `politics.cities[${index}].lastElectionTick 无效`;
+    }
+    if (typeof state.lastResult !== 'string') return `politics.cities[${index}].lastResult 无效`;
+  }
+  return null;
+}
+
+function validatePolicies(policies: unknown, fiscal: unknown, cityIds: Set<string>): string | null {
+  if (!isRecord(policies)) return 'world.policies 无效';
+  for (const key of ['active', 'history', 'lastRuns', 'lastSelection']) {
+    if (!Array.isArray(policies[key])) return `policies.${key} 必须是数组`;
+  }
+  for (const [index, policy] of (policies.active as unknown[]).entries()) {
+    const error = validateActivePolicy(policy, `policies.active[${index}]`, cityIds);
+    if (error) return error;
+  }
+  for (const [index, policy] of (policies.history as unknown[]).entries()) {
+    const error = validateActivePolicy(policy, `policies.history[${index}]`, cityIds);
+    if (error) return error;
+    if (!isFiniteNumber((policy as Record<string, unknown>).endedTick)) {
+      return `policies.history[${index}].endedTick 无效`;
+    }
+  }
+  if (!isRecord(fiscal)) return 'world.fiscal 无效';
+  if (!Array.isArray(fiscal.ledger)) return 'fiscal.ledger 必须是数组';
+  if (!isInteger(fiscal.nextEntryId) || fiscal.nextEntryId < 1) {
+    return 'fiscal.nextEntryId 无效';
+  }
+  for (const [index, entry] of (fiscal.ledger as unknown[]).entries()) {
+    if (!isRecord(entry)) return `fiscal.ledger[${index}] 不是对象`;
+    if (typeof entry.id !== 'string') return `fiscal.ledger[${index}].id 无效`;
+    if (typeof entry.cityId !== 'string' || !cityIds.has(entry.cityId)) {
+      return `fiscal.ledger[${index}].cityId 无效`;
+    }
+    if (!isFiniteNumber(entry.amount)) return `fiscal.ledger[${index}].amount 无效`;
+    if (typeof entry.source !== 'string') return `fiscal.ledger[${index}].source 无效`;
+    if (!isInteger(entry.tick)) return `fiscal.ledger[${index}].tick 无效`;
+    if (entry.policyId !== undefined) {
+      if (typeof entry.policyId !== 'string' || !POLICY_ID_SET.has(entry.policyId)) {
+        return `fiscal.ledger[${index}].policyId 无效`;
+      }
+    }
+  }
+  return null;
+}
+
+function validateActivePolicy(value: unknown, path: string, cityIds: Set<string>): string | null {
+  if (!isRecord(value)) return `${path} 不是对象`;
+  if (typeof value.id !== 'string') return `${path}.id 无效`;
+  if (typeof value.cityId !== 'string' || !cityIds.has(value.cityId)) return `${path}.cityId 无效`;
+  if (typeof value.policyId !== 'string' || !POLICY_ID_SET.has(value.policyId)) {
+    return `${path}.policyId 无效`;
+  }
+  for (const key of ['budget', 'spent', 'monthsRemaining', 'startedTick']) {
+    if (!isFiniteNumber(value[key])) return `${path}.${key} 无效`;
+  }
+  if ((value.budget as number) < 0 || (value.spent as number) < 0) return `${path} 金额为负`;
+  if ((value.spent as number) > (value.budget as number) + 0.01) return `${path} 支出超过预算`;
+  if ((value.monthsRemaining as number) < 0) return `${path}.monthsRemaining 为负`;
+  if (value.status !== 'active' && value.status !== 'completed' && value.status !== 'cancelled') {
+    return `${path}.status 无效`;
+  }
+  if (value.targetSector !== null && typeof value.targetSector !== 'string') {
+    return `${path}.targetSector 无效`;
+  }
+  if (value.taxDirection !== null && value.taxDirection !== 'cut' && value.taxDirection !== 'raise') {
+    return `${path}.taxDirection 无效`;
+  }
+  if (value.transportTarget !== null && typeof value.transportTarget !== 'string') {
+    return `${path}.transportTarget 无效`;
+  }
+  if (!isRecord(value.effects)) return `${path}.effects 无效`;
+  for (const effect of Object.values(value.effects)) {
+    if (!isFiniteNumber(effect)) return `${path}.effects 含非数值`;
+  }
+  if (typeof value.reason !== 'string' || typeof value.note !== 'string') {
+    return `${path} 文本字段无效`;
+  }
+  return null;
+}
+
+function validateTransport(
+  value: unknown,
+  cityIds: Set<string>,
+  companyIds: Set<string>,
+): string | null {
+  if (!isRecord(value)) return 'world.transport 无效';
+  if (!Array.isArray(value.links)) return 'transport.links 必须是数组';
+  if (!Array.isArray(value.intracity)) return 'transport.intracity 必须是数组';
+  if (!Array.isArray(value.pendingSales)) return 'transport.pendingSales 必须是数组';
+  const linkIds = new Set<string>();
+  for (const [index, link] of (value.links as unknown[]).entries()) {
+    if (!isRecord(link)) return `transport.links[${index}] 不是对象`;
+    if (typeof link.id !== 'string' || linkIds.has(link.id)) return `transport.links[${index}] ID 无效或重复`;
+    linkIds.add(link.id);
+    if (typeof link.fromCityId !== 'string' || !cityIds.has(link.fromCityId)) {
+      return `transport.links[${index}].fromCityId 无效`;
+    }
+    if (typeof link.toCityId !== 'string' || !cityIds.has(link.toCityId)) {
+      return `transport.links[${index}].toCityId 无效`;
+    }
+    if (link.mode !== 'road' && link.mode !== 'rail') return `transport.links[${index}].mode 无效`;
+    for (const key of ['level', 'maxLevel']) {
+      if (!isFiniteNumber(link[key])) return `transport.links[${index}].${key} 无效`;
+    }
+    if ((link.level as number) < 0 || (link.level as number) > (link.maxLevel as number)) {
+      return `transport.links[${index}].level 越界`;
+    }
+    if (link.construction !== null) {
+      if (!isRecord(link.construction)) return `transport.links[${index}].construction 无效`;
+      for (const key of ['targetLevel', 'monthsRemaining', 'totalMonths', 'costPaid', 'startedTick']) {
+        if (!isFiniteNumber(link.construction[key])) {
+          return `transport.links[${index}].construction.${key} 无效`;
+        }
+      }
+    }
+    if (typeof link.note !== 'string') return `transport.links[${index}].note 无效`;
+  }
+  for (const [index, network] of (value.intracity as unknown[]).entries()) {
+    if (!isRecord(network)) return `transport.intracity[${index}] 不是对象`;
+    if (typeof network.cityId !== 'string' || !cityIds.has(network.cityId)) {
+      return `transport.intracity[${index}].cityId 无效`;
+    }
+    for (const key of ['roadLevel', 'railLevel', 'maxLevel']) {
+      if (!isFiniteNumber(network[key])) return `transport.intracity[${index}].${key} 无效`;
+    }
+    if ((network.roadLevel as number) < 0 || (network.railLevel as number) < 0) {
+      return `transport.intracity[${index}] 等级为负`;
+    }
+    if (network.construction !== null && !isRecord(network.construction)) {
+      return `transport.intracity[${index}].construction 无效`;
+    }
+    if (typeof network.note !== 'string') return `transport.intracity[${index}].note 无效`;
+  }
+  for (const [index, sale] of (value.pendingSales as unknown[]).entries()) {
+    if (!isRecord(sale)) return `transport.pendingSales[${index}] 不是对象`;
+    if (typeof sale.sellerCompanyId !== 'string' || !companyIds.has(sale.sellerCompanyId)) {
+      return `transport.pendingSales[${index}].sellerCompanyId 无效`;
+    }
+    for (const key of ['qty', 'grossValue', 'tick']) {
+      if (!isFiniteNumber(sale[key])) return `transport.pendingSales[${index}].${key} 无效`;
+    }
+    if (typeof sale.good !== 'string' || !(GOOD_IDS as readonly string[]).includes(sale.good)) {
+      return `transport.pendingSales[${index}].good 无效`;
+    }
+  }
+  if (!isRecord(value.lastMonth)) return 'transport.lastMonth 无效';
+  const stats = value.lastMonth;
+  for (const key of [
+    'tick', 'demand', 'capacity', 'overloadRatio', 'penaltyRate',
+    'capacityLossTotal', 'freightSubsidy', 'maintenancePaid',
+  ]) {
+    if (!isFiniteNumber(stats[key])) return `transport.lastMonth.${key} 无效`;
+  }
+  for (const key of ['corridors', 'intracity', 'trades']) {
+    if (!Array.isArray(stats[key])) return `transport.lastMonth.${key} 必须是数组`;
+  }
+  for (const [index, trade] of (stats.trades as unknown[]).entries()) {
+    if (!isRecord(trade)) return `transport.lastMonth.trades[${index}] 不是对象`;
+    for (const key of ['qty', 'grossValue', 'sellerProceeds', 'capacityLoss', 'penaltyRate', 'demand', 'capacity']) {
+      if (!isFiniteNumber(trade[key])) return `transport.lastMonth.trades[${index}].${key} 无效`;
+    }
+    if ((trade.sellerProceeds as number) > (trade.grossValue as number) + 0.01) {
+      return `transport.lastMonth.trades[${index}] 卖方所得超过付款`;
+    }
+  }
+  if (typeof stats.note !== 'string') return 'transport.lastMonth.note 无效';
+  return null;
+}
+
+function validateLifecycle(value: unknown, cityIds: Set<string>): string | null {
+  if (!isRecord(value)) return 'world.lifecycle 无效';
+  if (!Array.isArray(value.foundings)) return 'lifecycle.foundings 必须是数组';
+  if (!Array.isArray(value.liquidations)) return 'lifecycle.liquidations 必须是数组';
+  if (!isInteger(value.nextFoundingNumber) || !isInteger(value.nextLiquidationNumber)) {
+    return 'lifecycle 序号无效';
+  }
+  for (const [index, record] of (value.foundings as unknown[]).entries()) {
+    if (!isRecord(record)) return `lifecycle.foundings[${index}] 不是对象`;
+    if (typeof record.companyId !== 'string' || typeof record.companyName !== 'string') {
+      return `lifecycle.foundings[${index}] 企业标识无效`;
+    }
+    if (typeof record.cityId !== 'string' || !cityIds.has(record.cityId)) {
+      return `lifecycle.foundings[${index}].cityId 无效`;
+    }
+    for (const key of ['capital', 'investorCount', 'governmentGrant', 'tick']) {
+      if (!isFiniteNumber(record[key])) return `lifecycle.foundings[${index}].${key} 无效`;
+    }
+    if (!Array.isArray(record.investors)) return `lifecycle.foundings[${index}].investors 无效`;
+    if (typeof record.note !== 'string') return `lifecycle.foundings[${index}].note 无效`;
+  }
+  for (const [index, record] of (value.liquidations as unknown[]).entries()) {
+    if (!isRecord(record)) return `lifecycle.liquidations[${index}] 不是对象`;
+    if (typeof record.companyId !== 'string' || typeof record.companyName !== 'string') {
+      return `lifecycle.liquidations[${index}] 企业标识无效`;
+    }
+    for (const key of [
+      'tick', 'employeesReleased', 'cash', 'debt', 'debtRepaid',
+      'debtForgiven', 'shareholderPayout', 'inventoryBookValue',
+    ]) {
+      if (!isFiniteNumber(record[key])) return `lifecycle.liquidations[${index}].${key} 无效`;
+    }
+    if (!Array.isArray(record.holdings)) return `lifecycle.liquidations[${index}].holdings 无效`;
+    if (!Array.isArray(record.inventoryWrittenOff)) {
+      return `lifecycle.liquidations[${index}].inventoryWrittenOff 无效`;
+    }
+    if (typeof record.note !== 'string') return `lifecycle.liquidations[${index}].note 无效`;
   }
   return null;
 }

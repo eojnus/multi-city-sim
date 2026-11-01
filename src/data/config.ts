@@ -3,7 +3,7 @@
 
 export const DEMO_CONFIG = {
   meta: {
-    label: '演示参数 v0.2',
+    label: '演示参数 v0.3',
     assumptions: [
       '1 回合 = 1 个游戏月；月度结算。',
       '人口按群体统计，不为每个居民建立独立 AI。',
@@ -11,7 +11,7 @@ export const DEMO_CONFIG = {
       '居民消费使用上一月可支配收入，消费倾向 96%；其中 6% 在结算时转入居民投资实体。',
       '企业注资同时补充营运资金并按演示汇率提升产能，不是真实资本形成模型。',
       '政府收入为个人所得税 + 企业所得税；财政不足时按可用资金支付福利。',
-      '城市间贸易为点对点企业交易，运输成本与物流容量尚未模拟。',
+      '城市间贸易为点对点企业交易；运输容量只影响卖方该笔收益，不限制成交数量。',
       '游戏 GDP = 本月企业产出价值 - 中间投入价值（不含公共服务）。',
       '【暂定】股票分有投票权与仅分红两类；企业作为买方在股票市场买入的股票一律为有投票权类别。',
       '【暂定】企业融资可对不同出资方分别约定股份类别；企业出资方也可以获得仅分红股份。',
@@ -22,6 +22,13 @@ export const DEMO_CONFIG = {
       '【暂定】居民投资实体不展示内部明细，资金来自居民收入的一部分，并参与二级股票买卖。',
       '【暂定】政府牵头的跨城协议由市政府自动组织，企业按演示规则接受或拒绝。',
       '【暂定】少量持股阈值 5%；低于该比例只通知分红、可参与的表决和重大变化。',
+      '【暂定】企业按“扩张/稳健/回报”三种风格经营，具体系数是可替换原型。',
+      '【暂定】企业成立者可为居民投资群体（可联合）、现有企业与城市政府；数量上限可配置。',
+      '【暂定】企业倒闭按“现金 → 债务 → 剩余资产按股分配”处理，库存注销、债务减免均留痕。',
+      '【暂定】每城多候选人 + 领导人被动属性；非玩家政府按城市弱项与领导人倾向选政策。',
+      '【暂定】玩家为市长时政策必须由玩家选择，AI 不代选；选举资格与任期是演示规则。',
+      '【暂定】15 项政策均为可替换原型：预算、期限、效果系数集中配置。',
+      '【暂定】城际容量超载只减少卖方该笔收益；买方付款不变，差额记为无主体的收益损失。',
     ],
   },
   simulation: {
@@ -76,6 +83,168 @@ export const DEMO_CONFIG = {
     minMarkup: 0.01,
     maxMarkup: 0.12,
     enabled: true,
+  },
+  /** v0.3：企业自动经营的风格系数（可替换原型，不是最终策划）。 */
+  companyAi: {
+    styles: {
+      growth: {
+        jobFactor: 1,
+        utilizationBias: 0.04,
+        investmentMonths: 4,
+        investmentShare: 0.25,
+        priceBias: -0.01,
+        reserveMonths: 1.2,
+      },
+      steady: {
+        jobFactor: 0.94,
+        utilizationBias: 0,
+        investmentMonths: 6,
+        investmentShare: 0.18,
+        priceBias: 0,
+        reserveMonths: 1.5,
+      },
+      return: {
+        jobFactor: 0.88,
+        utilizationBias: -0.03,
+        investmentMonths: 9,
+        investmentShare: 0.1,
+        priceBias: 0.01,
+        reserveMonths: 2,
+      },
+    },
+    /** 现金只够这么多月工资时，分别压缩到 90% / 70% 岗位需求（补贴会改变该判断）。 */
+    cashJobThresholdHigh: 1.5,
+    cashJobThresholdLow: 0.5,
+    priceBiasMin: 0.85,
+    priceBiasMax: 1.15,
+    maxInvestmentShareOfCash: 0.3,
+    /** 设备/扩产的单位产能成本（信用点/单位）。 */
+    capacityCostPerUnit: 900,
+    /** 每次扩产最多增加的产能比例。 */
+    maxExpansionShare: 0.08,
+    /** 新企业保护期（月）：期内不因亏损直接倒闭。 */
+    newCompanyGraceMonths: 6,
+  },
+  /** v0.3：企业成立与倒闭的演示限制（口径、固定/动态与数值均待用户决定）。 */
+  lifecycle: {
+    minCapital: 250_000,
+    /** 资本转换为初始产能：capacity = capital / capitalPerCapacity。 */
+    capitalPerCapacity: 500,
+    maxCompaniesPerCity: 16,
+    maxInvestorsPerSyndicate: 3,
+    maxCompaniesPerInvestorGroup: 3,
+    maxCompaniesPerCompany: 1,
+    maxGovernmentCompaniesPerCity: 1,
+    maxFoundingsPerCityMonth: 1,
+    /** 同一城市两次自动创办之间的最小间隔（月），避免企业数量爆发式增长。 */
+    foundingCooldownMonths: 4,
+    /** 每个居民投资实体对应的居民人数（仅用于资格判断，不新增人口）。 */
+    populationPerInvestorGroup: 60_000,
+    bankruptcy: {
+      cashWageMonths: 0.25,
+      lossMonths: 4,
+      /** 无杠杆但长期亏损时也允许退出。 */
+      longLossMonths: 8,
+      /** 债务达到信贷额度的该比例时视为无法继续融资（接近额度上限）。 */
+      debtRatioForDefault: 0.95,
+      minAgeMonths: 6,
+      /** 企业纾困政策生效时，倒闭判定延后观察的月份。 */
+      reliefGraceMonths: 2,
+    },
+    maxHistory: 60,
+  },
+  /** v0.3：候选人与领导人的演示规则。 */
+  politics: {
+    candidatesPerCity: 3,
+    termMonths: 24,
+    /** 玩家参选的演示成本（从玩家现金扣除，进入城市财政）。 */
+    electionCost: 60_000,
+    /** 领导人重点行业带来的生产率加成（有上限、可追溯）。 */
+    sectorProductivityBonus: 0.06,
+    /** 领导人领域倾向对政策效果的放大比例（0–0.2）。 */
+    domainEffectScale: 0.2,
+  },
+  /** v0.3：15 项政策的集中参数（全部为可替换原型）。 */
+  policies: {
+    defaultDurationMonths: 6,
+    cooldownMonths: 2,
+    maxActivePerCity: 2,
+    maxHistory: 60,
+    ledgerLimit: 800,
+    minBudget: 80_000,
+    /** 非玩家政府的财政安全垫：至少保留这么多个月公共工资。 */
+    aiReserveWageMonths: 1,
+    budgets: {
+      hiringSubsidy: 700_000,
+      retentionSubsidy: 700_000,
+      vocationalTraining: 400_000,
+      publicJobs: 900_000,
+      startupSupport: 600_000,
+      companyRelief: 600_000,
+      equipmentSubsidy: 700_000,
+      keyIndustrySupport: 800_000,
+      researchGrant: 500_000,
+      educationInvestment: 700_000,
+      intercityTradeSupport: 400_000,
+      transportInvestment: 1_500_000,
+      unemploymentAid: 500_000,
+      housingSupport: 900_000,
+      taxAdjustment: 0,
+    },
+    hiring: { subsidyRate: 0.4 },
+    retention: { subsidyRate: 0.25 },
+    training: {
+      costPerTrainee: 1_400,
+      skillGainPerTrainee: 0.00004,
+      maxSkillGainPerMonth: 0.02,
+    },
+    publicJobs: { wageMonthsReserved: 3 },
+    startup: { capitalRelief: 0.3, grantRate: 0.2 },
+    relief: { wageMonths: 1, maxCompanies: 3 },
+    equipment: { subsidyRate: 0.5 },
+    keyIndustry: { productivityBonus: 0.08, grantShare: 0.3 },
+    research: {
+      costPerPoint: 5_000,
+      pointsPerLevel: 40,
+      productivityPerLevel: 0.02,
+      maxMultiplier: 1.15,
+    },
+    education: { skillGainPerBudget: 1 / 2_500_000, maxSkillGainPerMonth: 0.006 },
+    tradeSupport: { reimbursementShare: 1 },
+    unemploymentAid: { extraPerUnemployed: 220 },
+    housing: { unitCost: 90_000, rentSubsidyShare: 0.35 },
+    tax: {
+      adjustStep: 0.02,
+      minIncomeTax: 0.05,
+      maxIncomeTax: 0.3,
+      minCorporateTax: 0.02,
+      maxCorporateTax: 0.2,
+      aiRaiseMonths: 1.5,
+      aiCutMonths: 4,
+    },
+  },
+  /** v0.3：政府主导的城内/城际公路与铁路容量（单位：货物单位/月）。 */
+  transport: {
+    maxLevel: 4,
+    initialRoadLevel: 1,
+    initialRailLevel: 0,
+    road: { capacityPerLevel: 1_200_000, buildCostPerLevel: 900_000, buildMonthsPerLevel: 3 },
+    rail: { capacityPerLevel: 3_600_000, buildCostPerLevel: 2_600_000, buildMonthsPerLevel: 5 },
+    /** 每月维护费 = 建设成本 × 该比率 × 等级。 */
+    maintenanceRatePerLevel: 0.004,
+    penalty: { strength: 0.6, max: 0.5 },
+    intracity: {
+      roadCapacityPerLevel: 2_400_000,
+      railCapacityPerLevel: 6_000_000,
+      buildCostRoad: 350_000,
+      buildCostRail: 900_000,
+      buildMonthsPerLevel: 2,
+      maxLevel: 3,
+      initialRoadLevel: 1,
+      initialRailLevel: 0,
+      efficiencyFloor: 0.55,
+      maintenanceRatePerLevel: 0.003,
+    },
   },
   externalDemand: {
     /** 区域外净出口（演示）：吸收超出目标库存的消费品，付款来自区域外。 */

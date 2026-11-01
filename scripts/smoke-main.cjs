@@ -243,7 +243,6 @@ app.whenReady().then(async () => {
   const corruptAfterTick = await read(win2, `({
     autosaveDisabled: window.__lanwan.store.autosaveDisabled,
     date: window.__lanwan.store.dateLabel,
-    bytesPreserved: false,
   })`);
   const corruptShot = await capture(win2, 'smoke-corrupt-autosave.png');
   corruptAfterTick.bytesPreserved = corruptBytesBefore === corruptBytesAfter;

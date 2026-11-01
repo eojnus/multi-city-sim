@@ -6189,3 +6189,869 @@ kbd {
     transition: none;
   }
 }
+
+/* ---------------------------------------------------------------- v0.3：政府、政策与交通 */
+
+.status-badge.is-active {
+  border-color: rgba(95, 227, 192, 0.32);
+  background: rgba(95, 227, 192, 0.07);
+  color: rgba(95, 227, 192, 0.92);
+}
+
+.gov-sub-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  margin: 9px 0 4px;
+}
+
+.gov-sub-head > span {
+  color: var(--muted);
+  font-size: 8.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.gov-sub-head > em {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 7px;
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.gov-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 10px;
+  margin-top: 2px;
+}
+
+.gov-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 2.5px 0;
+  border-bottom: 1px dotted rgba(124, 196, 205, 0.1);
+  font-size: 8.4px;
+}
+
+.gov-row span {
+  flex: none;
+  color: var(--faint);
+}
+
+.gov-row b {
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 8.6px;
+  font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.gov-selection {
+  margin: 7px 0 0;
+  padding: 5px 7px;
+  border: 1px solid rgba(124, 196, 205, 0.13);
+  border-left: 2px solid rgba(242, 193, 78, 0.42);
+  border-radius: 5px;
+  background: rgba(3, 10, 17, 0.32);
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.gov-selection b {
+  display: block;
+  margin-bottom: 1px;
+  color: var(--gold);
+  font-size: 7px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+}
+
+.gov-mode {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px 8px;
+  margin-top: 6px;
+  padding: 5px 7px;
+  border: 1px dashed rgba(124, 196, 205, 0.2);
+  border-radius: 5px;
+  color: var(--faint);
+  font-size: 8px;
+  line-height: 1.45;
+}
+
+.gov-mode.is-player {
+  border-style: solid;
+  border-color: rgba(95, 227, 192, 0.24);
+  color: var(--muted);
+}
+
+.gov-mode .ken-btn {
+  height: 23px;
+  padding: 0 8px;
+  font-size: 8px;
+  white-space: nowrap;
+}
+
+.gov-active,
+.gov-policies,
+.fiscal-brief {
+  margin-top: 2px;
+}
+
+.gov-empty {
+  margin: 0;
+  color: var(--faint);
+  font-size: 8px;
+}
+
+.policy-active-card {
+  margin-bottom: 4px;
+  padding: 5px 7px;
+  border: 1px solid rgba(95, 227, 192, 0.2);
+  border-left: 2px solid rgba(95, 227, 192, 0.55);
+  border-radius: 5px;
+  background: linear-gradient(90deg, rgba(95, 227, 192, 0.055), rgba(255, 255, 255, 0.008));
+}
+
+.policy-active-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.policy-active-head b {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 8.6px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.policy-active-head span {
+  flex: none;
+  color: var(--teal);
+  font-family: var(--mono);
+  font-size: 7.2px;
+}
+
+.policy-active-meta {
+  margin-top: 1px;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 7px;
+}
+
+.policy-active-meta b {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.policy-active-effect {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 7.2px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.policy-active-foot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 3px;
+}
+
+.policy-active-foot .ken-btn {
+  height: 21px;
+  padding: 0 7px;
+  font-size: 7.4px;
+}
+
+.policy-list {
+  max-height: clamp(240px, 42vh, 380px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(124, 196, 205, 0.32) transparent;
+}
+
+.policy-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.policy-list::-webkit-scrollbar-thumb {
+  border-radius: 3px;
+  background: rgba(124, 196, 205, 0.28);
+}
+
+.policy-item {
+  margin-bottom: 4px;
+  padding: 5px 7px;
+  border: 1px solid rgba(124, 196, 205, 0.13);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.012);
+}
+
+.policy-item.is-locked {
+  border-color: rgba(124, 196, 205, 0.08);
+  background: rgba(255, 255, 255, 0.004);
+  opacity: 0.82;
+}
+
+.policy-item-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.policy-item-head b {
+  min-width: 0;
+  color: var(--text);
+  font-size: 8.8px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.policy-domain {
+  flex: none;
+  padding: 1px 5px;
+  border: 1px solid rgba(179, 136, 255, 0.28);
+  border-radius: 7px;
+  color: rgba(179, 136, 255, 0.9);
+  font-size: 6.6px;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.policy-target,
+.policy-effect {
+  margin: 2px 0 0;
+  color: var(--faint);
+  font-size: 7.1px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.policy-effect {
+  color: var(--muted);
+}
+
+.policy-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px;
+  margin-top: 4px;
+}
+
+.policy-actions .ken-btn {
+  height: 22px;
+  padding: 0 7px;
+  font-size: 7.2px;
+  white-space: nowrap;
+}
+
+.policy-budget-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--faint);
+  font-size: 6.8px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.policy-budget-field input {
+  width: 128px;
+  height: 22px;
+  padding: 0 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: rgba(3, 10, 17, 0.6);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 8px;
+  font-variant-numeric: tabular-nums;
+  color-scheme: dark;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.policy-budget-field input:hover {
+  border-color: rgba(124, 196, 205, 0.45);
+}
+
+.policy-budget-field input:focus-visible {
+  border-color: rgba(242, 193, 78, 0.55);
+  outline: 1px solid var(--gold);
+  outline-offset: 1px;
+}
+
+.policy-budget-field input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.policy-budget {
+  margin-left: auto;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 6.8px;
+  white-space: nowrap;
+}
+
+.policy-why {
+  margin: 3px 0 0;
+  color: rgba(255, 171, 118, 0.9);
+  font-size: 7px;
+  line-height: 1.4;
+}
+
+.fiscal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fiscal-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2.5px 0;
+  border-bottom: 1px dotted rgba(124, 196, 205, 0.1);
+}
+
+.fiscal-kind {
+  color: var(--muted);
+  font-size: 7.4px;
+  white-space: nowrap;
+}
+
+.fiscal-source {
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 6.8px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.fiscal-amount {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 7.4px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.fiscal-amount.is-positive {
+  color: var(--teal);
+}
+
+.fiscal-amount.is-negative {
+  color: var(--red);
+}
+
+.fiscal-empty {
+  color: var(--faint);
+  font-size: 7.4px;
+}
+
+/* ---------------------------------------------------------------- v0.3：交通 */
+
+.transport-kpis {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.transport-kpi {
+  min-width: 0;
+  padding: 4px 5px;
+  border: 1px solid rgba(124, 196, 205, 0.12);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.012);
+}
+
+.transport-kpi span {
+  display: block;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 6.8px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.transport-kpi b {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+
+.transport-kpi.is-warn b {
+  color: var(--orange);
+}
+
+.transport-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 7.4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.transport-table thead th:nth-child(1) {
+  width: 26%;
+}
+
+.transport-table thead th:nth-child(2) {
+  width: 13%;
+}
+
+.transport-table thead th:nth-child(3) {
+  width: 19%;
+}
+
+.transport-table thead th:nth-child(4) {
+  width: 19%;
+}
+
+.transport-table thead th:nth-child(5) {
+  width: 23%;
+}
+
+.transport-table th,
+.transport-table td {
+  padding: 4px 3px;
+  border-bottom: 1px solid rgba(124, 196, 205, 0.1);
+  vertical-align: top;
+  text-align: left;
+}
+
+.transport-table thead th {
+  padding: 0 3px 3px;
+  color: var(--faint);
+  font-family: var(--ui-font);
+  font-size: 6.6px;
+  font-weight: 400;
+}
+
+.transport-table tbody th {
+  font-weight: 400;
+}
+
+.transport-table tbody th b {
+  display: block;
+  color: var(--text);
+  font-family: var(--ui-font);
+  font-size: 8px;
+  font-weight: 500;
+}
+
+.transport-table tbody th em {
+  display: block;
+  margin-top: 1px;
+  color: var(--faint);
+  font-size: 6.4px;
+  font-style: normal;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.transport-table td em {
+  display: block;
+  color: var(--faint);
+  font-size: 6.4px;
+  font-style: normal;
+}
+
+.transport-table tr.is-locked .transport-mode {
+  opacity: 0.7;
+}
+
+.transport-mode {
+  display: inline-block;
+  padding: 0 4px;
+  border: 1px solid rgba(124, 196, 205, 0.24);
+  border-radius: 6px;
+  color: var(--cyan);
+  font-family: var(--ui-font);
+  font-size: 6.6px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.transport-mode.is-rail {
+  border-color: rgba(179, 136, 255, 0.32);
+  color: var(--violet);
+}
+
+.transport-state .is-building,
+.intracity-stats .is-building {
+  color: var(--gold);
+}
+
+.transport-invest {
+  min-width: 74px;
+}
+
+.transport-invest > span {
+  display: block;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.transport-invest-btn {
+  width: 100%;
+  height: 21px;
+  margin-top: 2px;
+  padding: 0 5px;
+  font-size: 7px;
+}
+
+.transport-why {
+  display: block;
+  margin-top: 2px;
+  color: rgba(255, 171, 118, 0.9);
+  font-size: 6.4px;
+  line-height: 1.3;
+}
+
+.intracity-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.intracity-cell {
+  min-width: 0;
+  padding: 5px 6px;
+  border: 1px solid rgba(124, 196, 205, 0.12);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.012);
+}
+
+.intracity-cell > span {
+  display: block;
+  color: var(--faint);
+  font-size: 6.8px;
+}
+
+.intracity-cell > b {
+  display: block;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.intracity-cell > small {
+  display: block;
+  overflow: hidden;
+  margin-top: 1px;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 6.4px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.intracity-cell .ken-btn {
+  width: 100%;
+  height: 21px;
+  margin-top: 3px;
+  padding: 0 5px;
+  font-size: 7px;
+}
+
+.intracity-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  margin-top: 4px;
+  color: var(--faint);
+  font-size: 7.2px;
+}
+
+.intracity-stats b {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 7.4px;
+  font-weight: 500;
+}
+
+/* ---------------------------------------------------------------- v0.3：企业生命周期与自动经营 */
+
+.company-lifecycle {
+  margin-top: 9px;
+  padding-top: 7px;
+  border-top: 1px dashed rgba(124, 196, 205, 0.16);
+}
+
+.lifecycle-limits {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  color: var(--faint);
+  font-size: 7.2px;
+}
+
+.lifecycle-limits b {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 7.4px;
+  font-weight: 500;
+}
+
+.lifecycle-limits b.is-ok {
+  color: var(--teal);
+}
+
+.lifecycle-limits b.is-warn {
+  color: var(--orange);
+}
+
+.lifecycle-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.lifecycle-actions .ken-btn {
+  height: 23px;
+  padding: 0 7px;
+  font-size: 7.4px;
+  white-space: nowrap;
+}
+
+.lifecycle-lists {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.lifecycle-list {
+  min-width: 0;
+}
+
+.lifecycle-list-title {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--faint);
+  font-size: 6.8px;
+  letter-spacing: 0.04em;
+}
+
+.lifecycle-list ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lifecycle-row {
+  padding: 3px 0;
+  border-bottom: 1px dotted rgba(124, 196, 205, 0.1);
+}
+
+.lifecycle-main {
+  display: block;
+}
+
+.lifecycle-main b {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 7.6px;
+  font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.lifecycle-main em {
+  display: block;
+  color: var(--faint);
+  font-size: 6.4px;
+  font-style: normal;
+}
+
+.lifecycle-meta {
+  display: block;
+  margin-top: 1px;
+  color: var(--muted);
+  font-size: 6.4px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.lifecycle-row.is-exit .lifecycle-main b {
+  color: rgba(255, 171, 118, 0.92);
+}
+
+.lifecycle-empty {
+  color: var(--faint);
+  font-size: 7px;
+}
+
+.company-ai .ai-style {
+  margin: 0;
+  color: var(--muted);
+  font-size: 7.6px;
+  line-height: 1.5;
+}
+
+.company-ai .ai-decision {
+  margin: 4px 0 0;
+  padding: 4px 6px;
+  border-left: 2px solid rgba(242, 193, 78, 0.4);
+  background: rgba(3, 10, 17, 0.32);
+  color: var(--muted);
+  font-size: 7.4px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.company-ai .ai-decision b {
+  margin-right: 5px;
+  color: var(--gold);
+  font-size: 6.8px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+}
+
+.ai-plan {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px;
+  margin-top: 4px;
+}
+
+.ai-plan > span {
+  min-width: 0;
+  padding: 4px 5px;
+  border: 1px solid rgba(124, 196, 205, 0.12);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.012);
+}
+
+.ai-plan i {
+  display: block;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 6.6px;
+  font-style: normal;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.ai-plan b {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 8.6px;
+  font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-reasons {
+  margin: 3px 0 0;
+  padding-left: 12px;
+  color: var(--faint);
+  font-size: 6.8px;
+  line-height: 1.45;
+}
+
+.ai-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 8px;
+  margin-top: 5px;
+}
+
+.ai-loss {
+  color: var(--faint);
+  font-size: 7.2px;
+}
+
+.ai-loss.is-warn {
+  color: var(--red);
+}
+
+.ai-foot .ken-btn {
+  height: 23px;
+  padding: 0 7px;
+  font-size: 7.2px;
+  white-space: nowrap;
+}
+
+@media (max-width: 1180px) {
+  .gov-summary,
+  .transport-kpis,
+  .lifecycle-lists,
+  .ai-plan {
+    gap: 3px;
+  }
+
+  .gov-row,
+  .policy-item-head b {
+    font-size: 8px;
+  }
+
+  .policy-actions .ken-btn {
+    font-size: 6.9px;
+  }
+
+  .policy-budget-field {
+    font-size: 6.4px;
+  }
+
+  .policy-budget-field input {
+    width: 120px;
+  }
+
+  .transport-table {
+    font-size: 7px;
+  }
+
+  .policy-list {
+    max-height: clamp(220px, 38vh, 320px);
+  }
+}
+
+@media (max-height: 720px) {
+  .policy-list {
+    max-height: 240px;
+  }
+}

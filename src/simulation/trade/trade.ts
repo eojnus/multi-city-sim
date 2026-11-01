@@ -4,6 +4,7 @@ import { RECIPES } from '../../data/demo-data';
 import { round2 } from '../core/math';
 import { productionTarget } from '../production/production';
 import { creditAvailable } from '../companies/credit';
+import { corridorKey, recordIntercitySale } from '../transport/network';
 
 /**
  * 点对点跨城市企业贸易。先校验双方城市、商品、库存、需求与资金，
@@ -77,12 +78,21 @@ export function executeTradeRoutes(
     // ---- 原子提交 ----
     exporter.inventory[route.good] = round2(exporterStock - qty);
     importer.inventory[route.good] = round2((importer.inventory[route.good] ?? 0) + qty);
-    exporter.cash = round2(exporter.cash + value);
     importer.cash = round2(importer.cash - value);
-    exporter.lastMonth.revenue = round2(exporter.lastMonth.revenue + value);
-    // 跨城合同只计出口，避免经营计划里 sold + exported 重复计算同一批货。
-    exporter.lastMonth.exported = round2(exporter.lastMonth.exported + qty);
     importer.lastMonth.inputCost = round2(importer.lastMonth.inputCost + value);
+    // 出口所得在期末按运输容量结算；容量不足时减少卖方该笔收益，不额外扣款。
+    recordIntercitySale(world, {
+      tick: world.time.tick,
+      path: 'contract',
+      fromCityId: fromCity.id,
+      toCityId: toCity.id,
+      corridorKey: corridorKey(fromCity.id, toCity.id),
+      sellerCompanyId: exporter.id,
+      buyerCompanyId: importer.id,
+      good: route.good,
+      qty,
+      grossValue: value,
+    });
 
     const flow: TradeFlow = {
       routeId: route.id,
@@ -95,6 +105,7 @@ export function executeTradeRoutes(
       qty,
       unitPrice: price,
       value,
+      path: 'contract',
     };
     flows.push(flow);
     log.push({

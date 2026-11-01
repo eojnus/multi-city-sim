@@ -13,6 +13,7 @@ import { RECIPES } from '../../data/demo-data';
 import { GOOD_IDS } from '../companies/company';
 import { offeredStock } from '../markets/markets';
 import { clamp, round2 } from '../core/math';
+import { corridorKey, recordIntercitySale } from '../transport/network';
 
 /**
  * 政府牵头的跨城多企业贸易协议（演示实现）。
@@ -551,13 +552,20 @@ export function executeAgreements(
       }
       buyer.inventory[item.good] = round2((buyer.inventory[item.good] ?? 0) + qty);
       buyer.cash = round2(buyer.cash - value);
-      seller.cash = round2(seller.cash + value);
+      // 卖方所得在期末按运输容量统一结算（容量不足时少获得该笔收益）。
+      recordIntercitySale(world, {
+        tick,
+        path: 'agreement',
+        fromCityId,
+        toCityId,
+        corridorKey: corridorKey(fromCityId, toCityId),
+        sellerCompanyId: seller.id,
+        buyerCompanyId: buyer.id,
+        good: item.good,
+        qty,
+        grossValue: value,
+      });
 
-      seller.lastMonth.revenue = round2(seller.lastMonth.revenue + value);
-      seller.lastMonth.sold = round2(
-        seller.lastMonth.sold + (item.good === seller.recipeOutput ? qty : 0),
-      );
-      seller.lastMonth.exported = round2(seller.lastMonth.exported + qty);
       buyer.lastMonth.inputCost = round2(buyer.lastMonth.inputCost + value);
 
       item.deliveredQty = round2(item.deliveredQty + qty);
@@ -582,6 +590,7 @@ export function executeAgreements(
         qty,
         unitPrice: item.unitPrice,
         value,
+        path: 'agreement',
       };
       flows.push(flow);
 

@@ -50,6 +50,37 @@ import {
   proposeAgreement,
 } from '../simulation/agreements/agreements';
 import { DEMO_CONFIG } from '../data/config';
+import { SAVE_FORMAT_VERSION } from '../simulation/contracts/types';
+import { POLICY_DEFINITIONS } from '../simulation/policies/definitions';
+import {
+  cancelPolicy,
+  canStartPolicy,
+  policySummary,
+  startPolicy,
+} from '../simulation/policies/policies';
+import {
+  appointPlayerMayor,
+  playerIsMayor,
+  runForMayor,
+  stepDownPlayerMayor,
+} from '../simulation/politics/politics';
+import {
+  cityCorridorSummary,
+  corridorCapacity,
+  estimateCorridorUpgrade,
+  estimateIntracityUpgrade,
+  intracityCapacity,
+} from '../simulation/transport/network';
+import {
+  companyStyleDescription,
+  companyStyleLabel,
+  decisionSummary,
+} from '../simulation/companies/ai/strategy';
+import {
+  expandCompanyCapacity,
+  foundCompany,
+  lifecycleLimits,
+} from '../simulation/companies/lifecycle/lifecycle';
 
 export type ViewMode = 'region' | 'city';
 export type LayerMode = 'population' | 'economy' | 'industry';
@@ -765,16 +796,18 @@ export class GameStore {
     this.emit();
   }
 
-  /** 明确标注的演示身份：用于验证市长专属路径；选举系统未实现，不代表玩家已当选。 */
+  /** 明确标注的演示身份：用于验证市长专属路径（可绕过选举，不代表选举结果）。 */
   setMayorDemo(cityId: string | null): void {
-    this.world.player.roles.mayorCityId = cityId;
     if (cityId) {
+      appointPlayerMayor(this.world, cityId);
       const city = this.world.cities.find((candidate) => candidate.id === cityId);
       this.toast(
-        `演示身份：${city?.name ?? cityId} 市长（仅用于测试市长专属信息；市长选举尚未实现）。`,
+        `演示身份：${city?.name ?? cityId} 市长。政策将由你选择，AI 不会代选。`,
         'warning',
       );
     } else {
+      const current = this.world.player.roles.mayorCityId;
+      if (current) stepDownPlayerMayor(this.world, current);
       this.toast('已退出市长演示身份。', 'info');
     }
     void this.autosave();
@@ -823,5 +856,229 @@ export class GameStore {
 
   companionDistricts(cityId: string): DistrictDefinition[] {
     return this.layouts[cityId]?.districts ?? [];
+  }
+
+  // ---- v0.3：政府、政策、交通、企业与生命周期 ----
+
+  /** 当前存档格式版本（供界面与桌面验证脚本读取，不硬编码）。 */
+  get saveFormatVersion(): number {
+    return SAVE_FORMAT_VERSION;
+  }
+
+  get fiscalLedger() {
+    return this.world.fiscal.ledger.slice(-40).reverse();
+  }
+
+  policyView(cityId: string) {
+    const city = this.world.cities.find((entry) => entry.id === cityId);
+    const summary = policySummary(this.world, cityId);
+    return {
+      city,
+      isPlayerMayor: playerIsMayor(this.world, cityId),
+      leader: summary.leader,
+      lastSelection: summary.lastSelection,
+      active: summary.active,
+      history: this.world.policies.history.filter((entry) => entry.cityId === cityId).slice(-6),
+      definitions: POLICY_DEFINITIONS.map((definition) => {
+        const check = canStartPolicy(this.world, cityId, definition.id, DEMO_CONFIG);
+        return {
+          ...definition,
+          defaultBudget: DEMO_CONFIG.policies.budgets[definition.id],
+          available: check.ok,
+          reason: check.error ?? '',
+        };
+      }),
+    };
+  }
+
+  /** 玩家市长选择政策；非玩家政府由模拟自动选择，这里会拒绝。 */
+  selectPolicy(policyId: (typeof POLICY_DEFINITIONS)[number]['id'], options: {
+    budget?: number;
+    taxDirection?: 'cut' | 'raise';
+    transportTarget?: string;
+    targetSector?: string;
+  } = {}): boolean {
+    const cityId = this.selectedCityId;
+    if (!cityId) {
+      this.toast('请先选择城市。', 'error');
+      return false;
+    }
+    if (!playerIsMayor(this.world, cityId)) {
+      this.toast('只有该城市市长可以决定政策；当前由政府自主施政。', 'warning');
+      return false;
+    }
+    const result = startPolicy(this.world, cityId, policyId, DEMO_CONFIG, {
+      budget: options.budget,
+      taxDirection: options.taxDirection,
+      transportTarget: options.transportTarget,
+      targetSector: options.targetSector as never,
+      reason: '玩家市长选择',
+    });
+    if (!result.ok) {
+      this.toast(result.error ?? '政策未能启动', 'error');
+      this.emit();
+      return false;
+    }
+    this.toast(result.note ?? '政策已启动。', 'success');
+    void this.autosave();
+    this.emit();
+    return true;
+  }
+
+  stopPolicy(policyId: (typeof POLICY_DEFINITIONS)[number]['id']): boolean {
+    const cityId = this.selectedCityId;
+    if (!cityId) return false;
+    const result = cancelPolicy(this.world, cityId, policyId);
+    if (!result.ok) {
+      this.toast(result.error ?? '无法停止政策', 'error');
+      this.emit();
+      return false;
+    }
+    this.toast(result.note ?? '政策已停止。', 'info');
+    void this.autosave();
+    this.emit();
+    return true;
+  }
+
+  runForMayor(cityId: string): boolean {
+    const result = runForMayor(this.world, cityId, DEMO_CONFIG);
+    if (!result.ok) {
+      this.toast(result.error ?? '参选失败', 'error');
+      this.emit();
+      return false;
+    }
+    this.toast(result.note ?? '已参加市长选举。', 'success');
+    void this.autosave();
+    this.emit();
+    return true;
+  }
+
+  transportView(cityId: string) {
+    const city = this.world.cities.find((entry) => entry.id === cityId);
+    const intracity = this.world.transport.intracity.find((entry) => entry.cityId === cityId);
+    const links = this.world.transport.links
+      .filter((link) => link.fromCityId === cityId || link.toCityId === cityId)
+      .map((link) => {
+        const partner = link.fromCityId === cityId ? link.toCityId : link.fromCityId;
+        const estimate = estimateCorridorUpgrade(this.world, link.fromCityId, link.toCityId, link.mode, DEMO_CONFIG);
+        return {
+          ...link,
+          partner,
+          capacity: corridorCapacity(this.world, link.fromCityId, link.toCityId, DEMO_CONFIG),
+          estimate,
+        };
+      })
+      .sort((a, b) => a.id.localeCompare(b.id));
+    const corridors = cityCorridorSummary(this.world, cityId, DEMO_CONFIG);
+    return {
+      city,
+      links,
+      corridors,
+      intracity: intracity
+        ? {
+            ...intracity,
+            capacity: intracityCapacity(intracity, DEMO_CONFIG),
+            stats: this.world.transport.lastMonth.intracity.find((entry) => entry.cityId === cityId) ?? null,
+            estimateRoad: estimateIntracityUpgrade(this.world, cityId, 'road', DEMO_CONFIG),
+            estimateRail: estimateIntracityUpgrade(this.world, cityId, 'rail', DEMO_CONFIG),
+          }
+        : null,
+      stats: this.world.transport.lastMonth,
+    };
+  }
+
+  /** 政府投资交通：target = 'intracity:road' | 'intracity:rail' | 城际线路 ID。 */
+  investTransport(target: string): boolean {
+    const cityId = this.selectedCityId;
+    if (!cityId) {
+      this.toast('请先选择城市。', 'error');
+      return false;
+    }
+    const link = this.world.transport.links.find((entry) => entry.id === target);
+    const label = link
+      ? `${link.fromCityId}—${link.toCityId} ${link.mode === 'rail' ? '铁路' : '公路'}`
+      : target === 'intracity:rail'
+        ? '城内铁路'
+        : '城内公路';
+    // 与政策列表共用同一施工入口：记账、冷却与财政校验完全一致。
+    const result = startPolicy(this.world, cityId, 'transportInvestment', DEMO_CONFIG, {
+      transportTarget: target,
+      reason: `政府投资：${label}`,
+    });
+    if (!result.ok) {
+      this.toast(result.error ?? '交通投资失败', 'error');
+      this.emit();
+      return false;
+    }
+    this.toast(result.note ?? '交通建设已开工。', 'success');
+    void this.autosave();
+    this.emit();
+    return true;
+  }
+
+  lifecycleView(cityId: string) {
+    return {
+      limits: lifecycleLimits(this.world, cityId, DEMO_CONFIG),
+      foundings: this.world.lifecycle.foundings.filter((entry) => entry.cityId === cityId).slice(-5).reverse(),
+      liquidations: this.world.lifecycle.liquidations.filter((entry) => entry.cityId === cityId).slice(-5).reverse(),
+      canFoundInvestorGroup: this.world.investors.filter((group) => group.cityId === cityId).some((group) => group.cash > 0),
+    };
+  }
+
+  /** 创办企业：居民投资群体（可联合）/现有企业/市政府；校验与出资由模拟层完成。 */
+  foundCompany(founderType: 'investorGroup' | 'company' | 'government', companyId?: string): boolean {
+    const cityId = this.selectedCityId;
+    if (!cityId) {
+      this.toast('请先选择城市。', 'error');
+      return false;
+    }
+    const result = foundCompany(
+      this.world,
+      { cityId, founderType, founderId: companyId },
+      DEMO_CONFIG,
+    );
+    if (!result.ok) {
+      this.toast(result.error ?? '创办企业失败', 'error');
+      this.emit();
+      return false;
+    }
+    this.rebuildLayouts();
+    this.toast(result.note ?? '新企业已成立。', 'success');
+    void this.autosave();
+    this.emit();
+    return true;
+  }
+
+  expandCapacity(companyId: string): boolean {
+    const company = this.world.companies.find((entry) => entry.id === companyId);
+    if (!company) return false;
+    const result = expandCompanyCapacity(this.world, company, DEMO_CONFIG, []);
+    if (!result.ok) {
+      this.toast(result.error ?? '扩产失败', 'error');
+      this.emit();
+      return false;
+    }
+    this.toast(result.note ?? '扩产完成。', 'success');
+    void this.autosave();
+    this.emit();
+    return true;
+  }
+
+  companyAiView(companyId: string) {
+    const company = this.world.companies.find((entry) => entry.id === companyId);
+    if (!company) return null;
+    return {
+      style: company.ai.style,
+      styleLabel: companyStyleLabel(company.ai.style),
+      styleDescription: companyStyleDescription(company.ai.style),
+      decision: decisionSummary(company),
+      plan: company.ai.lastPlan,
+      lossMonths: company.ai.lossMonths,
+      ageMonths: company.ai.ageMonths,
+      expansionEstimate: Math.round(company.capacity * DEMO_CONFIG.companyAi.maxExpansionShare),
+      expansionCost: Math.round(
+        company.capacity * DEMO_CONFIG.companyAi.maxExpansionShare * DEMO_CONFIG.companyAi.capacityCostPerUnit,
+      ),
+    };
   }
 }

@@ -9,6 +9,8 @@ import {
   proposeAgreement,
 } from '../src/simulation/agreements/agreements';
 import { DEMO_CONFIG } from '../src/data/config';
+import { createWorldLedgers } from '../src/simulation/markets/markets';
+import { settleTransportMonth } from '../src/simulation/transport/settlement';
 import { GOOD_IDS } from '../src/simulation/companies/company';
 import { round2 } from '../src/simulation/core/math';
 import type { Company, TradeAgreement, WorldState } from '../src/simulation/contracts/types';
@@ -180,6 +182,8 @@ describe('政府牵头的跨城贸易协议（暂定演示规则）', () => {
     const totalCashBefore = round2(buyerCashBefore + sellerCashBefore);
 
     const flows = executeAgreements(world, DEMO_CONFIG, 2, []);
+    // 卖方所得在期末按运输容量统一入账（演示流程）；本场景需求低于容量。
+    settleTransportMonth(world, DEMO_CONFIG, [], createWorldLedgers(world));
 
     expect(flows).toHaveLength(1);
     const flow = flows[0]!;

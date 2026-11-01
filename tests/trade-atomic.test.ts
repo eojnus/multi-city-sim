@@ -2,7 +2,14 @@ import { describe, expect, it } from 'vitest';
 import { Simulation } from '../src/simulation/core/simulation';
 import { executeTradeRoutes } from '../src/simulation/trade/trade';
 import { DEMO_CONFIG } from '../src/data/config';
-import type { Company, CompanyMonthlyStats } from '../src/simulation/contracts/types';
+import { createWorldLedgers } from '../src/simulation/markets/markets';
+import { settleTransportMonth } from '../src/simulation/transport/settlement';
+import type { Company, CompanyMonthlyStats, WorldState } from '../src/simulation/contracts/types';
+
+/** 跨城成交的资金在期末按容量统一结算；测试显式完成结算步骤。 */
+function settle(world: WorldState): void {
+  settleTransportMonth(world, DEMO_CONFIG, [], createWorldLedgers(world));
+}
 
 function blankStats(): CompanyMonthlyStats {
   return {
@@ -71,7 +78,7 @@ describe('跨城交易原子性', () => {
     expect(snapshot(exporter)).toEqual(exporterBefore);
   });
 
-  it('成功交易同时提交融资、货物、资金和统计记录', () => {
+  it('成功交易同时提交融资、货物与买方付款，卖方所得在期末运输结算入账', () => {
     const { world, exporter, importer } = prepareTrade();
     importer.cash = 500;
     const flows = executeTradeRoutes(world, DEMO_CONFIG, []);
@@ -85,9 +92,15 @@ describe('跨城交易原子性', () => {
     expect(importer.inventory.grain).toBe(10);
     expect(importer.lastMonth.inputCost).toBe(500);
     expect(exporter.inventory.grain).toBe(990);
+    // 成交时卖方尚未入账，资金进入待结算的跨城销售（不回滚、不重复扣款）。
+    expect(exporter.cash).toBe(0);
+    expect(world.transport.pendingSales).toHaveLength(1);
+    settle(world);
+    // 容量 1400 单位/月，需求 10，不触发惩罚：卖方获得全额。
     expect(exporter.cash).toBe(500);
     expect(exporter.lastMonth.revenue).toBe(500);
     expect(exporter.lastMonth.exported).toBe(10);
+    expect(world.transport.lastMonth.trades[0]!.penaltyRate).toBe(0);
   });
 
   it('成功交易可以使用营运资金信贷，并把借款与成交一起提交', () => {
@@ -103,6 +116,7 @@ describe('跨城交易原子性', () => {
     expect(importer.inventory.grain).toBe(3.2);
     expect(importer.lastMonth.inputCost).toBe(160);
     expect(exporter.inventory.grain).toBe(996.8);
+    settle(world);
     expect(exporter.cash).toBe(160);
   });
 

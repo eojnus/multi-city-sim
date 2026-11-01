@@ -138,6 +138,120 @@ const DECISION_LABELS: Record<'pending' | 'accepted' | 'declined', string> = {
   declined: '拒绝',
 };
 
+const POLICY_DOMAIN_LABELS: Record<string, string> = {
+  employment: '就业',
+  enterprise: '企业',
+  industry: '产业',
+  technology: '科技',
+  trade: '贸易',
+  welfare: '民生',
+  fiscal: '财政',
+};
+
+const FISCAL_KIND_LABELS: Record<string, string> = {
+  incomeTax: '个人所得税',
+  corporateTax: '企业所得税',
+  publicWages: '公共部门工资',
+  benefits: '居民转移支付',
+  policySpending: '政策支出',
+  policyTransfer: '政策拨款',
+  transportConstruction: '交通建设',
+  transportMaintenance: '交通维护',
+  debtForgiven: '债务减免',
+  liquidationProceeds: '企业退出清算',
+  electionFee: '参选费用',
+};
+
+const FOUNDER_LABELS: Record<string, string> = {
+  investorGroup: '居民投资群体',
+  company: '现有企业',
+  government: '市政府',
+};
+
+const TRANSPORT_MODE_LABELS: Record<string, string> = {
+  road: '公路',
+  rail: '铁路',
+};
+
+const EFFECT_LABELS: Record<string, string> = {
+  paid: '已支付',
+  invested: '投资额',
+  hiresSubsidised: '补贴新员工',
+  employeesRetained: '稳岗人数',
+  trained: '结训人次',
+  skillGain: '技能提升',
+  companiesHelped: '受助企业',
+  companiesSupported: '支持企业',
+  points: '研究点',
+  unitsBuilt: '新建住房',
+  jobsCreated: '新增岗位',
+  jobs: '公共岗位',
+  peopleHelped: '受助居民',
+  incomeRateDelta: '个税变化',
+  corporateRateDelta: '企税变化',
+  productivityBonus: '生产率加成',
+};
+
+const MONEY_EFFECTS = new Set(['paid', 'invested']);
+const RATE_EFFECTS = new Set(['incomeRateDelta', 'corporateRateDelta', 'productivityBonus', 'skillGain']);
+
+function policyDomainLabel(domain: string): string {
+  return POLICY_DOMAIN_LABELS[domain] ?? domain;
+}
+
+function fiscalKindLabel(kind: string): string {
+  return FISCAL_KIND_LABELS[kind] ?? '财政收支';
+}
+
+function founderLabel(type: string): string {
+  return FOUNDER_LABELS[type] ?? type;
+}
+
+function transportModeLabel(mode: string): string {
+  return TRANSPORT_MODE_LABELS[mode] ?? mode;
+}
+
+function effectValue(key: string, value: number): string {
+  if (!Number.isFinite(value)) return '—';
+  if (MONEY_EFFECTS.has(key)) return money(value);
+  if (RATE_EFFECTS.has(key)) {
+    const sign = value > 0 ? '+' : '';
+    // 技能提升是 0–1 的比例；其他比率量级更小，用百分比统一展示。
+    return `${sign}${(value * 100).toFixed(2)}%`;
+  }
+  if (Number.isInteger(value)) return num(value);
+  const rounded = Math.round(value * 100) / 100;
+  if (rounded === 0 && value !== 0) return '不足 0.01';
+  return num(rounded, 2);
+}
+
+/** 生效政策效果摘要：金额取整、其他最多两位小数，并隐藏内部字段。 */
+function effectSummary(effects: Record<string, number>): string {
+  const entries = Object.entries(effects).filter(
+    ([key, value]) => key !== 'passiveTick' && Number.isFinite(value),
+  );
+  if (entries.length === 0) return '本月暂无效果记录';
+  return entries.map(([key, value]) => `${EFFECT_LABELS[key] ?? '效果'} ${effectValue(key, value)}`).join(' · ');
+}
+
+/**
+ * 政策不可用原因面向玩家，只保留简短中文；
+ * 具体错误文本（内部校验、资金算式）不直接展示。
+ */
+function shortPolicyReason(reason: string): string {
+  const text = reason.trim();
+  if (!text) return '';
+  if (text.includes('已有正在执行')) return '该政策正在执行';
+  const cooldown = text.match(/还需\s*(\d+)\s*个月/);
+  if (text.includes('冷却')) return `冷却中，还需 ${cooldown?.[1] ?? '数'} 个月`;
+  if (text.includes('已达上限')) return '同时执行的政策已达上限';
+  if (text.includes('财政资金不足')) return '财政资金不足';
+  if (text.includes('低于最低额')) return '预算低于最低额';
+  if (text.includes('不存在') || text.includes('未知') || text.includes('无效')) return '当前不可用';
+  return text.length > 26 ? `${text.slice(0, 26)}…` : text;
+}
+
+
 function shareKindLabel(kind: ShareKind): string {
   return SHARE_KIND_LABELS[kind];
 }
@@ -490,12 +604,12 @@ export function renderMayorDemo(store: GameStore, city: City): string {
         data-testid="mayor-demo-toggle"
         data-focus-key="mayor-${esc(city.id)}"
         aria-pressed="${active}"
-        title="${active ? `退出 ${esc(city.name)} 市长演示身份` : '仅用于查看市长专属信息，不代表选举结果'}"
+        title="${active ? `退出 ${esc(city.name)} 市长演示身份` : '直接以市长身份查看政策面板，不代表选举结果'}"
       >${active ? '退出市长演示' : '以市长身份查看（演示）'}</button>
       ${
         active
-          ? '<span class="mayor-demo-badge">演示：市长身份 · 选举系统未实现</span>'
-          : '<span class="mayor-demo-hint">选举未实现，仅作演示入口。</span>'
+          ? '<span class="mayor-demo-badge">演示：市长身份 · 政策由你选择</span>'
+          : '<span class="mayor-demo-hint">也可以通过「政府与政策」参选市长（演示规则）。</span>'
       }
     </div>`;
 }
@@ -518,53 +632,526 @@ function renderPulse(city: City): string {
     </div>`;
 }
 
-function renderSystems(city: City): string {
+function renderSystems(store: GameStore, city: City): string {
+  const politics = store.world.politics.cities.find((entry) => entry.cityId === city.id) ?? null;
+  const isPlayerMayor = store.mayorCityId === city.id;
+  const leaderName = isPlayerMayor ? '玩家（演示市长）' : politics?.leader?.name ?? '暂未产生';
+  const leaderParty = isPlayerMayor ? '玩家执政' : politics?.leader?.party ?? '—';
+  const termMonths = politics?.termMonthsLeft ?? 0;
+  const techActive = city.technology.status === 'active' || city.technology.level > 1;
   return `
     <section class="panel-section">
       <div class="section-head">
         <div>
-          <span class="kicker">INITIAL STATES</span>
+          <span class="kicker">POLICY-DRIVEN SYSTEMS</span>
           <h2>科技 · 政治 · 房地产</h2>
         </div>
-        <span class="status-badge">初始展示 · 系统未实现</span>
+        <span class="status-badge is-active">已接入（演示）</span>
       </div>
       <div class="system-grid">
         <div class="system-card">
           <h3>科技</h3>
-          <span class="system-status">initial-only</span>
+          <span class="system-status">${techActive ? '随研发政策变化' : '待研发投入'}</span>
           <div class="system-values">
             <span>等级 <b>Lv.${num(city.technology.level)}</b></span>
             <span>生产率 <b>×${city.technology.productivityMultiplier.toFixed(3)}</b></span>
             <span>研究点 <b>${num(city.technology.researchPoints)}</b></span>
           </div>
-          <p class="system-note">${esc(city.technology.note)}</p>
+          <p class="system-note">研发资助会把财政投入转为研究点，累计到阈值后提升等级与生产率；教育投入则缓慢提高劳动力技能。</p>
         </div>
         <div class="system-card">
           <h3>政治</h3>
-          <span class="system-status">initial-only</span>
+          <span class="system-status">${isPlayerMayor ? '玩家在任' : '民选政府'}</span>
           <div class="system-values">
+            <span>领导人 <b>${esc(leaderName)}</b></span>
+            <span>党派 <b>${esc(leaderParty)}</b></span>
+            <span>任期 <b>${termMonths} 个月</b></span>
             <span>支持率 <b>${pct(city.politics.approval / 100, 0)}</b></span>
-            <span>执政党 <b>${esc(city.politics.rulingParty)}</b></span>
-            <span>选举 <b>${
-              city.politics.electionInMonths === null
-                ? '—'
-                : `${num(city.politics.electionInMonths)} 个月后`
-            }</b></span>
           </div>
           <p class="system-note">${esc(city.politics.note)}</p>
         </div>
         <div class="system-card">
           <h3>房地产</h3>
-          <span class="system-status">initial-only</span>
+          <span class="system-status">最小住房机制</span>
           <div class="system-values">
             <span>均价 <b>${money(city.realEstate.avgHomePrice)}</b></span>
             <span>租金指数 <b>${num(city.realEstate.rentIndex)}</b></span>
             <span>空置率 <b>${pct(city.realEstate.vacancyRate)}</b></span>
           </div>
-          <p class="system-note">${esc(city.realEstate.note)}</p>
+          <p class="system-note">住房支持会建设住房单元并发放租金补贴，影响住房存量与租金指数；住房买卖尚未接入。</p>
         </div>
       </div>
-      <p class="note">以上为初始值展示，仅参与有限的演示计算；没有研发、选举或住房交易等可操作入口。</p>
+      <p class="note">政治由选举模块推进，科技随研发投入变化；以上仍是可替换的演示方案，不代表正式制度。</p>
+    </section>`;
+}
+
+interface PolicyStartOptions {
+  policyId: string;
+  label: string;
+  testId?: string;
+  disabled?: boolean;
+  disabledReason?: string;
+  taxDirection?: string;
+  transportTarget?: string;
+  hint?: string;
+  focusKey?: string;
+}
+
+function policyStartButton(options: PolicyStartOptions): string {
+  const disabled = options.disabled === true;
+  const attrs = [
+    'type="button"',
+    'class="ken-btn ken-btn--green ken-btn--mini policy-start"',
+    'data-action="start-policy"',
+    `data-policy-id="${esc(options.policyId)}"`,
+    options.taxDirection ? `data-tax-direction="${esc(options.taxDirection)}"` : '',
+    options.transportTarget ? `data-transport-target="${esc(options.transportTarget)}"` : '',
+    options.testId ? `data-testid="${esc(options.testId)}"` : '',
+    options.focusKey ? `data-focus-key="${esc(options.focusKey)}"` : '',
+    disabled ? 'disabled' : '',
+    `title="${esc(
+      disabled
+        ? options.disabledReason?.trim() || '当前不可用'
+        : options.hint ?? `${options.label}（演示参数）`,
+    )}"`,
+  ]
+    .filter(Boolean)
+    .join(' ');
+  return `<button ${attrs}>${esc(options.label)}</button>`;
+}
+
+interface InvestButtonOptions {
+  target: string;
+  testId: string;
+  label: string;
+  disabled: boolean;
+  reason?: string;
+  hint: string;
+}
+
+function investTransportButton(options: InvestButtonOptions): string {
+  const attrs = [
+    'type="button"',
+    'class="ken-btn ken-btn--blue ken-btn--mini transport-invest-btn"',
+    'data-action="invest-transport"',
+    `data-target="${esc(options.target)}"`,
+    `data-testid="${esc(options.testId)}"`,
+    `data-focus-key="transport-${esc(options.target)}"`,
+    options.disabled ? 'disabled' : '',
+    `title="${esc(options.disabled ? options.reason?.trim() || '当前不可投资' : options.hint)}"`,
+  ]
+    .filter(Boolean)
+    .join(' ');
+  return `<button ${attrs}>${esc(options.label)}</button>`;
+}
+
+export function renderGovernmentSection(store: GameStore, city: City): string {
+  const view = store.policyView(city.id);
+  const politics = store.world.politics.cities.find((entry) => entry.cityId === city.id) ?? null;
+  const isPlayerMayor = view.isPlayerMayor;
+  const leaderName = isPlayerMayor ? '玩家（演示市长）' : politics?.leader?.name ?? '暂未产生';
+  const leaderParty = isPlayerMayor ? '玩家执政' : politics?.leader?.party ?? '—';
+  const termMonths = Math.max(0, politics?.termMonthsLeft ?? 0);
+  const electionCost = DEMO_CONFIG.politics.electionCost;
+  const ledger = store.fiscalLedger.filter((entry) => entry.cityId === city.id).slice(0, 6);
+
+  const activeCards =
+    view.active.length === 0
+      ? '<p class="gov-empty">当前没有生效中的政策。</p>'
+      : view.active
+          .map((policy) => {
+            const definition = view.definitions.find((entry) => entry.id === policy.policyId);
+            const name = definition?.name ?? policy.policyId;
+            return `
+              <div class="policy-active-card" data-policy-id="${esc(policy.policyId)}">
+                <div class="policy-active-head">
+                  <b>${esc(name)}</b>
+                  <span>剩余 ${Math.max(0, policy.monthsRemaining)} 个月</span>
+                </div>
+                <div class="policy-active-meta">
+                  已支出 <b>${money(policy.spent)}</b> / 预算 ${money(policy.budget)}
+                </div>
+                <p class="policy-active-effect">${esc(effectSummary(policy.effects))}</p>
+                ${
+                  isPlayerMayor
+                    ? `<div class="policy-active-foot">
+                        <button
+                          type="button"
+                          class="ken-btn ken-btn--grey ken-btn--mini"
+                          data-action="stop-policy"
+                          data-policy-id="${esc(policy.policyId)}"
+                          data-testid="stop-policy-${esc(policy.policyId)}"
+                          data-focus-key="stop-${esc(policy.policyId)}"
+                          title="停止「${esc(name)}」；未使用预算不再支出"
+                        >停止</button>
+                      </div>`
+                    : ''
+                }
+              </div>`;
+          })
+          .join('');
+
+  const policyCards = view.definitions
+    .map((definition) => {
+      const reason = shortPolicyReason(definition.reason);
+      const isTax = definition.id === 'taxAdjustment';
+      const isTransport = definition.id === 'transportInvestment';
+      const budgetLabel = isTax
+        ? '不产生财政支出'
+        : `${isTransport ? '参考预算' : '默认预算'} ${money(definition.defaultBudget)}`;
+      // 税收按税率方向执行、交通按工程造价出资，两者都不由玩家分配预算。
+      const budgetField =
+        isTax || isTransport
+          ? ''
+          : `<label class="policy-budget-field">
+              <span>预算（信用点）</span>
+              <input
+                type="number"
+                data-policy-budget="${esc(definition.id)}"
+                data-testid="policy-budget-${esc(definition.id)}"
+                data-default-budget="${definition.defaultBudget}"
+                min="0"
+                step="10000"
+                inputmode="numeric"
+                value="${definition.defaultBudget}"
+                ${definition.available ? '' : 'disabled'}
+              >
+            </label>`;
+
+
+      let buttons = '';
+      if (isTax) {        buttons = [
+          policyStartButton({
+            policyId: definition.id,
+            label: '上调税率',
+            testId: `policy-${definition.id}`,
+            focusKey: `policy-${definition.id}-raise`,
+            disabled: !definition.available,
+            disabledReason: reason,
+            taxDirection: 'raise',
+            hint: '个人所得税与企业所得税同时上调一档（演示）',
+          }),
+          policyStartButton({
+            policyId: definition.id,
+            label: '下调税率',
+            testId: `policy-${definition.id}-cut`,
+            focusKey: `policy-${definition.id}-cut`,
+            disabled: !definition.available,
+            disabledReason: reason,
+            taxDirection: 'cut',
+            hint: '个人所得税与企业所得税同时下调一档（演示）',
+          }),
+        ].join('');
+      } else if (isTransport) {
+        const transport = store.transportView(city.id);
+        const network = transport.intracity;
+        const road = network?.estimateRoad ?? null;
+        const rail = network?.estimateRail ?? null;
+        const constructionReason = network?.construction
+          ? `城内${transportModeLabel(network.construction.kind)}正在建设中`
+          : '';
+        const roadReason = !road
+          ? '暂无城内交通网络'
+          : !road.ok
+            ? constructionReason || '城内道路已达最高等级'
+            : city.treasury < road.cost
+              ? '财政资金不足'
+              : '';
+        const railReason = !rail
+          ? '暂无城内交通网络'
+          : !rail.ok
+            ? constructionReason || '城内铁路已达最高等级'
+            : city.treasury < rail.cost
+              ? '财政资金不足'
+              : '';
+        const linkButtons = transport.links
+          .filter((link) => link.estimate.ok)
+          .map((link) =>
+            policyStartButton({
+              policyId: definition.id,
+              label: `${cityName(store.world, link.partner)} · ${transportModeLabel(link.mode)} · ${money(link.estimate.cost)}`,
+              transportTarget: link.id,
+              focusKey: `policy-${definition.id}-${link.id}`,
+              disabled: !definition.available || city.treasury < link.estimate.cost,
+              disabledReason:
+                city.treasury < link.estimate.cost ? '财政资金不足' : reason,
+              hint: `升级 ${cityName(store.world, link.partner)} ${transportModeLabel(link.mode)}线路，工期 ${link.estimate.months} 个月`,
+            }),
+          )
+          .join('');
+        buttons = [
+          policyStartButton({
+            policyId: definition.id,
+            label: `城内道路 · ${money(road?.cost ?? 0)}`,
+            testId: `policy-${definition.id}`,
+            focusKey: `policy-${definition.id}-road`,
+            transportTarget: 'intracity:road',
+            disabled: !definition.available || !road?.ok || city.treasury < (road?.cost ?? 0),
+            disabledReason: roadReason || reason,
+            hint: '由财政出资开工城内道路升级',
+          }),
+          policyStartButton({
+            policyId: definition.id,
+            label: `城内铁路 · ${money(rail?.cost ?? 0)}`,
+            testId: `policy-${definition.id}-rail`,
+            focusKey: `policy-${definition.id}-rail`,
+            transportTarget: 'intracity:rail',
+            disabled: !definition.available || !rail?.ok || city.treasury < (rail?.cost ?? 0),
+            disabledReason: railReason || reason,
+            hint: '由财政出资开工城内铁路升级',
+          }),
+          linkButtons,
+        ].join('');
+      } else {
+        buttons = policyStartButton({
+          policyId: definition.id,
+          label: '启动',
+          testId: `policy-${definition.id}`,
+          focusKey: `policy-${definition.id}`,
+          disabled: !definition.available,
+          disabledReason: reason,
+        });
+      }
+
+      return `
+        <article class="policy-item ${definition.available ? '' : 'is-locked'}">
+          <div class="policy-item-head">
+            <b>${esc(definition.name)}</b>
+            <span class="policy-domain">${esc(policyDomainLabel(definition.domain))}</span>
+          </div>
+          <p class="policy-target">作用对象：${esc(definition.target)}</p>
+          <p class="policy-effect" title="${esc(definition.effect)}">${esc(definition.effect)}</p>
+          <div class="policy-actions">
+            ${budgetField}
+            ${buttons}
+            <span class="policy-budget">${esc(budgetLabel)}</span>
+          </div>
+          ${
+            definition.available
+              ? ''
+              : `<p class="policy-why">${esc(reason || '当前不可用')}</p>`
+          }
+        </article>`;
+    })
+    .join('');
+
+  const ledgerRows =
+    ledger.length === 0
+      ? '<li class="fiscal-empty">本月暂无财政流水。</li>'
+      : ledger
+          .map(
+            (entry) => `
+            <li class="fiscal-row" title="${esc(entry.source)}">
+              <span class="fiscal-kind">${esc(fiscalKindLabel(entry.kind))}</span>
+              <span class="fiscal-source">${esc(entry.source)}</span>
+              <b class="fiscal-amount ${signClass(entry.amount)}">${signedMoney(entry.amount)}</b>
+            </li>`,
+          )
+          .join('');
+
+  return `
+    <section class="panel-section government-section" data-testid="government-section">
+      <div class="section-head">
+        <div>
+          <span class="kicker">CITY GOVERNMENT</span>
+          <h2>政府与政策</h2>
+        </div>
+        <span class="section-tag">${view.active.length} 项生效</span>
+      </div>
+      <div class="gov-summary">
+        <div class="gov-row"><span>现任领导人</span><b>${esc(leaderName)}</b></div>
+        <div class="gov-row"><span>党派</span><b>${esc(leaderParty)}</b></div>
+        <div class="gov-row"><span>任期剩余</span><b>${termMonths} 个月</b></div>
+        <div class="gov-row"><span>支持率</span><b>${pct(city.politics.approval / 100, 0)}</b></div>
+      </div>
+      <p class="gov-selection"><b>最近选择</b>${esc(view.lastSelection)}</p>
+      ${
+        isPlayerMayor
+          ? `<p class="gov-mode is-player">政策由你选择；每次启动从城市财政支出，预算与期限为演示参数。</p>`
+          : `<div class="gov-mode">
+              <span>当前由政府自主施政；参选后可自己选择政策</span>
+              <button
+                type="button"
+                class="ken-btn ken-btn--green ken-btn--mini"
+                data-action="run-for-mayor"
+                data-testid="run-for-mayor"
+                data-focus-key="run-for-mayor"
+                title="支付 ${money(electionCost)} 信用点参选费用并立即举行一次选举（演示规则）"
+              >参选市长（${money(electionCost)}）</button>
+            </div>`
+      }
+      <div class="gov-active">
+        <div class="gov-sub-head"><span>生效政策</span><em>${view.active.length} 项</em></div>
+        ${activeCards}
+      </div>
+      ${
+        isPlayerMayor
+          ? `<div class="gov-policies">
+              <div class="gov-sub-head"><span>可选政策</span><em>共 ${view.definitions.length} 项</em></div>
+              <div class="policy-list" data-scroll="policies">${policyCards}</div>
+              <p class="fin-hint">全部 ${view.definitions.length} 项政策均在列表中；同时生效的政策数量与冷却受演示规则限制。</p>
+            </div>`
+          : ''
+      }
+      <div class="fiscal-brief">
+        <div class="gov-sub-head"><span>财政流水</span><em>最近 ${ledger.length} 条</em></div>
+        <ul class="fiscal-list">${ledgerRows}</ul>
+      </div>
+    </section>`;
+}
+
+export function renderTransportSection(store: GameStore, city: City): string {
+  const view = store.transportView(city.id);
+  const stats = view.stats;
+  const treasury = city.treasury;
+  const corridors = new Map(view.corridors.map((entry) => [entry.withCityId, entry]));
+
+  const linkRows =
+    view.links.length === 0
+      ? '<tr><td class="mini-empty" colspan="5">本城暂无城际线路。</td></tr>'
+      : view.links
+          .map((link) => {
+            const partner = cityName(store.world, link.partner);
+            const estimate = link.estimate;
+            const construction = link.construction;
+            const atMax = link.level >= link.maxLevel;
+            const noMoney = treasury < estimate.cost;
+            const canInvest = estimate.ok && !noMoney;
+            const reason = construction
+              ? `建设中 ${construction.monthsRemaining}/${construction.totalMonths} 月`
+              : atMax
+                ? '已达最高等级'
+                : noMoney
+                  ? '财政资金不足'
+                  : '';
+            const corridor = corridors.get(link.partner);
+            return `
+              <tr class="${canInvest ? '' : 'is-locked'}">
+                <th scope="row">
+                  <b>${esc(partner)}</b>
+                  <em>需求 ${qty(corridor?.demand ?? 0)} · 惩罚 ${pct(corridor?.penaltyRate ?? 0, 1)}</em>
+                </th>
+                <td><span class="transport-mode is-${esc(link.mode)}">${transportModeLabel(link.mode)}</span></td>
+                <td>${link.level}/${link.maxLevel}<em>${qty(link.capacity)}</em></td>
+                <td class="transport-state">${
+                  construction
+                    ? `<span class="is-building">升级中 → ${construction.targetLevel} 级</span>`
+                    : `<span>${atMax ? '已达最高' : '可升级'}</span>`
+                }</td>
+                <td class="transport-invest">
+                  <span>${estimate.ok ? `${money(estimate.cost)} · ${estimate.months} 月` : '—'}</span>
+                  ${investTransportButton({
+                    target: link.id,
+                    testId: `transport-link-${link.id}`,
+                    label: estimate.ok ? '投资' : '不可用',
+                    disabled: !canInvest,
+                    reason: reason || estimate.error,
+                    hint: `由 ${city.name} 财政出资升级 ${partner} ${transportModeLabel(link.mode)}线路`,
+                  })}
+                  ${reason ? `<em class="transport-why">${esc(reason)}</em>` : ''}
+                </td>
+              </tr>`;
+          })
+          .join('');
+
+  const network = view.intracity;
+  const intracityStats = network?.stats ?? null;
+  const road = network?.estimateRoad ?? null;
+  const rail = network?.estimateRail ?? null;
+  const construction = network?.construction ?? null;
+  const constructionReason = construction
+    ? `城内${transportModeLabel(construction.kind)}正在建设中`
+    : '';
+  const roadReason = !road
+    ? '暂无城内交通网络'
+    : !road.ok
+      ? constructionReason || '城内道路已达最高等级'
+      : treasury < road.cost
+        ? '财政资金不足'
+        : '';
+  const railReason = !rail
+    ? '暂无城内交通网络'
+    : !rail.ok
+      ? constructionReason || '城内铁路已达最高等级'
+      : treasury < rail.cost
+        ? '财政资金不足'
+        : '';
+
+  return `
+    <section class="panel-section transport-section" data-testid="transport-section">
+      <div class="section-head">
+        <div>
+          <span class="kicker">FREIGHT CAPACITY</span>
+          <h2>交通与运输容量</h2>
+        </div>
+        <span class="section-tag">${view.links.length} 条城际线路</span>
+      </div>
+      <div class="transport-kpis">
+        <div class="transport-kpi"><span>城际需求</span><b>${qty(stats.demand)}</b></div>
+        <div class="transport-kpi"><span>城际容量</span><b>${qty(stats.capacity)}</b></div>
+        <div class="transport-kpi ${stats.penaltyRate > 0 ? 'is-warn' : ''}"><span>惩罚比例</span><b>${pct(stats.penaltyRate, 1)}</b></div>
+        <div class="transport-kpi ${stats.capacityLossTotal > 0 ? 'is-warn' : ''}"><span>收益损失合计</span><b>${money(stats.capacityLossTotal)}</b></div>
+        <div class="transport-kpi"><span>财政补偿</span><b>${money(stats.freightSubsidy)}</b></div>
+        <div class="transport-kpi"><span>维护支出</span><b>${money(stats.maintenancePaid)}</b></div>
+      </div>
+      <div class="gov-sub-head"><span>城际线路</span><em>公路 / 铁路</em></div>
+      <div class="table-wrap">
+        <table class="transport-table" aria-label="${esc(city.name)} 城际交通线路">
+          <thead>
+            <tr>
+              <th scope="col">伙伴城市</th>
+              <th scope="col">方式</th>
+              <th scope="col">等级 · 容量</th>
+              <th scope="col">状态</th>
+              <th scope="col">升级成本</th>
+            </tr>
+          </thead>
+          <tbody>${linkRows}</tbody>
+        </table>
+      </div>
+      <div class="gov-sub-head"><span>城内交通</span><em>${network ? `容量 ${qty(network.capacity)}` : '无网络'}</em></div>
+      ${
+        network
+          ? `<div class="intracity-grid">
+              <div class="intracity-cell">
+                <span>道路</span>
+                <b>${network.roadLevel}/${network.maxLevel}</b>
+                <small>${road?.ok ? `${money(road.cost)} · ${road.months} 月` : roadReason || '—'}</small>
+                ${investTransportButton({
+                  target: 'intracity:road',
+                  testId: 'intracity-road',
+                  label: '升级道路',
+                  disabled: !road?.ok || treasury < (road?.cost ?? 0),
+                  reason: roadReason,
+                  hint: '由财政出资开工城内道路升级',
+                })}
+              </div>
+              <div class="intracity-cell">
+                <span>铁路</span>
+                <b>${network.railLevel}/${network.maxLevel}</b>
+                <small>${rail?.ok ? `${money(rail.cost)} · ${rail.months} 月` : railReason || '—'}</small>
+                ${investTransportButton({
+                  target: 'intracity:rail',
+                  testId: 'intracity-rail',
+                  label: '升级铁路',
+                  disabled: !rail?.ok || treasury < (rail?.cost ?? 0),
+                  reason: railReason,
+                  hint: '由财政出资开工城内铁路升级',
+                })}
+              </div>
+            </div>
+            <div class="intracity-stats">
+              <span>上期配送利用率 <b>${intracityStats ? pct(intracityStats.utilization, 1) : '—'}</b></span>
+              <span>配送效率 <b>${intracityStats ? pct(intracityStats.deliveryEfficiency, 1) : '—'}</b></span>
+              ${
+                construction
+                  ? `<span class="is-building">施工中：${transportModeLabel(construction.kind)} → ${construction.targetLevel} 级，剩 ${construction.monthsRemaining} 月</span>`
+                  : ''
+              }
+            </div>`
+          : '<p class="fin-hint">本城暂无城内交通网络。</p>'
+      }
+      <p class="note">容量不是成交上限；超载只减少卖方该笔收益，买方付款不变（暂定方案）。</p>
     </section>`;
 }
 
@@ -675,6 +1262,97 @@ function companyRow(store: GameStore, company: Company, focused: boolean): strin
     </div>`;
 }
 
+function renderCompanyLifecycle(store: GameStore, city: City): string {
+  const view = store.lifecycleView(city.id);
+  const localCompanies = store.companiesForCity(city.id);
+  const richest = [...localCompanies].sort((a, b) => b.cash - a.cash)[0] ?? null;
+  const atCompanyLimit = view.limits.companies >= view.limits.maxCompanies;
+  const atGovernmentLimit = view.limits.governmentFoundings >= view.limits.maxGovernmentFoundings;
+  const canInvestorGroup = view.canFoundInvestorGroup && !atCompanyLimit;
+  const canCompany = richest !== null && !atCompanyLimit;
+  const canGovernment = !atGovernmentLimit && !atCompanyLimit;
+
+  const foundingRecords = view.foundings.length === 0
+    ? '<li class="lifecycle-empty">本城暂无成立记录。</li>'
+    : view.foundings
+        .slice(0, 3)
+        .map(
+          (record) => `
+          <li class="lifecycle-row" title="${esc(record.note)}">
+            <span class="lifecycle-main"><b>${esc(record.companyName)}</b><em>第 ${record.tick} 期 · ${founderLabel(record.founderType)}</em></span>
+            <span class="lifecycle-meta">资本 ${money(record.capital)} · ${num(record.investorCount)} 位出资方${record.governmentGrant > 0 ? ` · 政府 ${money(record.governmentGrant)}` : ''}</span>
+          </li>`,
+        )
+        .join('');
+
+  const liquidationRecords = view.liquidations.length === 0
+    ? '<li class="lifecycle-empty">本城暂无倒闭记录。</li>'
+    : view.liquidations
+        .slice(0, 3)
+        .map(
+          (record) => `
+          <li class="lifecycle-row is-exit" title="${esc(record.reason)}">
+            <span class="lifecycle-main"><b>${esc(record.companyName)}</b><em>第 ${record.tick} 期退出</em></span>
+            <span class="lifecycle-meta">释放员工 ${num(record.employeesReleased)} · 债务减免 ${money(record.debtForgiven)} · 股东分配 ${money(record.shareholderPayout)} · 库存注销 ${money(record.inventoryBookValue)}</span>
+          </li>`,
+        )
+        .join('');
+
+  return `
+    <div class="company-lifecycle" data-testid="company-lifecycle">
+      <div class="gov-sub-head"><span>企业创办与退出</span><em>演示规则</em></div>
+      <div class="lifecycle-limits">
+        <span>本城企业 <b>${num(view.limits.companies)}/${num(view.limits.maxCompanies)}</b></span>
+        <span>政府已创办 <b>${num(view.limits.governmentFoundings)}/${num(view.limits.maxGovernmentFoundings)}</b></span>
+        <span>居民投资群体 <b class="${view.canFoundInvestorGroup ? 'is-ok' : 'is-warn'}">${view.canFoundInvestorGroup ? '可出资' : '暂无可出资群体'}</b></span>
+      </div>
+      <div class="lifecycle-actions">
+        <button
+          type="button"
+          class="ken-btn ken-btn--green ken-btn--mini"
+          data-action="found-company"
+          data-founder="investorGroup"
+          data-testid="found-investorGroup"
+          data-focus-key="found-investorGroup"
+          ${canInvestorGroup ? '' : 'disabled'}
+          title="${canInvestorGroup ? '由本城居民投资群体联合出资创办一家企业' : atCompanyLimit ? '本城企业数量已达上限' : '暂无可出资的居民投资群体'}"
+        >居民联合出资</button>
+        <button
+          type="button"
+          class="ken-btn ken-btn--blue ken-btn--mini"
+          data-action="found-company"
+          data-founder="company"
+          ${richest ? `data-company-id="${esc(richest.id)}"` : ''}
+          data-testid="found-company"
+          data-focus-key="found-company"
+          ${canCompany ? '' : 'disabled'}
+          title="${canCompany ? `由 ${richest?.name ?? '本城企业'} 出资设立子公司` : atCompanyLimit ? '本城企业数量已达上限' : '本城暂时没有可作为出资方的企业'}"
+        >现有企业设立</button>
+        <button
+          type="button"
+          class="ken-btn ken-btn--grey ken-btn--mini"
+          data-action="found-company"
+          data-founder="government"
+          data-testid="found-government"
+          data-focus-key="found-government"
+          ${canGovernment ? '' : 'disabled'}
+          title="${canGovernment ? '由市政府出资创办一家市属企业' : '政府创办数量已达上限'}"
+        >市政府创办</button>
+      </div>
+      <div class="lifecycle-lists">
+        <div class="lifecycle-list">
+          <span class="lifecycle-list-title">最近成立</span>
+          <ul>${foundingRecords}</ul>
+        </div>
+        <div class="lifecycle-list">
+          <span class="lifecycle-list-title">最近倒闭</span>
+          <ul>${liquidationRecords}</ul>
+        </div>
+      </div>
+      <p class="fin-hint">创办需要自有资本与资格；企业退出时员工回到劳动力市场，债务与库存按演示规则处理。</p>
+    </div>`;
+}
+
 function renderCompanies(store: GameStore, city: City, focusCompanyId: string | null): string {
   const companies = [...store.companiesForCity(city.id)].sort(
     (a, b) => b.employees - a.employees || a.name.localeCompare(b.name, 'zh-CN'),
@@ -693,6 +1371,7 @@ function renderCompanies(store: GameStore, city: City, focusCompanyId: string | 
         ${companies.map((company) => companyRow(store, company, focusCompanyId === company.id)).join('')}
       </div>
       <p class="note">点击企业展开详情与注资入口。企业现金不足时会在月度结算中触发营运资金信贷 / 债务重组（演示）。</p>
+      ${renderCompanyLifecycle(store, city)}
     </section>`;
 }
 
@@ -853,7 +1532,7 @@ export function renderAgreementsSection(store: GameStore, city: City): string {
         </div>
         <span class="section-tag">${agreements.length} 条</span>
       </div>
-      <p class="demo-note">市政府牵头（演示入口）。市长选举尚未实现，这里不代表玩家已当选。</p>
+      <p class="demo-note">市政府牵头（演示入口）。协议由市政府组织，不代表玩家已当选或产生个人义务。</p>
       <div class="agreement-partners">
         <span class="agreement-partner-label">组织协商</span>
         ${partners
@@ -913,7 +1592,7 @@ export function renderRightRegion(store: GameStore, state: PanelState): string {
       ${renderPopulationSection(city)}
       ${renderPulse(city)}
     </section>
-    ${renderSystems(city)}
+    ${renderSystems(store, city)}
     ${renderMarket(city, state.showAllGoods)}
     ${renderCompanies(store, city, state.focusCompanyId)}
     ${renderTradeSummary(store)}
@@ -1043,6 +1722,11 @@ export function renderCompanyDetail(
   const roleTotal = roleKeys.reduce((total, key) => total + company.roles[key], 0);
   const playerCash = store.world.player.cash;
   const lastMonth = company.lastMonth;
+  const aiView = store.companyAiView(company.id);
+  const aiPlan = aiView?.plan ?? null;
+  const expansionCost = aiView?.expansionCost ?? 0;
+  const expansionEstimate = aiView?.expansionEstimate ?? 0;
+  const canExpand = expansionCost > 0 && company.cash + 1e-6 >= expansionCost;
 
   const shareClasses = store.world.securities.classes.filter(
     (shareClass) => shareClass.companyId === company.id,
@@ -1335,6 +2019,45 @@ export function renderCompanyDetail(
           <small>${num(playerTotalShares)} 股</small>
         </div>
       </div>
+      <section class="detail-subsection company-ai" data-testid="company-ai">
+        <div class="sub-head">
+          <h4>自动经营</h4>
+          <span class="mini-tag">${esc(aiView?.styleLabel ?? '职业经理人')}</span>
+        </div>
+        <p class="ai-style">${esc(aiView?.styleDescription ?? '企业由职业经理人按月度计划经营。')}</p>
+        <p class="ai-decision"><b>最近决策</b>${esc(aiView?.decision || '尚无决策记录；推进 1 月后生成。')}</p>
+        ${
+          aiPlan
+            ? `<div class="ai-plan">
+                <span><i>计划利用率</i><b>${pct(aiPlan.utilization, 1)}</b></span>
+                <span><i>岗位需求</i><b>${num(aiPlan.targetJobs)}</b></span>
+                <span><i>补贴后月用工成本</i><b>${money(aiPlan.expectedWageCost)}</b></span>
+                <span><i>计划投资</i><b>${money(aiPlan.investment)}</b></span>
+              </div>
+              ${
+                aiPlan.reasons.length > 0
+                  ? `<ul class="ai-reasons">${aiPlan.reasons
+                      .slice(0, 3)
+                      .map((reason) => `<li>${esc(reason)}</li>`)
+                      .join('')}</ul>`
+                  : ''
+              }`
+            : '<p class="fin-hint">尚无经营计划；推进 1 月后，这里会显示利用率、岗位与投资安排。</p>'
+        }
+        <div class="ai-foot">
+          <span class="ai-loss ${(aiView?.lossMonths ?? 0) > 0 ? 'is-warn' : ''}">连续亏损 ${num(aiView?.lossMonths ?? 0)} 个月</span>
+          <button
+            type="button"
+            class="ken-btn ken-btn--green ken-btn--mini"
+            data-action="expand-capacity"
+            data-company-id="${esc(company.id)}"
+            data-testid="expand-capacity-${esc(company.id)}"
+            data-focus-key="expand-${esc(company.id)}"
+            ${canExpand ? '' : 'disabled'}
+            title="${canExpand ? `由企业自有资金扩产，预计新增 ${qty(expansionEstimate)} 单位/月，成本 ${money(expansionCost)}` : `企业现金不足：扩产需要 ${money(expansionCost)}`}"
+          >扩产 +${qty(expansionEstimate)} · ${money(expansionCost)}</button>
+        </div>
+      </section>
       <div class="finance-grid">
         <div class="fin-block">
           <h4>上月损益</h4>
@@ -1591,7 +2314,9 @@ export function renderRightCity(store: GameStore, state: PanelState): string {
       ${renderPopulationSection(city)}
       ${renderPulse(city)}
     </section>
-    ${renderSystems(city)}
+    ${renderGovernmentSection(store, city)}
+    ${renderTransportSection(store, city)}
+    ${renderSystems(store, city)}
     ${renderMarket(city, state.showAllGoods)}
     ${renderAgreementsSection(store, city)}`;
 }

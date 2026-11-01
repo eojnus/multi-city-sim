@@ -9,6 +9,7 @@ const { app, BrowserWindow } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const { registerSaveHandlers } = require('../dist/electron/saveIpc.js');
+const { verifySaveFile } = require('./save-format-check.cjs');
 
 const root = path.resolve(__dirname, '..');
 const artifacts = path.join(root, 'artifacts');
@@ -348,16 +349,77 @@ app.whenReady().then(async () => {
   await new Promise((resolve) => setTimeout(resolve, 300));
 
   // ---- 存档往返 ----
-  result.save = await win.webContents.executeJavaScript(`(async () => {
-    const s = window.__lanwan.store;
-    const saved = await s.saveSlot('manual-1');
-    const dateSaved = s.dateLabel;
-    s.tick();
-    const dateAdvanced = s.dateLabel;
-    const loaded = await s.loadSlot('manual-1');
-    return { saved, loaded, dateSaved, dateAdvanced, dateAfterLoad: s.dateLabel, formatVersion: 2 };
-  })()`);
-
+  // 版本号一律来自本次实际写出的磁盘文件与 store 暴露的 saveFormatVersion，
+  // 不在脚本里硬编码任何“预期版本”，否则会伪造验证结论。
+  const roundTrip = await read(
+    win,
+    `(async () => {
+      const s = window.__lanwan.store;
+      const saved = await s.saveSlot('manual-1');
+      const dateSaved = s.dateLabel;
+      s.tick();
+      const dateAdvanced = s.dateLabel;
+      const loaded = await s.loadSlot('manual-1');
+      return {
+        saved,
+        loaded,
+        dateSaved,
+        dateAdvanced,
+        dateAfterLoad: s.dateLabel,
+        storeFormatVersion: s.saveFormatVersion,
+      };
+    })()`,
+  );
+  const save = {
+    saved: null,
+    loaded: null,
+    dateSaved: null,
+    dateAdvanced: null,
+    dateAfterLoad: null,
+    datesRestored: null,
+    storeFormatVersion: null,
+    filePath: null,
+    savesDirListing: [],
+    fileBytes: null,
+    fileFormatVersion: null,
+    fileGameVersion: null,
+    ok: false,
+    error: null,
+  };
+  result.save = save;
+  try {
+    if (!roundTrip || roundTrip.error) {
+      throw new Error(`渲染进程存档往返调用异常：${roundTrip?.error ?? '无返回'}`);
+    }
+    Object.assign(save, {
+      saved: roundTrip.saved ?? null,
+      loaded: roundTrip.loaded ?? null,
+      dateSaved: roundTrip.dateSaved ?? null,
+      dateAdvanced: roundTrip.dateAdvanced ?? null,
+      dateAfterLoad: roundTrip.dateAfterLoad ?? null,
+      storeFormatVersion: roundTrip.storeFormatVersion ?? null,
+    });
+    save.datesRestored =
+      save.dateSaved !== null && save.dateAfterLoad !== null && save.dateSaved === save.dateAfterLoad;
+    if (!save.saved) throw new Error('store.saveSlot("manual-1") 返回失败');
+    if (!save.loaded) throw new Error('store.loadSlot("manual-1") 返回失败');
+    // 唯一权威检查：读取本次实际写盘的存档文件，与游戏当前格式版本比对。
+    const check = verifySaveFile({
+      savesDir,
+      slot: 'manual-1',
+      storeFormatVersion: save.storeFormatVersion,
+    });
+    save.filePath = check.filePath;
+    save.savesDirListing = check.listing;
+    save.fileBytes = check.fileBytes;
+    save.fileFormatVersion = check.fileFormatVersion;
+    save.fileGameVersion = check.fileGameVersion;
+    save.ok = check.ok;
+    save.error = check.error;
+  } catch (error) {
+    save.ok = false;
+    save.error = error instanceof Error ? error.message : String(error);
+  }
   // ---- 1100×700 布局 ----
   win.setSize(1100, 700);
   await new Promise((resolve) => setTimeout(resolve, 900));
@@ -378,8 +440,17 @@ app.whenReady().then(async () => {
     result.layoutScreenshot,
   ];
   result.errors = errors;
+  const exitCode = result.save.ok ? 0 : 1;
+  if (exitCode) result.failures = [`存档往返校验失败：${result.save.error}`];
   console.log(JSON.stringify(result, null, 2));
   win.destroy();
+  if (exitCode) {
+    console.error(`存档往返校验失败：${result.save.error}`);
+    // 明确以非零退出码结束，避免“打印了结果但静默通过”。
+    process.exitCode = exitCode;
+    app.exit(exitCode);
+    return;
+  }
   app.quit();
 }).catch((error) => {
   console.error(error);

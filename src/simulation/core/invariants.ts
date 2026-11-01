@@ -8,6 +8,8 @@ export interface GoodsAudit {  goodId: GoodId;
   intermediateConsumed: number;
   householdConsumed: number;
   externalExported: number;
+  /** v0.3：倒闭企业库存注销数量（显式去向，不是消费）。 */
+  writtenOff: number;
   endStock: number;
   tradeNet: number;
   expectedEndStock: number;
@@ -134,6 +136,11 @@ export function checkInvariants(world: WorldState, audits: GoodsAudit[] = []): s
   problems.push(...checkGovernance(world));
   problems.push(...checkAgreements(world));
   problems.push(...checkNotifications(world));
+  problems.push(...checkPolitics(world));
+  problems.push(...checkPolicies(world));
+  problems.push(...checkTransport(world));
+  problems.push(...checkLifecycle(world));
+  problems.push(...checkCompanyAi(world));
 
   for (const audit of audits) {
     if (Math.abs(audit.endStock - audit.expectedEndStock) > 0.2) {
@@ -162,6 +169,7 @@ function checkSecurities(world: WorldState): string[] {
   }
   const companyIds = new Set(world.companies.map((company) => company.id));
   const groupIds = new Set((world.investors ?? []).map((group) => group.id));
+  const cityIds = new Set(world.cities.map((city) => city.id));
   const classById = new Map<string, { companyId: string; kind: string }>();
   const kindsByCompany = new Map<string, Set<string>>();
 
@@ -199,6 +207,9 @@ function checkSecurities(world: WorldState): string[] {
     }
     if (holding.holder.type === 'investorGroup' && !groupIds.has(holding.holder.id)) {
       problems.push(`持股记录引用了不存在的居民投资实体 ${holding.holder.id}`);
+    }
+    if (holding.holder.type === 'city' && !cityIds.has(holding.holder.id)) {
+      problems.push(`持股记录引用了不存在的城市 ${holding.holder.id}`);
     }
     holdingTotals.set(
       holding.shareClassId,
@@ -293,6 +304,7 @@ function checkGovernance(world: WorldState): string[] {
   const holderValid = (holder: { type: string; id: string }): boolean => {
     if (holder.type === 'player') return holder.id === 'player';
     if (holder.type === 'company') return companyIds.has(holder.id);
+    if (holder.type === 'city') return world.cities.some((city) => city.id === holder.id);
     return (world.investors ?? []).some((group) => group.id === holder.id);
   };
   for (const board of world.governance.boards) {
@@ -389,6 +401,256 @@ function checkNotifications(world: WorldState): string[] {
   for (const notice of world.notifications) {
     if (seen.has(notice.id)) problems.push(`通知 ID 重复：${notice.id}`);
     seen.add(notice.id);
+  }
+  return problems;
+}
+
+// ---------------------------------------------------------------- v0.3 政治、政策、交通、生命周期
+
+const POLICY_ID_SET = new Set<string>([
+  'hiringSubsidy',
+  'retentionSubsidy',
+  'vocationalTraining',
+  'publicJobs',
+  'startupSupport',
+  'companyRelief',
+  'equipmentSubsidy',
+  'keyIndustrySupport',
+  'researchGrant',
+  'educationInvestment',
+  'intercityTradeSupport',
+  'transportInvestment',
+  'unemploymentAid',
+  'housingSupport',
+  'taxAdjustment',
+]);
+
+const SECTOR_ID_SET = new Set<string>([
+  'agriculture',
+  'fiber-farm',
+  'textile',
+  'food',
+  'garment',
+  'metal',
+  'utility',
+  'appliance',
+]);
+
+const STYLE_SET = new Set<string>(['growth', 'steady', 'return']);
+
+function checkPolitics(world: WorldState): string[] {
+  const problems: string[] = [];
+  if (!world.politics || !Array.isArray(world.politics.cities)) {
+    return ['世界缺少 politics 数据'];
+  }
+  if (world.politics.cities.length !== world.cities.length) {
+    problems.push('政治状态与城市数量不一致');
+  }
+  for (const city of world.cities) {
+    const state = world.politics.cities.find((entry) => entry.cityId === city.id);
+    if (!state) {
+      problems.push(`${city.name}: 缺少候选人/领导人状态`);
+      continue;
+    }
+    if (!Array.isArray(state.candidates) || state.candidates.length === 0) {
+      problems.push(`${city.name}: 没有候选人`);
+    }
+    const ids = new Set<string>();
+    for (const candidate of state.candidates) {
+      if (ids.has(candidate.id)) problems.push(`${city.name}: 候选人 ID 重复 ${candidate.id}`);
+      ids.add(candidate.id);
+      if (candidate.cityId !== city.id) problems.push(`${city.name}: 候选人城市不一致`);
+      for (const [domain, value] of Object.entries(candidate.profile.domainLeanings)) {
+        if (!(value >= 0 && value <= 1)) {
+          problems.push(`${city.name}: 候选人 ${candidate.name} 的 ${domain} 倾向越界`);
+        }
+      }
+      if (
+        candidate.profile.sectorAffinity !== null &&
+        !SECTOR_ID_SET.has(candidate.profile.sectorAffinity)
+      ) {
+        problems.push(`${city.name}: 候选人 ${candidate.name} 重点行业无效`);
+      }
+    }
+    if (state.leader && !ids.has(state.leader.id)) {
+      problems.push(`${city.name}: 领导人不在候选人列表中`);
+    }
+    if (state.termMonthsLeft < 0) problems.push(`${city.name}: 任期倒计时为负`);
+    if (world.player.roles?.mayorCityId === city.id && state.leader) {
+      problems.push(`${city.name}: 玩家市长在任时不应同时存在 AI 领导人`);
+    }
+    if (!city.workforce || !(city.workforce.skillLevel >= 0 && city.workforce.skillLevel <= 1)) {
+      problems.push(`${city.name}: 技能水平越界`);
+    }
+    if (!city.housing || city.housing.units < 0) {
+      problems.push(`${city.name}: 住房状态无效`);
+    }
+    if (!(city.technology.researchPoints >= 0)) {
+      problems.push(`${city.name}: 研究点为负`);
+    }
+    if (!(city.technology.productivityMultiplier > 0)) {
+      problems.push(`${city.name}: 科技生产率非正`);
+    }
+  }
+  return problems;
+}
+
+function checkPolicies(world: WorldState): string[] {
+  const problems: string[] = [];
+  if (!world.policies) return ['世界缺少 policies 数据'];
+  if (!world.fiscal || !Array.isArray(world.fiscal.ledger)) {
+    problems.push('世界缺少 fiscal 数据');
+  }
+  const cityIds = new Set(world.cities.map((city) => city.id));
+  const activeKeys = new Set<string>();
+  for (const policy of world.policies.active) {
+    if (!cityIds.has(policy.cityId)) problems.push(`政策 ${policy.id} 引用不存在的城市`);
+    if (!POLICY_ID_SET.has(policy.policyId)) problems.push(`政策 ${policy.id} 类型无效`);
+    const key = `${policy.cityId}:${policy.policyId}`;
+    if (activeKeys.has(key)) problems.push(`同一城市重复生效：${policy.policyId}`);
+    activeKeys.add(key);
+    if (!(policy.budget >= 0)) problems.push(`政策 ${policy.id} 预算为负`);
+    if (!(policy.spent >= 0 && policy.spent <= policy.budget + 0.01)) {
+      problems.push(`政策 ${policy.id} 支出超过预算`);
+    }
+    if (!(policy.monthsRemaining >= 0)) problems.push(`政策 ${policy.id} 剩余月份为负`);
+    if (policy.status !== 'active') problems.push(`政策 ${policy.id} 状态与生效列表不一致`);
+    for (const value of Object.values(policy.effects)) {
+      if (!Number.isFinite(value)) problems.push(`政策 ${policy.id} 效果记录无效`);
+    }
+  }
+  for (const entry of world.fiscal?.ledger ?? []) {
+    if (!cityIds.has(entry.cityId)) problems.push(`财政流水 ${entry.id} 引用不存在的城市`);
+    if (!Number.isFinite(entry.amount)) problems.push(`财政流水 ${entry.id} 金额无效`);
+    if (entry.policyId && !POLICY_ID_SET.has(entry.policyId)) {
+      problems.push(`财政流水 ${entry.id} 政策无效`);
+    }
+  }
+  return problems;
+}
+
+function checkTransport(world: WorldState): string[] {
+  const problems: string[] = [];
+  if (!world.transport) return ['世界缺少 transport 数据'];
+  const cityIds = new Set(world.cities.map((city) => city.id));
+  const ids = new Set<string>();
+  for (const link of world.transport.links) {
+    if (ids.has(link.id)) problems.push(`交通线路 ID 重复：${link.id}`);
+    ids.add(link.id);
+    if (!cityIds.has(link.fromCityId) || !cityIds.has(link.toCityId)) {
+      problems.push(`交通线路 ${link.id} 引用不存在的城市`);
+    }
+    if (link.fromCityId === link.toCityId) problems.push(`交通线路 ${link.id} 连接同一城市`);
+    if (!(link.level >= 0 && link.level <= link.maxLevel)) {
+      problems.push(`交通线路 ${link.id} 等级越界`);
+    }
+    if (link.construction) {
+      if (link.construction.targetLevel !== link.level + 1) {
+        problems.push(`交通线路 ${link.id} 建设目标不是下一等级`);
+      }
+      if (link.construction.monthsRemaining < 0) {
+        problems.push(`交通线路 ${link.id} 建设工期为负`);
+      }
+    }
+  }
+  for (const network of world.transport.intracity) {
+    if (!cityIds.has(network.cityId)) problems.push('城内交通引用了不存在的城市');
+    if (!(network.roadLevel >= 0 && network.roadLevel <= network.maxLevel)) {
+      problems.push(`${network.cityId}: 城内公路等级越界`);
+    }
+    if (!(network.railLevel >= 0 && network.railLevel <= network.maxLevel)) {
+      problems.push(`${network.cityId}: 城内铁路等级越界`);
+    }
+  }
+  for (const sale of world.transport.pendingSales) {
+    if (!(sale.qty > 0) || !(sale.grossValue >= 0)) {
+      problems.push('待结算跨城销售数量/金额无效');
+    }
+    if (!world.companies.some((company) => company.id === sale.sellerCompanyId)) {
+      problems.push(`待结算跨城销售引用了不存在的卖方 ${sale.sellerCompanyId}`);
+    }
+  }
+  const stats = world.transport.lastMonth;
+  if (!stats) return problems.length > 0 ? problems : ['缺少上期交通统计'];
+  if (!(stats.penaltyRate >= 0 && stats.penaltyRate <= 1)) {
+    problems.push('上期容量惩罚比例越界');
+  }
+  let lossSum = 0;
+  for (const trade of stats.trades) {
+    if (trade.sellerProceeds < -0.01) problems.push('跨城结算卖方所得为负');
+    if (trade.sellerProceeds > trade.grossValue + 0.01) {
+      problems.push('跨城结算卖方所得超过买方付款');
+    }
+    if (Math.abs(trade.grossValue - (trade.sellerProceeds + trade.capacityLoss)) > 0.05) {
+      problems.push('跨城结算账目不平：付款 != 卖方所得 + 收益损失');
+    }
+    if (!(trade.penaltyRate >= 0 && trade.penaltyRate <= 1)) {
+      problems.push('跨城结算惩罚比例越界');
+    }
+    lossSum += trade.capacityLoss;
+  }
+  if (Math.abs(lossSum - stats.capacityLossTotal) > 0.05) {
+    problems.push('上期容量损失合计与逐笔记录不一致');
+  }
+  for (const entry of stats.intracity) {
+    if (!(entry.deliveryEfficiency >= 0 && entry.deliveryEfficiency <= 1)) {
+      problems.push('城内配送效率越界');
+    }
+    if (!(entry.capacity >= 0 && entry.demand >= 0)) {
+      problems.push('城内配送需求/容量为负');
+    }
+  }
+  return problems;
+}
+
+function checkLifecycle(world: WorldState): string[] {
+  const problems: string[] = [];
+  if (!world.lifecycle) return ['世界缺少 lifecycle 数据'];
+  const companyIds = new Set(world.companies.map((company) => company.id));
+  for (const record of world.lifecycle.foundings) {
+    if (!(record.capital > 0)) problems.push(`成立记录 ${record.id} 资本无效`);
+    if (record.investorCount <= 0) problems.push(`成立记录 ${record.id} 缺少出资人`);
+    const invested = record.investors.reduce((sum, investor) => sum + investor.cash, 0);
+    if (Math.abs(invested - record.capital) > 0.05) {
+      problems.push(`成立记录 ${record.id} 出资合计与资本不一致`);
+    }
+    if (record.governmentGrant < -0.01) problems.push(`成立记录 ${record.id} 财政扶持为负`);
+  }
+  for (const record of world.lifecycle.liquidations) {
+    if (companyIds.has(record.companyId)) {
+      problems.push(`倒闭记录 ${record.id} 的企业仍在世界中`);
+    }
+    if (record.employeesReleased < 0) problems.push(`倒闭记录 ${record.id} 员工数为负`);
+    const remaining = record.cash - record.debtRepaid;
+    if (record.shareholderPayout > remaining + 0.05) {
+      problems.push(`倒闭记录 ${record.id} 股东分配超过剩余现金`);
+    }
+    if (record.debtRepaid > record.debt + 0.05) {
+      problems.push(`倒闭记录 ${record.id} 偿债超过债务`);
+    }
+    for (const entry of record.inventoryWrittenOff) {
+      if (entry.qty < -0.01) problems.push(`倒闭记录 ${record.id} 注销库存为负`);
+    }
+  }
+  return problems;
+}
+
+function checkCompanyAi(world: WorldState): string[] {
+  const problems: string[] = [];
+  for (const company of world.companies) {
+    if (!company.ai) {
+      problems.push(`${company.name}: 缺少经营 AI 状态`);
+      continue;
+    }
+    if (!STYLE_SET.has(company.ai.style)) problems.push(`${company.name}: 经营风格无效`);
+    if (!Number.isInteger(company.ai.lossMonths) || company.ai.lossMonths < 0) {
+      problems.push(`${company.name}: 连续亏损月份无效`);
+    }
+    if (company.ai.ageMonths < 0) problems.push(`${company.name}: 经营月龄为负`);
+    if (company.ai.lastPlan) {
+      if (company.ai.lastPlan.targetJobs < 0) problems.push(`${company.name}: 计划岗位为负`);
+      if (!(company.ai.lastPlan.utilization >= 0)) problems.push(`${company.name}: 计划利用率为负`);
+    }
   }
   return problems;
 }

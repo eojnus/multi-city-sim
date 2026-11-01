@@ -2,8 +2,8 @@
 // 这些类型描述的是“演示方案 v0.2”的数据结构，不代表最终策划规则。
 // v0.2 新增证券/治理/居民投资/协议/通知数据；旧 v1 存档由 core/save.ts 迁移。
 
-export const SAVE_FORMAT_VERSION = 3;
-export const GAME_VERSION = '0.2.1';
+export const SAVE_FORMAT_VERSION = 4;
+export const GAME_VERSION = '0.3.0';
 
 export type GoodId =
   | 'grain'
@@ -53,6 +53,40 @@ export type SectorId =
   | 'utility'
   | 'appliance';
 
+/** v0.3：企业经营风格。不同风格使用同一套经济规则，但取舍不同。 */
+export type CompanyStyle = 'growth' | 'steady' | 'return';
+
+/** 企业最近一次经营计划（玩家可读，不含调试信息）。 */
+export interface CompanyAiPlan {
+  tick: number;
+  style: CompanyStyle;
+  utilization: number;
+  targetJobs: number;
+  /** 计入政策补贴后的月用工成本估算。 */
+  expectedWageCost: number;
+  /** 本月计划中计入的新增招聘补贴（每名新员工的补贴额）。 */
+  hiringSubsidyPerHire: number;
+  /** 本月计划中计入的稳岗补贴（每名在岗员工的补贴额）。 */
+  retentionSubsidyPerEmployee: number;
+  /** 计划用于设备/扩产的支出。 */
+  investment: number;
+  /** 计划原因，例如“库存积压，降低生产”。 */
+  reasons: string[];
+}
+
+/** v0.3：企业自动经营的可追溯决策状态。 */
+export interface CompanyAiState {
+  style: CompanyStyle;
+  riskTolerance: number;
+  /** 连续亏损月份，用于困难判定与纾困资格。 */
+  lossMonths: number;
+  /** 经营月龄（用于新企业保护期）。 */
+  ageMonths: number;
+  lastPlan: CompanyAiPlan | null;
+  lastDecision: string;
+  lastDecisionTick: number;
+}
+
 export interface CompanyMonthlyStats {
   revenue: number;
   inputCost: number;
@@ -99,6 +133,8 @@ export interface Company {
   /** v0.2：股息派发比例，可由董事会/股东议案改变（演示规则）。 */
   dividendPayoutRatio: number;
   note: string;
+  /** v0.3：自动经营风格与最近决策。旧存档迁移时按行业确定性分配。 */
+  ai: CompanyAiState;
 }
 
 export interface MarketState {
@@ -134,7 +170,8 @@ export interface TechnologyState {
   level: number;
   researchPoints: number;
   productivityMultiplier: number;
-  status: 'initial-only';
+  /** v0.3 起研发资助会推进等级；'initial-only' 表示尚未发生研发投入。 */
+  status: 'initial-only' | 'active';
   note: string;
 }
 
@@ -142,8 +179,25 @@ export interface PoliticsState {
   approval: number;
   rulingParty: string;
   electionInMonths: number | null;
-  status: 'initial-only';
+  /** v0.3 起市长/选举由 politics 模块推进；'initial-only' 表示尚未举行选举。 */
+  status: 'initial-only' | 'active';
   note: string;
+}
+
+/** v0.3：城市劳动力技能与培训状态（最小原型，不是完整教育系统）。 */
+export interface WorkforceState {
+  /** 0–1，对生产率与招聘速度有上限约束的影响。 */
+  skillLevel: number;
+  trainedThisMonth: number;
+  trainedTotal: number;
+  trainedLastTick: number;
+}
+
+/** v0.3：住房最小状态（仅用于住房支持政策闭环，不是完整房地产市场）。 */
+export interface HousingState {
+  units: number;
+  demand: number;
+  rentSubsidyPaid: number;
 }
 
 export interface RealEstateState {
@@ -169,6 +223,10 @@ export interface CityMonthlyReport {
   investorDividends: number;
   /** v0.2：本月从居民收入转入投资实体的可投资资金。 */
   investableContribution: number;
+  /** v0.3：本月政策支出（从财政到企业/居民）。 */
+  policySpending: number;
+  /** v0.3：本月交通维护与建设支出。 */
+  transportSpending: number;
   note: string;
 }
 
@@ -194,6 +252,10 @@ export interface City {
   technology: TechnologyState;
   politics: PoliticsState;
   realEstate: RealEstateState;
+  /** v0.3：技能与培训（政策闭环的最小状态）。 */
+  workforce: WorkforceState;
+  /** v0.3：住房最小状态。 */
+  housing: HousingState;
 }
 
 export interface TradeRoute {
@@ -219,7 +281,16 @@ export interface TradeFlow {
   good: GoodId;
   qty: number;
   unitPrice: number;
+  /** 买方按成交价支付的总额（容量惩罚不改变买方付款）。 */
   value: number;
+  /** v0.3：卖方实际所得（跨城交易在期末按容量统一结算后填写）。 */
+  sellerProceeds?: number;
+  /** v0.3：容量不足造成的收益损失（不计入任何主体收入）。 */
+  capacityLoss?: number;
+  /** v0.3：该笔跨城交易适用的容量惩罚比例。 */
+  penaltyRate?: number;
+  /** v0.3：跨城交易的来源路径，用于统一容量核算。 */
+  path?: 'contract' | 'agreement' | 'intercityPurchase' | 'householdPurchase';
 }
 
 export interface ProductionRecord {
@@ -310,7 +381,7 @@ export interface ShareClass {
   note: string;
 }
 
-export type HolderType = 'player' | 'company' | 'investorGroup';
+export type HolderType = 'player' | 'company' | 'investorGroup' | 'city';
 
 export interface HolderRef {
   type: HolderType;
@@ -524,6 +595,303 @@ export interface PlayerNotification {
   read: boolean;
 }
 
+// ---------------------------------------------------------------- 领导人、政策与财政流水
+
+export type PolicyDomain =
+  | 'employment'
+  | 'enterprise'
+  | 'industry'
+  | 'technology'
+  | 'trade'
+  | 'welfare'
+  | 'fiscal';
+
+export type PolicyId =
+  | 'hiringSubsidy'
+  | 'retentionSubsidy'
+  | 'vocationalTraining'
+  | 'publicJobs'
+  | 'startupSupport'
+  | 'companyRelief'
+  | 'equipmentSubsidy'
+  | 'keyIndustrySupport'
+  | 'researchGrant'
+  | 'educationInvestment'
+  | 'intercityTradeSupport'
+  | 'transportInvestment'
+  | 'unemploymentAid'
+  | 'housingSupport'
+  | 'taxAdjustment';
+
+/** 领导人的被动属性：领域倾向 0–1 与一个重点行业。 */
+export interface LeaderProfile {
+  sectorAffinity: SectorId | null;
+  domainLeanings: Record<PolicyDomain, number>;
+  traitLabel: string;
+  traitNote: string;
+}
+
+export interface Candidate {
+  id: string;
+  cityId: string;
+  name: string;
+  party: string;
+  profile: LeaderProfile;
+  /** 演示支持度 0–100，用于确定性的候选人排序。 */
+  popularity: number;
+  note: string;
+}
+
+export interface CityPoliticsState {
+  cityId: string;
+  candidates: Candidate[];
+  /** 当前领导人（候选人之一）；null 表示玩家市长在任或尚未产生。 */
+  leader: Candidate | null;
+  termMonthsLeft: number;
+  electionCount: number;
+  lastElectionTick: number | null;
+  lastResult: string;
+}
+
+export interface ElectionRecord {
+  tick: number;
+  cityId: string;
+  winnerId: string;
+  winnerName: string;
+  playerWon: boolean;
+  note: string;
+}
+
+export interface WorldPoliticsState {
+  cities: CityPoliticsState[];
+  elections: ElectionRecord[];
+}
+
+export interface FiscalEntry {
+  id: string;
+  tick: number;
+  cityId: string;
+  kind:
+    | 'incomeTax'
+    | 'corporateTax'
+    | 'publicWages'
+    | 'benefits'
+    | 'policySpending'
+    | 'policyTransfer'
+    | 'transportConstruction'
+    | 'transportMaintenance'
+    | 'debtForgiven'
+    | 'liquidationProceeds'
+    | 'electionFee';
+  /** 正数为财政收入，负数为财政支出。 */
+  amount: number;
+  source: string;
+  policyId?: PolicyId;
+  companyId?: string;
+}
+
+export interface FiscalState {
+  ledger: FiscalEntry[];
+  nextEntryId: number;
+}
+
+export interface ActivePolicy {
+  id: string;
+  cityId: string;
+  policyId: PolicyId;
+  budget: number;
+  spent: number;
+  monthsRemaining: number;
+  startedTick: number;
+  status: 'active' | 'completed' | 'cancelled';
+  targetSector: SectorId | null;
+  taxDirection: 'cut' | 'raise' | null;
+  transportTarget: 'intracity' | string | null;
+  effects: Record<string, number>;
+  reason: string;
+  note: string;
+}
+
+export interface PolicyHistoryEntry extends ActivePolicy {
+  endedTick: number;
+}
+
+export interface PolicyState {
+  active: ActivePolicy[];
+  history: PolicyHistoryEntry[];
+  lastRuns: { cityId: string; policyId: PolicyId; tick: number }[];
+  /** 非玩家政府最近一次选政策的说明，供玩家理解。 */
+  lastSelection: { tick: number; cityId: string; policyId: PolicyId | null; reason: string }[];
+}
+
+// ---------------------------------------------------------------- 交通（政府主导）与容量结算
+
+export type TransportMode = 'road' | 'rail';
+
+export interface TransportConstruction {
+  targetLevel: number;
+  monthsRemaining: number;
+  totalMonths: number;
+  costPaid: number;
+  startedTick: number;
+}
+
+export interface TransportLink {
+  id: string;
+  fromCityId: string;
+  toCityId: string;
+  mode: TransportMode;
+  level: number;
+  maxLevel: number;
+  construction: TransportConstruction | null;
+  note: string;
+}
+
+export interface IntracityNetwork {
+  cityId: string;
+  roadLevel: number;
+  railLevel: number;
+  maxLevel: number;
+  construction: TransportConstruction & { kind: 'road' | 'rail' } | null;
+  note: string;
+}
+
+/** 一笔已成交但尚未按容量结算的跨城销售：买方已付款，卖方尚未入账。 */
+export interface PendingIntercitySale {
+  tick: number;
+  path: 'contract' | 'agreement' | 'intercityPurchase' | 'householdPurchase';
+  fromCityId: string;
+  toCityId: string;
+  corridorKey: string;
+  sellerCompanyId: string;
+  buyerCompanyId: string | 'households';
+  good: GoodId;
+  qty: number;
+  grossValue: number;
+}
+
+export interface TransportTradeRecord {
+  tick: number;
+  path: PendingIntercitySale['path'];
+  corridorKey: string;
+  fromCityId: string;
+  toCityId: string;
+  sellerCompanyId: string;
+  buyerCompanyId: string;
+  good: GoodId;
+  qty: number;
+  /** 买方付款（不因容量变化）。 */
+  grossValue: number;
+  /** 卖方实际所得。 */
+  sellerProceeds: number;
+  /** 收益损失 = grossValue - sellerProceeds，不计入任何主体收入。 */
+  capacityLoss: number;
+  penaltyRate: number;
+  demand: number;
+  capacity: number;
+}
+
+export interface TransportCorridorStats {
+  corridorKey: string;
+  fromCityId: string;
+  toCityId: string;
+  demand: number;
+  capacity: number;
+  overloadRatio: number;
+  penaltyRate: number;
+}
+
+export interface TransportIntracityStats {
+  cityId: string;
+  demand: number;
+  capacity: number;
+  utilization: number;
+  /** 次月本地配送可用效率 0–1。 */
+  deliveryEfficiency: number;
+}
+
+export interface TransportMonthStats {
+  tick: number;
+  demand: number;
+  capacity: number;
+  overloadRatio: number;
+  penaltyRate: number;
+  capacityLossTotal: number;
+  freightSubsidy: number;
+  maintenancePaid: number;
+  corridors: TransportCorridorStats[];
+  intracity: TransportIntracityStats[];
+  trades: TransportTradeRecord[];
+  note: string;
+}
+
+export interface TransportState {
+  links: TransportLink[];
+  intracity: IntracityNetwork[];
+  pendingSales: PendingIntercitySale[];
+  lastMonth: TransportMonthStats;
+}
+
+// ---------------------------------------------------------------- 企业成立与倒闭
+
+export type FounderType = 'investorGroup' | 'company' | 'government';
+
+export interface FoundingInvestor {
+  type: FounderType;
+  id: string;
+  cash: number;
+  shares: number;
+}
+
+export interface FoundingRecord {
+  id: string;
+  tick: number;
+  cityId: string;
+  companyId: string;
+  companyName: string;
+  sector: SectorId;
+  recipeOutput: GoodId;
+  founderType: FounderType;
+  capital: number;
+  investorCount: number;
+  investors: FoundingInvestor[];
+  governmentGrant: number;
+  note: string;
+}
+
+export interface LiquidationHolding {
+  holder: HolderRef;
+  shares: number;
+  amount: number;
+}
+
+export interface LiquidationRecord {
+  id: string;
+  tick: number;
+  companyId: string;
+  companyName: string;
+  cityId: string;
+  reason: string;
+  employeesReleased: number;
+  cash: number;
+  debt: number;
+  debtRepaid: number;
+  debtForgiven: number;
+  shareholderPayout: number;
+  holdings: LiquidationHolding[];
+  inventoryWrittenOff: { good: GoodId; qty: number; bookValue: number }[];
+  inventoryBookValue: number;
+  agreementsAffected: string[];
+  note: string;
+}
+
+export interface CompanyLifecycleState {
+  foundings: FoundingRecord[];
+  liquidations: LiquidationRecord[];
+  nextFoundingNumber: number;
+  nextLiquidationNumber: number;
+}
+
 // ---------------------------------------------------------------- 世界与存档
 
 export interface WorldState {
@@ -539,6 +907,16 @@ export interface WorldState {
   investors: InvestorGroup[];
   agreements: TradeAgreement[];
   notifications: PlayerNotification[];
+  /** v0.3：候选人、领导人与选举。 */
+  politics: WorldPoliticsState;
+  /** v0.3：政策生效状态与结果记录。 */
+  policies: PolicyState;
+  /** v0.3：财政流水（每项收入与支出的来源）。 */
+  fiscal: FiscalState;
+  /** v0.3：城内/城际公路铁路与容量。 */
+  transport: TransportState;
+  /** v0.3：企业成立与倒闭记录。 */
+  lifecycle: CompanyLifecycleState;
   history: WorldHistoryPoint[];
   log: LogEntry[];
   lastTick: {
@@ -626,4 +1004,12 @@ export interface TradeActionResult {
   shares?: number;
   unitPrice?: number;
   value?: number;
+}
+
+/** v0.3：政策、交通与企业生命周期的统一命令结果。 */
+export interface ActionResult {
+  ok: boolean;
+  error?: string;
+  note?: string;
+  amount?: number;
 }

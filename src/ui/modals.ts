@@ -210,7 +210,6 @@ function renderSaveLoad(store: GameStore, state: ModalState): string {
 }
 
 function renderAssumptions(store: GameStore): string {
-  const city = store.selectedCity ?? store.world.cities[0];
   const assumptions = DEMO_CONFIG.meta.assumptions;
   const settlement = [
     '人口自然变动与城市间迁移',
@@ -253,22 +252,22 @@ function renderAssumptions(store: GameStore): string {
         <p class="note">任一步骤失败或库存守恒校验不通过时，整期会回滚到月初快照。</p>
       </section>
       <section class="modal-section">
-        <h3>尚未实现的系统</h3>
+        <h3>系统接入状态</h3>
         <div class="unimplemented-list">
           <div>
             <span>科技</span>
-            <p>${esc(city?.technology.note ?? '科技系统尚未实现。')}</p>
-            <em>status: initial-only</em>
+            <p>研发资助把财政投入转为研究点，累计到阈值后提升等级与生产率；教育投入提高劳动力技能。等级与生产率随政策变化。</p>
+            <em>status: 已接入（演示）</em>
           </div>
           <div>
             <span>政治</span>
-            <p>${esc(city?.politics.note ?? '政治系统尚未实现。')}</p>
-            <em>status: initial-only</em>
+            <p>候选人、领导人与任期由选举模块推进；玩家可参选市长，当选后自行选择 15 项政策。</p>
+            <em>status: 已接入（演示）</em>
           </div>
           <div>
             <span>房地产</span>
-            <p>${esc(city?.realEstate.note ?? '房地产市场尚未实现。')}</p>
-            <em>status: initial-only</em>
+            <p>住房支持会建设住房单元并发放租金补贴；住房买卖与地价形成仍未接入。</p>
+            <em>status: 初始展示</em>
           </div>
         </div>
       </section>

@@ -29,6 +29,12 @@ function layoffCompanies(
   return remaining;
 }
 
+export interface LaborResult {
+  /** 每家企业本月实际新增雇员数（用于新增招聘补贴结算）。 */
+  hiresByCompany: Record<string, number>;
+  publicHires: number;
+}
+
 /**
  * 劳动力匹配。企业只能从本城失业人口中招聘；公共部门优先补员。
  * 所有人数变化完成后统一重算人口状态，保证 P = E + U + N。
@@ -37,7 +43,9 @@ export function reconcileLabor(
   world: WorldState,
   config: DemoConfig,
   log: LogEntry[],
-): void {
+): LaborResult {
+  const hiresByCompany: Record<string, number> = {};
+  let publicHiresTotal = 0;
   for (const city of [...world.cities].sort((a, b) => a.id.localeCompare(b.id))) {
     const companies = world.companies
       .filter((company) => company.cityId === city.id)
@@ -83,6 +91,7 @@ export function reconcileLabor(
       city.publicSector.employees += publicHire;
       available -= publicHire;
       hired += publicHire;
+      publicHiresTotal += publicHire;
     }
     for (const company of companies) {
       if (available <= 0) break;
@@ -90,6 +99,7 @@ export function reconcileLabor(
       const hire = Math.min(vacancy, available);
       if (hire > 0) {
         setCompanyEmployees(company, company.employees + hire);
+        hiresByCompany[company.id] = (hiresByCompany[company.id] ?? 0) + hire;
         available -= hire;
         hired += hire;
       }
@@ -104,6 +114,7 @@ export function reconcileLabor(
       });
     }
   }
+  return { hiresByCompany, publicHires: publicHiresTotal };
 }
 
 export function publicWageBill(city: City): number {

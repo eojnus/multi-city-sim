@@ -9,6 +9,7 @@ import type { DemoConfig } from '../../data/config';
 import { GOODS, RECIPES } from '../../data/demo-data';
 import { GOOD_IDS } from '../companies/company';
 import { clamp, round2 } from '../core/math';
+import { intracityDeliveryEfficiency } from '../transport/network';
 
 /**
  * 企业自用投入品不进入本月可售供应，避免同一批原料在月内被反复转卖，
@@ -122,6 +123,9 @@ export function executePurchase(
   const ledger = ledgers[goodId];
   if (!ledger || desiredQty <= 0 || maxSpend <= 0) return { qty: 0, spend: 0 };
 
+  // 城内交通：本月可配送量受上一期配送压力影响（容量不足时低于 1）。
+  const deliveryEfficiency = clamp(intracityDeliveryEfficiency(world, city.id), 0, 1);
+
   const marketPrice = city.market[goodId]?.price ?? 0;
   const buyer =
     options.buyerCompanyId === undefined
@@ -147,7 +151,7 @@ export function executePurchase(
 
   for (const seller of sellers) {
     if (remainingQty <= 1e-9 || remainingBudget <= 0) break;
-    const available = offeredStock(seller.company, goodId);
+    const available = round2(offeredStock(seller.company, goodId) * deliveryEfficiency);
     if (available <= 0) continue;
     const affordable = seller.unitPrice > 0 ? remainingBudget / seller.unitPrice : 0;
     let qty = Math.min(remainingQty, available, affordable);

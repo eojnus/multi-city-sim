@@ -2,10 +2,14 @@ import type { City, LogEntry, WorldState } from '../contracts/types';
 import type { DemoConfig } from '../../data/config';
 import { round2 } from '../core/math';
 import type { FinanceResult } from '../finance/finance';
+import { recordFiscal } from './treasury';
 
 /**
  * 城市财政与居民收入。个人所得税从工资中扣除，企业所得税进入财政；
  * 财政不足时福利按可用资金支付，公职人员工资仍按名义额支付并形成赤字。
+ *
+ * v0.3：每项收入与支出都写入 world.fiscal.ledger（来源可追溯），
+ * 政策支出与交通支出由各自模块通过 treasury 记录。
  */
 export function settleGovernment(
   world: WorldState,
@@ -24,10 +28,24 @@ export function settleGovernment(
     );
     const privateIncomeTax = round2(privateWages * city.incomeTaxRate);
     const publicIncomeTax = round2(publicGross * city.incomeTaxRate);
+    const incomeTax = round2(privateIncomeTax + publicIncomeTax);
 
     let treasury = city.treasury;
-    treasury += corporateTax + privateIncomeTax + publicIncomeTax;
-    treasury -= publicGross;
+    receiveFiscal(world, city, incomeTax, 'incomeTax', `个人所得税（${city.name}）`, config);
+    receiveFiscal(world, city, corporateTax, 'corporateTax', `企业所得税（${city.name}）`, config);
+    treasury = round2(treasury + incomeTax + corporateTax);
+    treasury = round2(treasury - publicGross);
+    recordFiscal(
+      world,
+      {
+        tick: world.time.tick,
+        cityId: city.id,
+        kind: 'publicWages',
+        amount: -publicGross,
+        source: `公共部门工资 ${city.publicSector.employees} 人（${city.name}）`,
+      },
+      config,
+    );
     if (treasury < 0) {
       log.push({
         tick: world.time.tick,
@@ -41,7 +59,20 @@ export function settleGovernment(
         city.population.nonLabor * city.nonLaborTransfer,
     );
     const benefitsPaid = round2(Math.min(benefitsDesired, Math.max(0, treasury)));
-    treasury -= benefitsPaid;
+    treasury = round2(treasury - benefitsPaid);
+    if (benefitsPaid > 0) {
+      recordFiscal(
+        world,
+        {
+          tick: world.time.tick,
+          cityId: city.id,
+          kind: 'benefits',
+          amount: -benefitsPaid,
+          source: `失业与非劳动力转移支付（${city.name}）`,
+        },
+        config,
+      );
+    }
 
     const householdIncome = round2(
       privateWages * (1 - city.incomeTaxRate) +
@@ -56,7 +87,7 @@ export function settleGovernment(
       ...city.lastMonth,
       householdIncome,
       benefitsPaid,
-      incomeTax: round2(privateIncomeTax + publicIncomeTax),
+      incomeTax,
       corporateTax,
       publicWageBill: publicGross,
       migrationIn: 0,
@@ -65,6 +96,22 @@ export function settleGovernment(
       investableContribution: 0,
     };
   }
+}
+
+function receiveFiscal(
+  world: WorldState,
+  city: City,
+  amount: number,
+  kind: 'incomeTax' | 'corporateTax',
+  source: string,
+  config: DemoConfig,
+): void {
+  if (amount <= 0) return;
+  recordFiscal(
+    world,
+    { tick: world.time.tick, cityId: city.id, kind, amount, source },
+    config,
+  );
 }
 
 export function recordMigrationReports(world: WorldState, city: City): void {

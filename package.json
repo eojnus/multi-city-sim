@@ -1,8 +1,8 @@
 {
   "name": "multi-city-sim",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
-  "description": "Multi-city economic and political simulation - mechanisms foundation prototype",
+  "description": "Multi-city economic and political simulation - enterprise, government and transport prototype",
   "main": "dist/electron/main.js",
   "scripts": {
     "dev": "concurrently -k -n renderer,electron,app \"npm:dev:renderer\" \"npm:dev:electron\" \"npm:dev:app\"",
