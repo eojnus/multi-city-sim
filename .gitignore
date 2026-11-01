@@ -1,0 +1,9 @@
+node_modules/
+dist/
+out/
+release/
+coverage/
+.env
+.env.*
+*.log
+assets/source-packs/
