@@ -3,6 +3,7 @@ import type { DemoConfig } from '../../data/config';
 import { cityMarketPrices } from '../markets/markets';
 import { companySharePrice } from '../companies/company';
 import { clamp, round2 } from '../core/math';
+import { issueShares, playerStakeOf } from '../securities/securities';
 
 export function computeCityGdp(world: WorldState): Record<string, number> {
   const gdpByCity: Record<string, number> = {};
@@ -38,14 +39,12 @@ export function playerNetWorth(world: WorldState): number {
 }
 
 export function holdingStake(world: WorldState, companyId: string): number {
-  const company = world.companies.find((candidate) => candidate.id === companyId);
-  const holding = world.player.holdings.find((candidate) => candidate.companyId === companyId);
-  if (!company || !holding || company.totalShares <= 0) return 0;
-  return holding.shares / company.totalShares;
+  return round2(playerStakeOf(world, companyId) * 10000) / 10000;
 }
 
 /**
- * 玩家向企业注资：玩家现金 → 企业现金，企业按演示规则扩大产能并增发股份。
+ * 玩家向企业注资：玩家现金 → 企业现金，企业按演示规则扩大产能并增发有投票权股份。
+ * 这是"企业融资"，资金进入发行企业；与二级市场买卖（钱付给卖方）严格区分。
  * 校验全部通过后才提交，避免部分扣款或部分增发。
  */
 export function investInCompany(
@@ -82,19 +81,17 @@ export function investInCompany(
   // ---- 提交 ----
   world.player.cash = round2(world.player.cash - rounded);
   company.cash = round2(company.cash + rounded);
-  company.totalShares += issuedShares;
+  // 玩家出资为一级发行；暂定给予有投票权股份（个人二级市场买入权利仍待用户决定）。
+  issueShares(world, company, 'voting', { type: 'player', id: 'player' }, issuedShares, world.time.tick);
   company.capacity = round2(company.capacity + capacityGain);
   company.maxCapacity = round2(
     Math.max(company.maxCapacity, company.capacity * 1.2, company.maxCapacity + capacityGain * 2),
   );
-  const holding = world.player.holdings.find((entry) => entry.companyId === companyId);
-  if (holding) holding.shares += issuedShares;
-  else world.player.holdings.push({ companyId, shares: issuedShares });
 
   world.log.push({
     tick: world.time.tick,
     kind: 'player',
-    message: `玩家向 ${company.name} 注资 ${rounded.toFixed(0)}，获得 ${issuedShares} 股（发行价 ${price.toFixed(2)}），产能 +${capacityGain.toFixed(0)}。`,
+    message: `玩家向 ${company.name} 注资 ${rounded.toFixed(0)}，获得 ${issuedShares} 股有投票权股份（发行价 ${price.toFixed(2)}），产能 +${capacityGain.toFixed(0)}。`,
   });
   trimLog(world, config);
 

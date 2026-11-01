@@ -3,11 +3,15 @@ import type { DemoConfig } from '../../data/config';
 import { clamp, round2 } from '../core/math';
 import { monthlyWageBill } from '../companies/company';
 import { ensureLiquidity, payInterest, repayDebt, companyCreditLimit, restructureDebt } from '../companies/credit';
+import { distributeDividend, playerTotalShares } from '../securities/securities';
 
 export interface FinanceResult {
-  /** 非玩家股东获得、计入城市居民收入的分红（已扣除玩家所得）。 */
+  /** 居民投资实体本次实际收到的股息总额（按城市）。 */
+  investorDividendsByCity: Record<string, number>;
+  /** 其中返还给居民可支配收入的部分（其余留作投资资金）。 */
+  investorDistributionByCity: Record<string, number>;
+  /** 兼容字段：v0.2 起等于 investorDividendsByCity（不再直接把全部股息计入居民收入）。 */
   dividendsByCity: Record<string, number>;
-  /** 玩家按持股比例实际收到的分红。 */
   playerDividends: number;
   playerDividendsByCompany: Record<string, number>;
   corporateTaxByCity: Record<string, number>;
@@ -16,9 +20,9 @@ export interface FinanceResult {
 }
 
 /**
- * 拆分一笔已支付股息。
- * 玩家所得先按 round2 取两位小数，其他股东取得“总额 - 玩家所得”的精确余额，
- * 因此 玩家所得 + 其他股东所得 === 企业实际支付总额（浮点误差由两次 round2 控制在 0.01 内）。
+ * 拆分一笔股息（保留给旧测试与外部调用）：
+ * 玩家所得按 round2 取两位小数，其他股东取得精确余额。
+ * v0.2 的实际分配由 securities.distributeDividend 按持股逐笔完成。
  */
 export function splitDividend(
   totalPaid: number,
@@ -31,17 +35,18 @@ export function splitDividend(
   return { player, other: round2(total - player), stake };
 }
 
-
 /**
  * 企业月度财务：支付工资 → 缴纳企业所得税 → 分配股息 → 调整产能。
- * 现金不足时只能支付部分工资，欠薪记录在 lastMonth.wageArrears。
+ * 股息按 world.securities 的实际持股逐笔分配：玩家、企业、居民投资实体各自入账，
+ * 不会把同一笔股息重复计入居民收入。
  */
 export function settleCompanyFinance(
   world: WorldState,
   config: DemoConfig,
   log: LogEntry[],
 ): FinanceResult {
-  const dividendsByCity: Record<string, number> = {};
+  const investorDividendsByCity: Record<string, number> = {};
+  const investorDistribution: Record<string, number> = {};
   const playerDividendsByCompany: Record<string, number> = {};
   const corporateTaxByCity: Record<string, number> = {};
   const privateWagesByCity: Record<string, number> = {};
@@ -81,8 +86,8 @@ export function settleCompanyFinance(
     repayDebt(company, config);
     stats.profit = round2(preTaxProfit - taxPaid - stats.interestPaid);
 
-    const dividendOwed =
-      stats.profit > 0 ? round2(stats.profit * config.company.dividendPayoutRatio) : 0;
+    const payoutRatio = clamp(company.dividendPayoutRatio, 0, 1);
+    const dividendOwed = stats.profit > 0 ? round2(stats.profit * payoutRatio) : 0;
     const reserve = monthlyWageBill(company) * 0.5;
     const dividendPaid = round2(
       Math.min(company.cash, dividendOwed, Math.max(0, company.cash - reserve)),
@@ -90,27 +95,35 @@ export function settleCompanyFinance(
     company.cash = round2(company.cash - dividendPaid);
     stats.dividendsPaid = dividendPaid;
 
-    const playerHolding = world.player.holdings.find(
-      (holding) => holding.companyId === company.id,
-    );
-    const dividendSplit = splitDividend(
+    const distribution = distributeDividend(
+      world,
+      company,
       dividendPaid,
-      playerHolding?.shares ?? 0,
-      company.totalShares,
+      world.time.tick,
+      config,
     );
-    if (dividendSplit.player > 0) {
-      world.player.cash = round2(world.player.cash + dividendSplit.player);
-      world.player.lastDividend = round2((world.player.lastDividend ?? 0) + dividendSplit.player);
-      world.player.dividendsReceived = round2(
-        (world.player.dividendsReceived ?? 0) + dividendSplit.player,
-      );
-      playerDividends = round2(playerDividends + dividendSplit.player);
-      playerDividendsByCompany[company.id] = dividendSplit.player;
+    if (distribution.player > 0) {
+      playerDividends = round2(playerDividends + distribution.player);
+      playerDividendsByCompany[company.id] = distribution.player;
+      const stake = company.totalShares > 0 ? playerTotalShares(world, company.id) / company.totalShares : 0;
       log.push({
         tick: world.time.tick,
         kind: 'player',
-        message: `${company.name} 分红 ${dividendPaid.toFixed(2)}；玩家按 ${(dividendSplit.stake * 100).toFixed(2)}% 持股获得 ${dividendSplit.player.toFixed(2)} 信用点。`,
+        message: `${company.name} 分红 ${dividendPaid.toFixed(2)}；玩家按 ${(stake * 100).toFixed(2)}% 持股获得 ${distribution.player.toFixed(2)} 信用点。`,
       });
+    }
+    if (distribution.total > 0 && distribution.total !== dividendPaid) {
+      log.push({
+        tick: world.time.tick,
+        kind: 'warning',
+        message: `${company.name} 股息分配存在舍入差异：应付 ${dividendPaid.toFixed(2)}，实付 ${distribution.total.toFixed(2)}。`,
+      });
+    }
+    for (const [cityId, amount] of Object.entries(distribution.investorByCity)) {
+      investorDividendsByCity[cityId] = round2((investorDividendsByCity[cityId] ?? 0) + amount);
+    }
+    for (const [cityId, amount] of Object.entries(distribution.investorDistributionByCity)) {
+      investorDistribution[cityId] = round2((investorDistribution[cityId] ?? 0) + amount);
     }
 
     if (arrears > 0.01) {
@@ -138,7 +151,6 @@ export function settleCompanyFinance(
     stats.capacityChange = round2(nextCapacity - company.capacity);
     company.capacity = round2(nextCapacity);
 
-    dividendsByCity[city.id] = round2((dividendsByCity[city.id] ?? 0) + dividendSplit.other);
     corporateTaxByCity[city.id] = round2((corporateTaxByCity[city.id] ?? 0) + taxPaid);
     privateWagesByCity[city.id] = round2((privateWagesByCity[city.id] ?? 0) + paidWages);
   }
@@ -151,8 +163,15 @@ export function settleCompanyFinance(
     });
   }
 
+  const investorDistributionResult: Record<string, number> = {};
+  for (const [cityId, amount] of Object.entries(investorDistribution)) {
+    investorDistributionResult[cityId] = round2(amount);
+  }
+
   return {
-    dividendsByCity,
+    investorDividendsByCity,
+    investorDistributionByCity: investorDistributionResult,
+    dividendsByCity: investorDividendsByCity,
     playerDividends,
     playerDividendsByCompany,
     corporateTaxByCity,

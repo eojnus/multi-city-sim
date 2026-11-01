@@ -1,8 +1,8 @@
 {
   "name": "multi-city-sim",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Multi-city economic and political simulation - first playable prototype",
+  "description": "Multi-city economic and political simulation - mechanisms foundation prototype",
   "main": "dist/electron/main.js",
   "scripts": {
     "dev": "concurrently -k -n renderer,electron,app \"npm:dev:renderer\" \"npm:dev:electron\" \"npm:dev:app\"",
@@ -20,6 +20,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "smoke": "electron scripts/smoke-main.cjs",
+    "smoke:mechanisms": "electron scripts/mechanisms-smoke.cjs",
     "sim:report": "tsx scripts/sim-report.ts",
     "smoke:build": "npm run build && electron scripts/smoke-main.cjs",
     "package:cn": "cross-env ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/ electron-builder --win --x64",

@@ -1,158 +1,104 @@
-# 岚湾区域 · 多城市经济与政治模拟（可运行初版）
+# 岚湾区域 · 多城市经济与政治模拟（机制扩展原型 v0.2）
 
-基于 **TypeScript + Phaser 3 + Electron** 的桌面经济模拟原型。首版交付一张三城市区域战略地图、一座可辨认的模块化城市街区、月度结算的最小经济闭环、玩家注资、确定性随机种子，以及带版本校验的存档/读档。
+基于 **TypeScript + Phaser 3 + Electron** 的桌面经济模拟原型。v0.2 在可运行初版（三城区域地图、月度经济闭环、玩家注资与分红、确定性存档）之上，加入企业股权与董事会、股票一级/二级市场、居民投资实体、政府牵头的跨城多企业协议、按身份筛选的玩家通知和动态人口环形图。
 
-> 本版所有数值均为**可替换的演示参数**，不是最终策划规则。模拟中尚未完成的系统在界面和文档中明确标注为“初始展示/未实现”，没有用假按钮冒充完整功能。
+> 除文档中明确标注“用户已确认”的少数规则外，本版所有数值与规则均为**可替换的暂定演示方案**，不是最终策划。界面上没有用假按钮冒充完整系统。
 
 ## 快速开始（Windows）
 
 环境：Node.js 20+（本机验证使用 Node v26.13.0 / npm 11.20.0）、Windows 10/11 x64。主要依赖：TypeScript 5.9.3、Phaser 3.90.0、Electron 38.8.6、Vite 7.3.7、Vitest 3.2.7、electron-builder 26.18.1。
 
 ```powershell
-cd C:\CODING-worktrees\first-playable
+cd C:\CODING-worktrees\mechanisms-foundation
 npm install
 npm run dev
 ```
 
-`npm run dev` 会同时启动 Vite、Electron 主进程编译和桌面窗口。首次安装如果 Electron 二进制被 npm 的 install-scripts 策略拦截，可执行：
+`npm run dev` 同时启动 Vite、Electron 主进程编译和桌面窗口。如果 Electron / esbuild 的安装脚本被 npm 策略拦截，可执行：
 
 ```powershell
 node node_modules\electron\install.js
-# 若仍缺少 dist\electron.exe，可手动解压缓存中的 electron-v38.8.6-win32-x64.zip 到 node_modules\electron\dist
+node node_modules\esbuild\install.js
 ```
 
 ### 构建、启动、打包
 
 ```powershell
 npm run typecheck      # 渲染层 + Electron 主进程类型检查
-npm test               # Vitest：守恒、确定性、存档、GDP 口径
+npm test               # Vitest：守恒、确定性、存档迁移、证券、治理、协议、通知
 npm run build          # 类型检查 + Vite 构建 + Electron 编译
 npm start              # 启动已构建的桌面应用（electron .）
-npm run package:dir    # 生成 release\win-unpacked（免安装目录）
-npm run package        # 生成 Windows NSIS 安装包（需联网下载 NSIS/7zip）
-npm run package:dir:cn # 同上（目录版），使用 npmmirror 镜像下载打包工具
-npm run package:cn     # 同上（NSIS），使用 npmmirror 镜像下载打包工具
+npm run smoke          # 需要先 npm run build；在 artifacts/ 下的隔离数据目录运行
+npm run smoke:mechanisms # 机制扩展专用验收（通知、饼图、股权、表决、协议、市长演示）
+npm run package:dir    # 生成 release\win-unpacked
+npm run package        # 生成 Windows NSIS 安装包（需联网）
 ```
 
-构建产物：`dist/renderer/`（Phaser/UI）、`dist/electron/`（主进程/preload）、`release/`（打包结果，已 gitignore）。
+浏览器回退（仅开发/截图）：`npm run dev:web`。浏览器模式没有 Electron IPC，存档回退到 localStorage；正式桌面存档请使用 Electron。
 
-### 浏览器回退（仅开发/截图）
+## 本版新增的可操作内容
 
-```powershell
-npm run dev:web
-```
+### 企业与股权
 
-浏览器模式没有 Electron IPC，存档回退到 localStorage；正式桌面存档请使用 Electron。
+- 每家企业独立持有现金、债务、库存、产能与两类股份：**有投票权**（voting）与**仅分红**（nonVoting）。股东、董事与经营控制权分开：持股产生投票权与董事席位，但默认经营控制权仍在职业经理人手中。
+- 企业详情页显示股东结构、董事会席位、在任经营者、待表决议案、当月损益、库存与融资入口。
+- 玩家对企业注资是**一级融资**：现金进入企业，企业增发有投票权股份；二级市场买卖的资金只进入卖方，企业不会因转手获得资金。
 
-## 界面预览
+### 股票市场与居民投资
 
-| 区域战略地图 | 城市街区与街区面板 |
-| --- | --- |
-| ![区域地图](docs/images/region-map.png) | ![城市地图](docs/images/city-map.png) |
+- 每座城市有多个居民投资实体（不在界面展示内部明细），它们持有资金和股票、参与融资和二级买卖、按持股获得分红。
+- 二级市场使用限价订单簿：下单时校验现金/持股，撮合时再次校验；现金不足或股份不足会缩减或跳过，不会出现部分扣款。企业作为**市场买方**只能买入有投票权股份（用户已确认规则）；企业通过融资获得的仅分红股份可以正常持有、出售和收取股息，但没有投票权。
+- 融资要约可以针对不同出资方约定不同股份类别；企业会向居民实体、其他企业和玩家发出要约，接受前不改变任何资产，拒绝不产生义务。
+- 城市居民可支配收入的一部分（演示 6%）转入投资实体，其余用于消费；实体收到股息后，70% 从实体现金扣除并返还居民收入，30% 留存投资，同一笔股息不会同时用于消费和投资。
 
-| 存档控制台 | 街区详情 |
-| --- | --- |
-| ![存档](docs/images/save-modal.png) | ![街区详情](docs/images/district-panel.png) |
+### 董事会与表决
 
-截图来自实际 Electron 构建（`npm run smoke`），不是设计稿；界面在 1100×700 至 1440×900 均可操作。
+- 董事席位按投票权股份比例分配（演示规则）。企业可对“股息派发比例”和“经营者任命”提出议案，按股加权表决，结果会真实改变企业状态（例如股息比例、经营者）。
+- 玩家持有有投票权股份时会收到表决通知，可在企业页面投赞成/反对/弃权；未投票视为弃权。
+- 市长选举尚未实现；界面提供明确标注的“市长演示身份”，仅用于验证市长专属信息，不代表玩家已当选。
 
-## 操作
+### 政府牵头的跨城协议
 
-- **区域地图**：单击城市查看概况；双击城市节点或点击右侧“进入城市”进入城市地图。
-- **城市地图**：滚轮缩放，拖拽平移；点击建筑/街区查看信息；顶部“返回区域”。
-- **时间**：顶部“推进 1 月”/“暂停·继续”；快捷键 `N` 推进，`Space` 暂停/继续，`R` 返回区域，`1/2/3` 切换人口/经济/产业图层。
-- **注资**：选中城市或企业后，在企业面板注资 5 万/10 万/25 万；玩家现金、企业现金、产能、股份会实际变化，并影响后续就业/生产。
-- **存档**：顶部“保存/读取”；自动存档在每次成功推进后写入；重启应用会自动恢复自动存档。手动存档 3 槽；读取失败不会覆盖当前进度。
-- **菜单**：Electron 菜单提供保存（Ctrl+S）、读取（Ctrl+O）、暂停、推进、资源署名、参数假设。
+- 城市政府可组织本市多家企业与其他城市多家企业协商买卖商品；每家企业可以接受或拒绝，拒绝方不承担买卖义务，也不扣资金/库存。
+- 协议逐条记录买方、卖方、商品、数量、价格和履约状态；每条独立校验与原子提交，失败不会留下部分扣款或货物转移。已结束协议只保留最近 10 条。
 
-## 已实现
+### 通知与人口图
 
-### 地图与界面
+- 顶部 UI 正下方是通知图标：有事件时只显示小图标和未读数，点击才打开可拖动、可关闭的通知窗口。
+- 通知按玩家身份筛选：个人事件；玩家持股企业的分红、其有权参与的表决与重大变化；玩家担任市长（演示）城市的财政等事务。无投票权不会收到要求投票的通知；少量持股（演示阈值 5%）不推送日常经营信息。
+- 城市概况使用动态环形图展示就业、失业、非劳动力三个**互斥**口径；悬停/键盘聚焦扇区会浮动并显示类别、人数和比例，数据变化时平滑更新。劳动力、总人口等不同口径不会被相加。
 
-- 三座独立城市：岚港（港口/消费品）、铁谷（金属/工业）、青原（农业/纤维），有名称、位置、区域范围、人口与经济数据。
-- 区域道路/贸易连接，贸易流按本回合实际成交显示；人口/经济/产业三种图层。
-- 岚港城市地图：44×32 tile 模块化街区，3 像素/瓦片显示；道路、路口、人行道、住宅、商业、办公、工业、公共设施与公园；建筑可点击。
-- 铁谷/青原复用模块化布局，使用不同城市名称、企业名称和经济数据。
-- 界面：顶部 HUD（日期、暂停/推进、玩家现金/净值、存档）、城市列表、城市概况、市场表、企业列表/详情、贸易摘要、事件日志、科技/政治/房地产初始状态、参数与资源署名弹窗。
+## 存档
 
-### 模拟
+- 存档格式 `formatVersion 2`，`gameVersion 0.2.0`；槽位：`autosave`、`manual-1`、`manual-2`、`manual-3`。
+- **旧版 v1 存档自动迁移**：保留人口、企业现金/债务/库存/产能、玩家现金与持股、时间、历史、日志、随机种子与 RNG 状态。v1 的全部发行股份迁移为有投票权类别，玩家持股原值保留，其余股份按本城居民实体人口占比分配；居民实体现金从 0 开始，不凭空创造货币。
+- 无法安全推导的旧存档（发行量无效、玩家持股超过发行量等）会被明确拒绝并说明原因。
+- 自动存档：文件不存在（首次运行）与“文件存在但读取失败”（过大、权限、IO 错误、损坏内容）被区分处理。后者会暂停自动写入并保留原文件，界面用易懂语言提示；读取有效存档或确认开始新世界后才恢复自动保存。
+- 读取失败不会覆盖当前进度；版本高于 2 明确拒绝。
 
-- 城市权威人口：`总人口 = 就业 + 失业 + 非劳动力`；就业分配到公共部门与具体企业；企业岗位分布合计 = 员工数。
-- 企业岗位需求、员工、工资、现金、债务、产能、库存；劳动力匹配只能从本城失业人口招聘。
-- 8 种商品（3 消费品 + 5 生产资料）与配方；企业按配方/库存/产能/资金采购并生产；居民消费受上一月可支配收入约束。
-- 城市市场记录供应、需求（消费者/生产者分解）、成交、未满足需求、价格、进口/出口、期末库存；价格按供需与库存渐进调整。
-- 企业间与跨城市贸易：8 条长期合同 + 区域市场补货；实际跨城市货物流动写入 `lastTick.tradeFlows`。
-- 企业财务：销售、采购、工资、欠薪、利息、企业所得税、股息、产能调整；城市财政与居民收入。
-- 游戏 GDP：按生产记录 `产出价值 − 中间投入价值` 汇总，明确不把营业额/工资/股票市值直接当 GDP。
-- 确定性：mulberry32 种子状态随存档保存；相同初始状态 + 操作 → 相同结果（测试逐字节比较）。
-- 月度结算失败时恢复到本期开始前快照，不留半期状态。
+## 验证状态（2026-11-01，本机）
 
-### 桌面与存档
+- `npm run typecheck`：通过。
+- `npm test`：见 `docs/development/DELIVERY_REPORT_v0.2.md` 的实际运行结果（含守恒、固定种子、旧存档迁移、证券与融资、协议接受/拒绝与逐项履约、通知筛选）。
+- `npm run build`：通过。
+- 桌面验证使用隔离的 `artifacts/electron-user-data`，不会触碰用户真实存档。
 
-- Electron `nodeIntegration: false`、`contextIsolation: true`、`sandbox: true`；preload 仅暴露存档/菜单/退出等最小接口。
-- 存档含 `formatVersion`、`gameVersion`、`savedAt`、种子、RNG 状态、时间、世界状态；8MB 上限；临时文件 + rename 写入。
-- 读取时校验 JSON、版本、世界结构和全部不变量；版本过新/损坏/不变量失败均明确报错，不覆盖当前进度。
+## 已知限制
 
-## 测试与验证
-
-```powershell
-npm test
-npm run typecheck
-npm run build
-npm run smoke        # 启动 Electron、截图区域/城市、推进、保存/读取并输出 JSON 结果
-```
-
-`npm run smoke` 需要已执行 `npm run build`。截图写入 `artifacts/`（gitignored）。
-
-已验证（2026-11-01，本机）：
-
-- `npm install` 成功（npm 11 对 Electron install-scripts 的拦截已手动处理）。
-- `npm run typecheck` 通过。
-- `npm test`：21 个测试全部通过（4 个测试文件）：24/36 期不变量、固定种子重现、跨城货流、注资、非法注资、存档往返/损坏/版本过新、GDP 口径；以及玩家分红拆分、损坏存档缺 `publicSector`/类型错误、自动存档保留、跨城交易失败回滚。
-- `npm run build` 通过。
-- `npm run smoke`：Electron 实际启动、区域/城市/建筑/存档截图、城市进入与返回、图层切换、推进 1 月、企业注资、手动保存→推进→读取、reload 后自动存档恢复、1100×700 无横向溢出；渲染层无 console error。
-- `npx electron .` 实际启动并保持窗口。
-- `npm run package:dir` 生成 `release\win-unpacked`（未签名、默认 Electron 图标）。
-
-## 存档位置
-
-Electron 使用 `app.getPath('userData')/saves/`，Windows 通常为：
-
-```text
-%APPDATA%\multi-city-sim\saves\
-```
-
-槽位：`autosave.json`、`manual-1.json`、`manual-2.json`、`manual-3.json`。
-
-## 美术资源
-
-- **城市地图**：Kenney Roguelike Modern City 2.0（CC0），`public/assets/city/kenney-modern-city-tilemap.png`，592×448，16×16，37×28=1036 tiles，spacing 0 / margin 0。
-- **界面**：Kenney UI Pack 2.0（CC0），按钮/图标/分隔线/Kenney Future 字体，`public/assets/ui/`。
-- **Rasak Modern Tilesets**：**未下载、未集成**。itch.io 的 Name Your Own Price 需人工完成购买/下载流程；本仓库没有 Rasak 文件，未绕过限制。人工步骤见 `docs/assets/ASSET_REPORT.md` 第 7 节。
-- **Modern City Extension**：已下载核验（CC0，896×736），仅作备用参考，未复制进运行时、未混入主场景。
-- 原始下载包在 gitignored 的 `assets/source-packs/`；运行时只分发已核验的 Kenney 子集。
-- 完整来源/许可/哈希/预览：`assets/manifests/`、`docs/assets/ASSET_REPORT.md`、`assets/ATTRIBUTION.md`。
-
-## 已知限制 / 未完成
-
-- 科技、政治、房地产只有城市关联初始状态；研发、选举、政党、政策、住房/土地市场未实现，界面明确标注。
-- 股票只有玩家注资/持股；无二级市场、控制权、董事会、并购、破产清算。
-- 区域外净出口、营运资金信贷、债务重组是**演示稳定机制**，不是最终经济规则；需架构负责人决定是否保留。
-- 运输成本/物流容量未模拟；区域补货只有价格楔子。
-- 当前可能出现结构性失业/城市衰退（例如铁谷食品业收缩），没有再培训、产业政策、主动劳动力政策。
-- 政府可赤字；福利按可用资金支付，公共工资仍按名义额支付。
-- 城市地图为固定模块化布局；无土地购买、建造/升级、道路编辑。
-- 无国家、军事、外交系统；无逐居民 AI/家庭模型。
-- 打包使用默认 Electron 图标、未签名；正式发布需补图标和签名。
+- 股票定价只有账面价，没有真实估值、做市或两类股份的差异化价格。
+- 投资者资金缺少债券/存款等出口，可能长期累积；自动投资规则保守，成交有限。
+- 董事会每月重算席位，没有任期、累积投票、代理投票或法定人数。
+- 居民投资实体的资产不随个人迁移移动；人口变化只按比例派生代表人数，这是初期简化。
+- 政府协议由规则自动配对，没有谈判、退出与违约罚则。
+- 科技、政治、房地产仍是初始状态展示；市长选举、政党与政策未实现。
+- 城市内部视角与世界地图未改造；Rasak 主美术资源未获取、未集成，城市仍使用 Kenney 备用素材。
 
 ## 文档索引
 
 - 项目总计划：`docs/PROJECT_PLAN_v0.2.md`
-- 架构与数据边界：`docs/architecture/ARCHITECTURE.md`
-- 初版实现记录（结算顺序/不变量/接口/演示规则）：`docs/architecture/IMPLEMENTATION_v0.1.md`
-- 开发任务书：`docs/development/AGENT_TASK_V1.md`
-- Git 协作：`docs/development/GIT_WORKFLOW.md`
-- 素材核验报告：`docs/assets/ASSET_REPORT.md`
-- 交付报告：`docs/development/DELIVERY_REPORT_v0.1.md`
-
-
+- 机制边界与待定事项：`docs/architecture/MECHANICS_FOUNDATION.md`
+- v0.1 实现记录：`docs/architecture/IMPLEMENTATION_v0.1.md`
+- v0.2 实现记录（数据权威、结算顺序、暂定规则、迁移）：`docs/architecture/IMPLEMENTATION_v0.2.md`
+- 开发计划与待决事项：`docs/development/DEVELOPMENT_ROADMAP.md`
+- 本次交付报告：`docs/development/DELIVERY_REPORT_v0.2.md`
+- 资源核验：`docs/assets/ASSET_REPORT.md`

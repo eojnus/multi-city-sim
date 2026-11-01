@@ -43,13 +43,23 @@ export function registerSaveHandlers(savesDirectory: () => string): void {
   ipcMain.handle('saves:read', async (_event, slot: string) => {
     try {
       const full = slotFile(slot);
-      if (!fs.existsSync(full)) return { ok: false, slot, error: '存档不存在' };
+      if (!fs.existsSync(full)) {
+        return { ok: false, slot, error: '存档不存在', code: 'not-found' };
+      }
       const stat = fs.statSync(full);
-      if (stat.size > MAX_SAVE_BYTES) return { ok: false, slot, error: '存档过大' };
+      if (stat.size > MAX_SAVE_BYTES) {
+        return { ok: false, slot, error: '存档过大（超过 8MB 限制）', code: 'too-large' };
+      }
       const text = fs.readFileSync(full, 'utf8');
+      if (!text.trim()) {
+        return { ok: false, slot, error: '存档文件为空', code: 'read-error' };
+      }
       return { ok: true, slot, text };
     } catch (error) {
-      return { ok: false, slot, error: (error as Error).message };
+      // 文件存在但读取失败（权限、占用、IO 错误）必须与“不存在”区分，避免被自动存档覆盖。
+      const message = (error as Error).message;
+      const code = message.includes('非法存档槽位') ? 'invalid-slot' : 'read-error';
+      return { ok: false, slot, error: message, code };
     }
   });
 

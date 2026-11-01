@@ -65,10 +65,11 @@ export function cityVacancies(city: City, world: WorldState): number {
 export function migrationAttractiveness(city: City, world: WorldState, config: DemoConfig): number {
   const avg = averageWage(city, world);
   const homeCost = city.realEstate.avgHomePrice / 50_000;
+  // 政治支持率越高表示治理越好，应提高迁入吸引力（演示假设，不是最终规则）。
   return round2(
     -unemploymentRate(city) * 100 +
       avg / 1000 -
-      homeCost -
+      homeCost +
       city.politics.approval * config.population.approvalMigrationWeight,
   );
 }
@@ -178,7 +179,7 @@ export function applyMigration(
     log.push({
       tick: world.time.tick,
       kind: 'population',
-      message: `${source.name} → ${destination.name} 迁移 ${people} 人（其中劳动力 ${laborForceMoved} 人）；迁移作为一次性事务提交。`,
+      message: `${source.name} → ${destination.name} 迁移 ${people} 人（其中劳动力 ${laborForceMoved} 人）。`,
     });
   }
 }

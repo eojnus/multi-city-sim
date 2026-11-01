@@ -67,6 +67,8 @@ export class RegionalScene extends Phaser.Scene {
   private fitCamera(): void {
     // 给左侧城市列表、右侧详情面板和顶部/底部 HUD 留出安全区，
     // 避免城市节点被 UI 覆盖而无法点击。
+    const camera = this.cameras?.main;
+    if (!camera) return;
     const uiLeft = Math.min(320, this.scale.width * 0.24);
     const uiRight = Math.min(400, this.scale.width * 0.3);
     const uiTop = 76;
@@ -78,7 +80,6 @@ export class RegionalScene extends Phaser.Scene {
       0.45,
       1.4,
     );
-    const camera = this.cameras.main;
     camera.setViewport(uiLeft, uiTop, availableW, availableH);
     camera.setZoom(zoom);
     camera.centerOn(DESIGN_WIDTH / 2, DESIGN_HEIGHT / 2);

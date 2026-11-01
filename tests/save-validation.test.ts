@@ -88,4 +88,43 @@ describe('损坏/不兼容存档防护', () => {
     expect(writes).toBe(0);
     expect(store.world.cities.length).toBe(3);
   });
+
+  it('自动存档存在但无法读取时暂停自动写入，原文件保留', async () => {
+    let writes = 0;
+    const bridge = fakeBridge({
+      read: async () => ({
+        ok: false,
+        error: '存档过大（超过 8MB 限制）',
+        code: 'too-large' as const,
+      }),
+      write: async () => {
+        writes += 1;
+        return { ok: true, slot: 'autosave' };
+      },
+    });
+    const store = new GameStore(Simulation.create(), bridge);
+    await expect(store.tryRestoreAutosave()).resolves.toBe(false);
+    expect(store.autosaveDisabled).toBe(true);
+    expect(store.autosaveDisabledReason).toContain('存档过大');
+    expect(store.systemNotices.some((notice) => notice.tone === 'error')).toBe(true);
+    await store.autosave();
+    expect(writes).toBe(0);
+  });
+
+  it('自动存档不存在时按首次运行处理，不会误判为损坏', async () => {
+    let writes = 0;
+    const bridge = fakeBridge({
+      read: async () => ({ ok: false, error: '存档不存在', code: 'not-found' as const }),
+      write: async () => {
+        writes += 1;
+        return { ok: true, slot: 'autosave' };
+      },
+    });
+    const store = new GameStore(Simulation.create(), bridge);
+    await expect(store.tryRestoreAutosave()).resolves.toBe(false);
+    expect(store.autosaveDisabled).toBe(false);
+    expect(store.world.cities.length).toBe(3);
+    await store.autosave();
+    expect(writes).toBe(1);
+  });
 });

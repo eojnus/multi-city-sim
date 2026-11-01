@@ -15,8 +15,9 @@ export function settleGovernment(
 ): void {
   for (const city of [...world.cities].sort((a, b) => a.id.localeCompare(b.id))) {
     const privateWages = finance.privateWagesByCity[city.id] ?? 0;
-    // finance.dividendsByCity 已扣除玩家按持股取得的部分，避免重复计入居民收入。
-    const residentDividends = finance.dividendsByCity[city.id] ?? 0;
+    // 只有居民投资实体返还给居民的部分进入可支配收入；留存部分留在实体账户。
+    // 企业持股所得留在企业现金，玩家所得进入玩家现金，均不重复计入居民收入。
+    const residentDividends = finance.investorDistributionByCity[city.id] ?? 0;
     const corporateTax = finance.corporateTaxByCity[city.id] ?? 0;
     const publicGross = round2(
       city.publicSector.employees * city.publicSector.wageRate,
@@ -60,6 +61,8 @@ export function settleGovernment(
       publicWageBill: publicGross,
       migrationIn: 0,
       migrationOut: 0,
+      investorDividends: finance.investorDividendsByCity[city.id] ?? 0,
+      investableContribution: 0,
     };
   }
 }

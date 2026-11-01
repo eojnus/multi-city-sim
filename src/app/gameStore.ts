@@ -1,4 +1,13 @@
-import type { Company, InvestmentResult, TradeFlow, WorldState } from '../simulation/contracts/types';
+import type {
+  Company,
+  HolderRef,
+  InvestmentResult,
+  PlayerNotification,
+  ShareKind,
+  TradeActionResult,
+  TradeFlow,
+  WorldState,
+} from '../simulation/contracts/types';
 import { Simulation } from '../simulation/core/simulation';
 import { parseSave, serializeSave } from '../simulation/core/save';
 import { createCityLayout } from '../data/city-layout';
@@ -8,6 +17,38 @@ import type { SaveSlotInfo } from '../platform/desktop';
 import { companySharePrice } from '../simulation/companies/company';
 import { cityMarketPrices } from '../simulation/markets/markets';
 import { playerNetWorth, holdingStake } from '../simulation/economy/gdp';
+import {
+  acceptFinancingOffer,
+  bookPrice,
+  classOf,
+  companyHolders,
+  declineFinancingOffer,
+  openOffersFor,
+  openOrdersFor,
+  playerStakeOf,
+  playerTotalShares,
+  playerVotingShares,
+  shareClassId,
+  tradeImmediately,
+} from '../simulation/securities/securities';
+import {
+  castVote,
+  governanceFor,
+  proposeOperatorMotion,
+} from '../simulation/corporate-governance/governance';
+import {
+  markAllNotificationsRead,
+  markNotificationRead,
+  unreadNotificationCount,
+  visibleNotifications,
+} from '../simulation/notifications/notifications';
+import {
+  cancelAgreement,
+  applyAutoDecisions,
+  decideParticipant,
+  proposeAgreement,
+} from '../simulation/agreements/agreements';
+import { DEMO_CONFIG } from '../data/config';
 
 export type ViewMode = 'region' | 'city';
 export type LayerMode = 'population' | 'economy' | 'industry';
@@ -44,6 +85,8 @@ export class GameStore {
   lastSavedAt: string | null = null;
   lastError: string | null = null;
   lastAutoSaveError: string | null = null;
+  /** 最近一次读取发生旧格式迁移时的来源版本；正常 v2 为 null。 */
+  lastMigrationFrom: number | null = null;
   autosaveDisabled = false;
   autosaveDisabledReason: string | null = null;
   layouts: Record<string, CityLayout> = {};
@@ -310,6 +353,7 @@ export class GameStore {
       return false;
     }
     this.simulation = new Simulation(parsed.world);
+    this.lastMigrationFrom = parsed.migratedFrom ?? null;
     this.view = 'region';
     this.selectedCityId = this.world.cities[0]?.id ?? null;
     this.selectedBuildingId = null;
@@ -324,7 +368,12 @@ export class GameStore {
     this.rebuildLayouts();
     const date = parsed.save?.savedAt ? new Date(parsed.save.savedAt).toLocaleString('zh-CN') : '未知时间';
     this.lastSavedAt = parsed.save?.savedAt ?? null;
-    this.toast(`已从${sourceLabel}恢复（保存于 ${date}）。`, 'success');
+    this.toast(
+      parsed.migratedFrom
+        ? `已从${sourceLabel}恢复（保存于 ${date}），旧格式 v${parsed.migratedFrom} 已迁移。`
+        : `已从${sourceLabel}恢复（保存于 ${date}）。`,
+      'success',
+    );
     this.emit();
     return true;
   }
@@ -350,10 +399,24 @@ export class GameStore {
     try {
       read = await this.bridge.read('autosave');
     } catch (error) {
+      // 无法确认文件是否存在时，按“存在但读取失败”处理，避免下一次自动保存覆盖。
       this.disableAutosave(`读取自动存档失败：${(error as Error).message}`);
       return false;
     }
-    if (!read.ok || !read.text) return false;
+    if (!read.ok) {
+      // 只有明确的“不存在”才是首次运行；其他错误说明文件可能存在但读不出来，必须保护。
+      if (read.code === 'not-found' || (!read.code && read.error === '存档不存在')) {
+        return false;
+      }
+      this.disableAutosave(
+        `自动存档存在但无法读取：${read.error ?? '未知错误'}`,
+      );
+      return false;
+    }
+    if (!read.text) {
+      this.disableAutosave('自动存档内容为空');
+      return false;
+    }
     let parsed: ReturnType<typeof parseSave>;
     try {
       parsed = parseSave(read.text);
@@ -365,6 +428,7 @@ export class GameStore {
       return false;
     }
     this.simulation = new Simulation(parsed.world);
+    this.lastMigrationFrom = parsed.migratedFrom ?? null;
     this.rebuildLayouts();
     this.selectedCityId = this.world.cities[0]?.id ?? null;
     this.view = 'region';
@@ -372,6 +436,12 @@ export class GameStore {
     this.autosaveDisabled = false;
     this.autosaveDisabledReason = null;
     this.lastAutoSaveError = null;
+    if (this.lastMigrationFrom !== null) {
+      this.toast(
+        `自动存档来自旧版格式 ${this.lastMigrationFrom}，已迁移到 v2；原有资金、持股、企业、人口和随机状态保留。`,
+        'info',
+      );
+    }
     this.emit();
     return true;
   }
@@ -415,6 +485,324 @@ export class GameStore {
 
   playerStake(companyId: string): number {
     return holdingStake(this.world, companyId);
+  }
+
+  /** 通知中心数据：已按玩家身份与持股权利筛选，不含模拟日志。 */
+  get notifications(): PlayerNotification[] {
+    return visibleNotifications(this.world);
+  }
+
+  get unreadNotificationCount(): number {
+    return unreadNotificationCount(this.world);
+  }
+
+  /** 需要玩家处理的系统提示（存档失败等），用易懂语言展示在通知窗口顶部。 */
+  get systemNotices(): { id: string; tone: 'info' | 'warning' | 'error'; text: string }[] {
+    const notices: { id: string; tone: 'info' | 'warning' | 'error'; text: string }[] = [];
+    if (this.autosaveDisabled) {
+      notices.push({
+        id: 'autosave-paused',
+        tone: 'error',
+        text: `自动存档已暂停：${this.autosaveDisabledReason ?? '检测到无法读取的自动存档'}。原文件已保留；读取其他存档或开始新世界后才会恢复自动保存。`,
+      });
+    } else if (this.lastAutoSaveError) {
+      notices.push({
+        id: 'autosave-error',
+        tone: 'warning',
+        text: `自动存档失败：${this.lastAutoSaveError}。当前进度仍可手动保存。`,
+      });
+    }
+    if (this.lastMigrationFrom !== null) {
+      notices.push({
+        id: 'save-migrated',
+        tone: 'info',
+        text: `存档已从旧格式 v${this.lastMigrationFrom} 迁移：原有资金、持股、企业、人口和随机状态已保留，新增股权结构按规则生成。`,
+      });
+    }
+    return notices;
+  }
+
+  markNotificationRead(id: string): void {
+    if (markNotificationRead(this.world, id)) this.emit();
+  }
+
+  markAllNotificationsRead(): void {
+    markAllNotificationsRead(this.world);
+    this.emit();
+  }
+
+  /** 企业股权概览（只读，供详情面板与交易界面使用）。 */
+  securitiesView(companyId: string): {
+    price: number;
+    holders: ReturnType<typeof companyHolders>;
+    orders: ReturnType<typeof openOrdersFor>;
+    offers: ReturnType<typeof openOffersFor>;
+    playerShares: number;
+    playerVotingShares: number;
+    playerStake: number;
+    votingClassId: string;
+    nonVotingClassId: string;
+  } {
+    const company = this.world.companies.find((candidate) => candidate.id === companyId);
+    return {
+      price: company ? bookPrice(this.world, company) : 0,
+      holders: companyHolders(this.world, companyId),
+      orders: openOrdersFor(this.world, companyId),
+      offers: openOffersFor(this.world, companyId),
+      playerShares: playerTotalShares(this.world, companyId),
+      playerVotingShares: playerVotingShares(this.world, companyId),
+      playerStake: playerStakeOf(this.world, companyId),
+      votingClassId: classOf(this.world, companyId, 'voting')?.id ?? shareClassId(companyId, 'voting'),
+      nonVotingClassId:
+        classOf(this.world, companyId, 'nonVoting')?.id ?? shareClassId(companyId, 'nonVoting'),
+    };
+  }
+
+  governanceView(companyId: string) {
+    return governanceFor(this.world, companyId);
+  }
+
+  /** 二级市场买卖：先下单再撮合；未成交部分保留为挂单（不冻结资金/股份）。 */
+  tradeShares(
+    companyId: string,
+    kind: ShareKind,
+    side: 'buy' | 'sell',
+    shares: number,
+    limitPrice: number,
+  ): TradeActionResult {
+    const classId =
+      kind === 'voting' ? shareClassId(companyId, 'voting') : shareClassId(companyId, 'nonVoting');
+    const company = this.world.companies.find((candidate) => candidate.id === companyId);
+    if (!company) {
+      this.toast('企业不存在', 'error');
+      return { ok: false, error: '企业不存在' };
+    }
+    const result = tradeImmediately(
+      this.world,
+      {
+        companyId,
+        shareClassId: classId,
+        side,
+        holder: { type: 'player', id: 'player' },
+        shares,
+        limitPrice,
+        tick: this.world.time.tick,
+        note: '玩家二级市场订单',
+      },
+      DEMO_CONFIG,
+    );
+    if (!result.ok) {
+      this.toast(result.error ?? '股票交易失败', 'error');
+      this.emit();
+      return { ok: false, error: result.error };
+    }
+    if (result.shares > 0) {
+      this.toast(
+        `${side === 'buy' ? '买入' : '卖出'} ${company.name} ${kind === 'voting' ? '有投票权' : '仅分红'}股份 ${result.shares} 股，成交额 ${result.value.toFixed(2)} 信用点。`,
+        'success',
+      );
+      void this.autosave();
+    } else {
+      this.toast('订单已挂出，暂时没有对手方；未冻结资金或股份，可在企业页面查看挂单。', 'info');
+    }
+    this.emit();
+    return {
+      ok: true,
+      shares: result.shares,
+      unitPrice: result.unitPrice,
+      value: result.value,
+    };
+  }
+
+  acceptFinancingOffer(offerId: string): boolean {
+    const offer = this.world.securities.offers.find((candidate) => candidate.id === offerId);
+    if (!offer) {
+      this.toast('融资要约不存在', 'error');
+      return false;
+    }
+    if (offer.investor.type !== 'player') {
+      this.toast('这份融资要约不是发给玩家的。', 'error');
+      return false;
+    }
+    const result = acceptFinancingOffer(this.world, offerId, this.world.time.tick);
+    if (!result.ok) {
+      this.toast(result.error ?? '接受融资要约失败', 'error');
+      this.emit();
+      return false;
+    }
+    const company = this.world.companies.find((candidate) => candidate.id === offer.companyId);
+    this.toast(
+      `已向 ${company?.name ?? '企业'} 出资 ${offer.amount.toFixed(2)} 信用点，获得 ${offer.shares} 股${offer.kind === 'voting' ? '有投票权' : '仅分红'}股份。`,
+      'success',
+    );
+    void this.autosave();
+    this.emit();
+    return true;
+  }
+
+  declineFinancingOffer(offerId: string): void {
+    const result = declineFinancingOffer(this.world, offerId);
+    if (!result.ok) {
+      this.toast(result.error ?? '拒绝融资要约失败', 'error');
+      return;
+    }
+    this.toast('已拒绝融资要约；没有资金或股份变化。', 'info');
+    void this.autosave();
+    this.emit();
+  }
+
+  voteOnMotion(motionId: string, vote: 'for' | 'against' | 'abstain'): boolean {
+    const result = castVote(
+      this.world,
+      motionId,
+      { type: 'player', id: 'player' },
+      vote,
+      this.world.time.tick,
+    );
+    if (!result.ok) {
+      this.toast(result.error ?? '表决失败', 'error');
+      this.emit();
+      return false;
+    }
+    this.toast(
+      vote === 'for' ? '已投赞成票。' : vote === 'against' ? '已投反对票。' : '已投弃权票。',
+      'success',
+    );
+    void this.autosave();
+    this.emit();
+    return true;
+  }
+
+  proposeOperator(companyId: string, operator: 'management' | HolderRef): boolean {
+    const result = proposeOperatorMotion(
+      this.world,
+      companyId,
+      { type: 'player', id: 'player' },
+      operator,
+      this.world.time.tick,
+      DEMO_CONFIG,
+    );
+    if (!result.ok) {
+      this.toast(result.error ?? '无法提出经营者议案', 'error');
+      this.emit();
+      return false;
+    }
+    this.toast('已提出经营者任命议案，将在表决期结束时计票。', 'success');
+    void this.autosave();
+    this.emit();
+    return true;
+  }
+
+  /** 市政府组织跨城协议（演示入口；市长选举系统尚未实现，不把玩家当成市长）。 */
+  organizeAgreement(partnerCityId: string): boolean {
+    const sponsorCityId = this.selectedCityId;
+    if (!sponsorCityId) {
+      this.toast('请先选择发起城市。', 'error');
+      return false;
+    }
+    const result = proposeAgreement(
+      this.world,
+      sponsorCityId,
+      partnerCityId,
+      DEMO_CONFIG,
+      this.world.time.tick,
+      'demo',
+    );
+    if (!result.ok || !result.agreement) {
+      this.toast(result.error ?? '没有可协商的买卖配对', 'warning');
+      this.emit();
+      return false;
+    }
+    applyAutoDecisions(this.world, result.agreement.id, DEMO_CONFIG, this.world.time.tick);
+    const agreement = this.world.agreements.find((entry) => entry.id === result.agreement?.id);
+    this.toast(
+      `市政府（演示）已组织「${agreement?.title ?? '跨城协议'}」：${agreement?.status === 'active' ? '企业已接受，下月起逐项履约。' : '未达成或仍在协商，拒绝方不承担义务。'}`,
+      'info',
+    );
+    void this.autosave();
+    this.emit();
+    return true;
+  }
+
+  decideAgreement(agreementId: string, companyId: string, accept: boolean): boolean {
+    const result = decideParticipant(
+      this.world,
+      agreementId,
+      companyId,
+      accept,
+      this.world.time.tick,
+      DEMO_CONFIG,
+    );
+    if (!result.ok) {
+      this.toast(result.error ?? '协议决策失败', 'error');
+      this.emit();
+      return false;
+    }
+    this.toast(accept ? '企业已接受协议参与邀请。' : '企业已拒绝协议；不产生任何买卖义务。', 'info');
+    void this.autosave();
+    this.emit();
+    return true;
+  }
+
+  withdrawAgreement(agreementId: string): void {
+    const result = cancelAgreement(
+      this.world,
+      agreementId,
+      this.world.time.tick,
+      '玩家取消（演示）',
+    );
+    if (!result.ok) this.toast(result.error ?? '取消协议失败', 'error');
+    else this.toast('协议已取消，未履约条目不再执行。', 'info');
+    void this.autosave();
+    this.emit();
+  }
+
+  /** 明确标注的演示身份：用于验证市长专属路径；选举系统未实现，不代表玩家已当选。 */
+  setMayorDemo(cityId: string | null): void {
+    this.world.player.roles.mayorCityId = cityId;
+    if (cityId) {
+      const city = this.world.cities.find((candidate) => candidate.id === cityId);
+      this.toast(
+        `演示身份：${city?.name ?? cityId} 市长（仅用于测试市长专属信息；市长选举尚未实现）。`,
+        'warning',
+      );
+    } else {
+      this.toast('已退出市长演示身份。', 'info');
+    }
+    void this.autosave();
+    this.emit();
+  }
+
+  /** 市值/估值工具：按当前账面价计算玩家持股价值。 */
+  playerHoldingValue(companyId: string): number {
+    const company = this.world.companies.find((candidate) => candidate.id === companyId);
+    if (!company) return 0;
+    return Math.round(playerTotalShares(this.world, companyId) * bookPrice(this.world, company) * 100) / 100;
+  }
+
+  playerVotingSharesOf(companyId: string): number {
+    return playerVotingShares(this.world, companyId);
+  }
+
+  /** 玩家当前是否为某城市市长（仅状态；演示设置见 setMayorDemo）。 */
+  get mayorCityId(): string | null {
+    return this.world.player.roles?.mayorCityId ?? null;
+  }
+
+  agreementsForCity(cityId: string): WorldState['agreements'] {
+    return this.world.agreements
+      .filter(
+        (agreement) =>
+          agreement.sponsorCityId === cityId || agreement.partnerCityId === cityId,
+      )
+      .sort((a, b) => b.createdTick - a.createdTick || a.id.localeCompare(b.id));
+  }
+
+  agreementPartners(cityId: string): { id: string; name: string }[] {
+    return this.world.cities
+      .filter((city) => city.id !== cityId)
+      .map((city) => ({ id: city.id, name: city.name }))
+      .sort((a, b) => a.id.localeCompare(b.id));
   }
 
   currentTradeFlows(): TradeFlow[] {

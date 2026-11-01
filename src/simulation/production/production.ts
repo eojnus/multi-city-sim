@@ -1,5 +1,6 @@
-import type { Company, ProductionRecord, WorldState, LogEntry } from '../contracts/types';
+import type { City, Company, ProductionRecord, WorldState, LogEntry } from '../contracts/types';
 import type { DemoConfig } from '../../data/config';
+import { DEMO_CONFIG } from '../../data/config';
 import type { CityLedgers, WorldLedgers } from '../markets/markets';
 import { applyProducerPurchase, recordProducedSupply } from '../markets/markets';
 import { executeIntercityPurchase } from '../markets/intercity';
@@ -7,14 +8,36 @@ import { GOOD_IDS } from '../companies/company';
 import { PRODUCTIVITY, RECIPES } from '../../data/demo-data';
 import { round2 } from '../core/math';
 import { monthlyWageBill } from '../companies/company';
-import { ensureLiquidity } from '../companies/credit';
+import { creditAvailable } from '../companies/credit';
 
 export function productionTarget(company: Company): number {
   return Math.max(0, round2(company.capacity * company.utilization));
 }
 
+/** 当期员工能支撑的最大产出。员工为 0 时上限为 0，产能本身不能替代劳动力。 */
+export function laborCapacity(
+  company: Company,
+  city: City,
+  config: DemoConfig = DEMO_CONFIG,
+): number {
+  return round2(
+    company.employees *
+      (PRODUCTIVITY[company.recipeOutput] ?? 0) *
+      city.technology.productivityMultiplier *
+      config.production.laborCapacityFactor,
+  );
+}
+
 /**
- * 企业先按配方缺口采购生产资料。采购受现金和本城可售库存约束，
+ * 企业先按配方缺口采购生产资料。采购只使用自有现金（保留 wageReserve），
+ * 本地/跨城成交完成后再按实际成交金额补足现金，最多补到 wage * 1.5：
+ * 借款上限 = min(本月实际采购支出, 补到 wage * 1.5 的现金缺口, 可用信贷额度)。
+ *
+ * 这是【暂定行为】，对应 DEMO_CONFIG.company.purchaseCreditMode === 'on-settlement'。
+ * 用户的待决问题“无供应时是否允许独立备资借款”仍未决定：
+ * - 成交型融资不会让企业在没有供应时凭空增加债务，但没有成交时也不能提前囤积现金；
+ * - 如果以后允许预借款，应新增独立配置项，而不是恢复旧的采购前 ensureLiquidity。
+ *
  * 缺口写入市场未满足需求，不会凭空生成原料。
  */
 export function runInputPurchasing(
@@ -43,7 +66,7 @@ export function runInputPurchasing(
     const recipe = RECIPES[company.recipeOutput];
     if (!recipe || recipe.inputs.length === 0) continue;
 
-    const target = productionTarget(company);
+    const target = Math.min(productionTarget(company), laborCapacity(company, city, config));
     if (target <= 0) continue;
     const shortages = recipe.inputs.map((input) => {
       const required = round2(target * input.qty);
@@ -53,10 +76,9 @@ export function runInputPurchasing(
     if (shortages.every((entry) => entry.shortage <= 0)) continue;
 
     const wage = monthlyWageBill(company);
-    // 只有确实需要采购时才申请营运资金信贷，避免“无需采购却新增债务”。
-    ensureLiquidity(company, wage * 1.5, config);
     const wageReserve = wage * config.company.wageReserveMonths * 0.5;
     let budget = Math.max(0, company.cash - wageReserve);
+    let purchaseSpend = 0;
 
     for (const { input, shortage } of shortages) {
       if (shortage <= 0 || budget <= 0) continue;
@@ -72,6 +94,7 @@ export function runInputPurchasing(
         budget,
       );
       budget = Math.max(0, budget - result.spend);
+      purchaseSpend = round2(purchaseSpend + result.spend);
       if (result.qty < shortage - 0.01 && budget > 0) {
         const remainingDemand = Math.max(0, affordable - result.qty);
         if (remainingDemand <= 0) continue;
@@ -86,6 +109,7 @@ export function runInputPurchasing(
           config,
         );
         budget = Math.max(0, budget - imported.spend);
+        purchaseSpend = round2(purchaseSpend + imported.spend);
         const ledger = cityLedgers[input.good];
         if (ledger) {
           ledger.unmetDemand = round2(Math.max(0, ledger.unmetDemand - imported.qty));
@@ -99,10 +123,22 @@ export function runInputPurchasing(
         });
       }
     }
+
+    // 结算式采购融资：无成交时不改变现金和债务，借款只与实际成交金额挂钩。
+    if (purchaseSpend > 0) {
+      const cashGap = round2(Math.max(0, wage * 1.5 - company.cash));
+      const borrow = round2(
+        Math.min(purchaseSpend, cashGap, creditAvailable(company, config)),
+      );
+      if (borrow > 0) {
+        company.cash = round2(company.cash + borrow);
+        company.debt = round2(company.debt + borrow);
+      }
+    }
   }
 }
 
-/** 按配方消耗库存并生产。产出受产能、原料库存和设备利用率共同限制。 */
+/** 按配方消耗库存并生产。产出受产能、当期劳动力和原料库存共同限制。 */
 export function runProduction(
   world: WorldState,
   ledgers: WorldLedgers,
@@ -117,7 +153,7 @@ export function runProduction(
     if (!city || !cityLedgers) continue;
     const recipe = RECIPES[company.recipeOutput];
     if (!recipe) continue;
-    let output = productionTarget(company);
+    let output = Math.min(productionTarget(company), laborCapacity(company, city, config));
     if (output <= 0) continue;
 
     for (const input of recipe.inputs) {

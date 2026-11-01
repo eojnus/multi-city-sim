@@ -17,7 +17,9 @@ import {
 } from '../../data/demo-data';
 import { createEmptyInventory, setCompanyEmployees, monthlyWageBill } from '../companies/company';
 import { setCityPopulation, laborForceFor } from '../population/population';
-import { round2 } from '../core/math';
+import { round2, allocateProportionally } from '../core/math';
+import { createInvestorGroups, groupsOfCity, groupHolder } from '../investors/investors';
+import { createShareStructure, syncAllCompanyShares } from '../securities/securities';
 
 function createMarket(): Record<GoodId, MarketState> {
   const market = {} as Record<GoodId, MarketState>;
@@ -80,6 +82,8 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
       gdp: 0,
       migrationIn: 0,
       migrationOut: 0,
+      investorDividends: 0,
+      investableContribution: 0,
       note: '初始月无结算记录；首次推进后生成。',
     },
     technology: { ...seed.technology },
@@ -138,7 +142,25 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
         exported: 0,
         unmetDemand: 0,
         capacityChange: 0,
+        dividendIncome: 0,
       },
+      previousMonth: {
+        revenue: 0,
+        inputCost: 0,
+        wagesPaid: 0,
+        wageArrears: 0,
+        interestPaid: 0,
+        corporateTax: 0,
+        dividendsPaid: 0,
+        profit: 0,
+        produced: 0,
+        sold: 0,
+        exported: 0,
+        unmetDemand: 0,
+        capacityChange: 0,
+        dividendIncome: 0,
+      },
+      dividendPayoutRatio: config.governance.defaultDividendPayoutRatio,
       note: seed.note,
     };
     setCompanyEmployees(company, seed.employees);
@@ -205,8 +227,14 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
       holdings: [],
       lastDividend: 0,
       dividendsReceived: 0,
+      roles: { mayorCityId: null },
       note: config.player.note,
     },
+    securities: { classes: [], holdings: [], orders: [], lastTrades: [], offers: [] },
+    governance: { boards: [], motions: [], controls: [] },
+    investors: [],
+    agreements: [],
+    notifications: [],
     history: [],
     log: [],
     lastTick: {
@@ -217,6 +245,10 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
       invariants: [],
     },
   };
+
+  // 居民投资实体：先建立资金来源，再发行股份给出资方。
+  createInvestorGroups(world, config);
+  createInitialShareStructure(world, config);
 
   world.history.push({
     tick: 0,
@@ -232,9 +264,61 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
   world.log.push({
     tick: 0,
     kind: 'system',
-    message: `世界初始化完成：${cities.length} 座城市、${companies.length} 家企业、${GOODS.length} 种商品。所有数值为演示方案 v0.1。`,
+    message: `世界初始化完成：${cities.length} 座城市、${companies.length} 家企业、${GOODS.length} 种商品、${world.investors.length} 个居民投资实体。所有数值为演示方案 v0.2。`,
   });
   return world;
+}
+
+/**
+ * 新世界初始股权结构：企业持有其他企业的投票权股份作为演示交叉持股，
+ * 其余股份由本城居民投资实体按人口占比持有；同时发行仅分红股份。
+ * 这是演示初始条件，不是用户已确认的最终股权分布。
+ */
+function createInitialShareStructure(world: WorldState, config: DemoConfig): void {
+  const ordered = [...world.companies].sort((a, b) => a.id.localeCompare(b.id));
+  const votingTotal = config.securities.votingSharesPerCompany;
+  const nonVotingTotal = config.securities.nonVotingSharesPerCompany;
+
+  ordered.forEach((company, index) => {
+    const groups = groupsOfCity(world, company.cityId);
+    if (groups.length === 0) {
+      throw new Error(`城市 ${company.cityId} 没有居民投资实体，无法建立股权结构`);
+    }
+    const weights = groups.map((group) => group.populationShare);
+    const crossCandidates = ordered.filter((candidate) => candidate.cityId !== company.cityId);
+    const cross = crossCandidates.length > 0 ? crossCandidates[index % crossCandidates.length] : null;
+    const corporateShares = cross
+      ? Math.round(votingTotal * config.securities.corporateVotingShare)
+      : 0;
+    const investorVoting = votingTotal - corporateShares;
+    const votingSplit = allocateProportionally(investorVoting, weights);
+    const nonVotingSplit = allocateProportionally(nonVotingTotal, weights);
+
+    const votingHolders = groups.map((group, groupIndex) => ({
+      holder: groupHolder(group),
+      shares: votingSplit[groupIndex] ?? 0,
+    }));
+    if (cross && corporateShares > 0) {
+      votingHolders.push({
+        holder: { type: 'company', id: cross.id },
+        shares: corporateShares,
+      });
+    }
+
+    createShareStructure(world, company, {
+      votingShares: votingTotal,
+      nonVotingShares: nonVotingTotal,
+      votingHolders,
+      nonVotingHolders: groups.map((group, groupIndex) => ({
+        holder: groupHolder(group),
+        shares: nonVotingSplit[groupIndex] ?? 0,
+      })),
+      tick: 0,
+      acquiredVia: 'primary',
+    });
+  });
+
+  syncAllCompanyShares(world);
 }
 
 export function currentDemoConfig(): DemoConfig {

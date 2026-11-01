@@ -19,6 +19,7 @@ function blankStats(): CompanyMonthlyStats {
     exported: 0,
     unmetDemand: 0,
     capacityChange: 0,
+    dividendIncome: 0,
   };
 }
 

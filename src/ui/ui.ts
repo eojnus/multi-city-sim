@@ -4,7 +4,7 @@ import type { GameStore, SaveSlotView } from '../app/gameStore';
 import type { SaveBridge } from '../platform/saveBridge';
 import { assetUrl } from '../platform/assets';
 import { DEMO_CONFIG } from '../data/config';
-import { shortTime, localizeTime, money, num } from './format';
+import { shortTime, localizeTime, money, num, tickDate } from './format';
 import {
   renderLeftCity,
   renderLeftFoot,
@@ -18,6 +18,10 @@ import {
 } from './panels';
 import type { ModalKind, ModalState } from './modals';
 import { renderModal } from './modals';
+import { bindPieInteractions } from './charts/pie';
+import { NotificationCenter } from './notifications';
+import type { NotificationItem, SystemNotice } from './notifications';
+import type { PlayerNotification } from '../simulation/contracts/types';
 
 const SKELETON = `
   <header class="hud" aria-label="顶部控制台">
@@ -90,6 +94,7 @@ const SKELETON = `
       <button type="button" class="ken-btn ken-btn--grey" data-action="open-credits" data-testid="btn-credits" title="资源署名">署名</button>
     </div>
   </header>
+  <div id="notification-host"></div>
   <div class="stage">
     <aside class="rail rail-left panel" aria-label="城市与图层">
       <div class="rail-scroll" id="left-scroll" data-scroll="left"></div>
@@ -130,6 +135,8 @@ export class GameUI {
   private mapLegend: HTMLDivElement | null = null;
   private toastStack: HTMLDivElement | null = null;
   private modalHost: HTMLDivElement | null = null;
+  private notificationHost: HTMLDivElement | null = null;
+  private notificationCenter: NotificationCenter | null = null;
 
   private hudClock: HTMLDivElement | null = null;
   private hudDate: HTMLElement | null = null;
@@ -187,6 +194,8 @@ export class GameUI {
 
     this.applyAssetVariables(overlay);
     this.cacheElements(overlay);
+    this.mountNotifications();
+    if (this.rightScroll) bindPieInteractions(this.rightScroll);
     this.bindEvents(overlay);
     this.bindExternalEvents();
 
@@ -228,6 +237,7 @@ export class GameUI {
     this.mapLegend = overlay.querySelector<HTMLDivElement>('#map-legend');
     this.toastStack = overlay.querySelector<HTMLDivElement>('#toast-stack');
     this.modalHost = overlay.querySelector<HTMLDivElement>('#modal-host');
+    this.notificationHost = overlay.querySelector<HTMLDivElement>('#notification-host');
 
     this.hudClock = overlay.querySelector<HTMLDivElement>('#hud-clock');
     this.hudDate = overlay.querySelector<HTMLElement>('#hud-date');
@@ -243,6 +253,52 @@ export class GameUI {
     this.runText = overlay.querySelector<HTMLElement>('#hud-run-text');
   }
 
+  private mountNotifications(): void {
+    if (!this.notificationHost) return;
+    const center = new NotificationCenter(this.notificationHost);
+    center.onMarkRead((id) => {
+      this.store.markNotificationRead(id);
+    });
+    center.onMarkAllRead(() => {
+      this.store.markAllNotificationsRead();
+    });
+    this.notificationCenter = center;
+  }
+
+  private notificationAudience(notice: PlayerNotification): string {
+    if (notice.audience === 'personal') return '个人';
+    if (notice.audience === 'company') {
+      const company = notice.companyId
+        ? this.store.world.companies.find((entry) => entry.id === notice.companyId)
+        : undefined;
+      return company?.name ?? '企业事务';
+    }
+    const city = notice.cityId
+      ? this.store.world.cities.find((entry) => entry.id === notice.cityId)
+      : undefined;
+    return city ? `${city.name} · 市长事务` : '市长事务';
+  }
+
+  private syncNotifications(): void {
+    if (!this.notificationCenter) return;
+    const items: NotificationItem[] = this.store.notifications.map((notice) => ({
+      id: notice.id,
+      title: notice.title,
+      body: notice.body,
+      tickLabel: tickDate(notice.tick),
+      kind: notice.kind,
+      priority: notice.priority,
+      read: notice.read,
+      audienceLabel: this.notificationAudience(notice),
+    }));
+    const notices: SystemNotice[] = this.store.systemNotices.map((notice) => ({
+      id: notice.id,
+      tone: notice.tone,
+      text: notice.text,
+    }));
+    this.notificationCenter.setData(items, notices);
+  }
+
   // ---------------------------------------------------------------- 渲染
 
   private renderAll(options: { resetLeft?: boolean; resetRight?: boolean } = {}): void {
@@ -250,6 +306,7 @@ export class GameUI {
     const scrolls = this.captureScrolls();
 
     this.syncHud();
+    this.syncNotifications();
     const { store } = this;
     if (this.leftScroll) {
       this.leftScroll.innerHTML =
@@ -551,6 +608,10 @@ export class GameUI {
     const buildingId = element.dataset.buildingId ?? null;
     const slot = element.dataset.slot ?? null;
     const amount = Number(element.dataset.amount ?? '');
+    const motionId = element.dataset.motionId ?? null;
+    const offerId = element.dataset.offerId ?? null;
+    const agreementId = element.dataset.agreementId ?? null;
+    const partnerCityId = element.dataset.partnerCityId ?? null;
 
     switch (action) {
       case 'tick':
@@ -614,6 +675,65 @@ export class GameUI {
           if (this.store.view === 'region') this.scrollRightToCompany();
         }
         break;
+      case 'trade-shares': {
+        const kind = element.dataset.kind;
+        const side = element.dataset.side;
+        const shares = Number(element.dataset.shares ?? '');
+        const limitPrice = Number(element.dataset.limitPrice ?? '');
+        if (
+          companyId &&
+          (kind === 'voting' || kind === 'nonVoting') &&
+          (side === 'buy' || side === 'sell') &&
+          Number.isFinite(shares) &&
+          shares > 0 &&
+          Number.isFinite(limitPrice) &&
+          limitPrice > 0
+        ) {
+          this.store.tradeShares(companyId, kind, side, shares, limitPrice);
+        }
+        break;
+      }
+      case 'accept-offer':
+        if (offerId) this.store.acceptFinancingOffer(offerId);
+        break;
+      case 'decline-offer':
+        if (offerId) this.store.declineFinancingOffer(offerId);
+        break;
+      case 'vote-motion': {
+        const vote = element.dataset.vote;
+        if (motionId && (vote === 'for' || vote === 'against' || vote === 'abstain')) {
+          this.store.voteOnMotion(motionId, vote);
+        }
+        break;
+      }
+      case 'propose-operator': {
+        const operator = element.dataset.operator;
+        if (!companyId) break;
+        if (operator === 'player') {
+          this.store.proposeOperator(companyId, { type: 'player', id: 'player' });
+        } else if (operator === 'management') {
+          this.store.proposeOperator(companyId, 'management');
+        }
+        break;
+      }
+      case 'organize-agreement':
+        if (partnerCityId) this.store.organizeAgreement(partnerCityId);
+        break;
+      case 'decide-agreement':
+        if (agreementId && companyId) {
+          this.store.decideAgreement(agreementId, companyId, element.dataset.accept === 'true');
+        }
+        break;
+      case 'withdraw-agreement':
+        if (agreementId) this.store.withdrawAgreement(agreementId);
+        break;
+      case 'toggle-mayor-demo': {
+        const targetCity = cityId ?? this.store.selectedCityId;
+        if (targetCity) {
+          this.store.setMayorDemo(this.store.mayorCityId === targetCity ? null : targetCity);
+        }
+        break;
+      }
       case 'toggle-goods':
         this.showAllGoods = !this.showAllGoods;
         this.renderRightPanel();

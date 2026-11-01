@@ -1,8 +1,9 @@
 // 公共数据契约：模拟层、表现层和存档共用。
-// 这些类型描述的是“演示方案 v0.1”的数据结构，不代表最终策划规则。
+// 这些类型描述的是“演示方案 v0.2”的数据结构，不代表最终策划规则。
+// v0.2 新增证券/治理/居民投资/协议/通知数据；旧 v1 存档由 core/save.ts 迁移。
 
-export const SAVE_FORMAT_VERSION = 1;
-export const GAME_VERSION = '0.1.0';
+export const SAVE_FORMAT_VERSION = 2;
+export const GAME_VERSION = '0.2.0';
 
 export type GoodId =
   | 'grain'
@@ -66,6 +67,8 @@ export interface CompanyMonthlyStats {
   exported: number;
   unmetDemand: number;
   capacityChange: number;
+  /** v0.2：企业作为股东从其他企业取得的股息（进入企业现金，不重复计入居民收入）。 */
+  dividendIncome: number;
 }
 
 export interface Company {
@@ -88,8 +91,13 @@ export interface Company {
   wageRate: number;
   priceFactor: number;
   inventory: Record<GoodId, number>;
+  /** 已发行股份合计（v0.2 起为各股份类别的缓存汇总，权威在 securities.classes）。 */
   totalShares: number;
   lastMonth: CompanyMonthlyStats;
+  /** v0.2：上一完整结算月的统计，经营计划只读取此字段。 */
+  previousMonth: CompanyMonthlyStats;
+  /** v0.2：股息派发比例，可由董事会/股东议案改变（演示规则）。 */
+  dividendPayoutRatio: number;
   note: string;
 }
 
@@ -157,6 +165,10 @@ export interface CityMonthlyReport {
   gdp: number;
   migrationIn: number;
   migrationOut: number;
+  /** v0.2：居民投资实体从企业取得的股息（未扣除留存部分）。 */
+  investorDividends: number;
+  /** v0.2：本月从居民收入转入投资实体的可投资资金。 */
+  investableContribution: number;
   note: string;
 }
 
@@ -227,15 +239,23 @@ export interface PlayerHolding {
   shares: number;
 }
 
+export interface PlayerRoles {
+  /** 玩家担任市长的城市；null 表示尚未参选/未担任。演示场景可显式设置。 */
+  mayorCityId: string | null;
+}
+
 export interface PlayerState {
   name: string;
   homeCityId: string;
   cash: number;
+  /** v1 兼容的持股镜像（权威在 securities.holdings，由 securities 同步）。 */
   holdings: PlayerHolding[];
   /** 最近一次月度结算中玩家实际收到的股息（演示字段，旧存档可缺省）。 */
   lastDividend?: number;
   /** 至今累计收到的股息，便于界面在日志被裁剪后仍可见（旧存档可缺省）。 */
   dividendsReceived?: number;
+  /** v0.2：玩家身份。默认不是任何城市的市长。 */
+  roles: PlayerRoles;
   note: string;
 }
 
@@ -277,6 +297,223 @@ export interface ExternalExport {
   note: string;
 }
 
+// ---------------------------------------------------------------- 证券与股权
+
+export type ShareKind = 'voting' | 'nonVoting';
+
+export interface ShareClass {
+  /** 稳定 ID，形如 `${companyId}:voting`。 */
+  id: string;
+  companyId: string;
+  kind: ShareKind;
+  issuedShares: number;
+  note: string;
+}
+
+export type HolderType = 'player' | 'company' | 'investorGroup';
+
+export interface HolderRef {
+  type: HolderType;
+  id: string;
+}
+
+export interface ShareHolding {
+  companyId: string;
+  shareClassId: string;
+  holder: HolderRef;
+  shares: number;
+  /** primary = 企业融资；secondary = 二级市场；migration = 旧存档迁移。 */
+  acquiredVia: 'primary' | 'secondary' | 'migration';
+  sinceTick: number;
+}
+
+export interface StockOrder {
+  id: string;
+  companyId: string;
+  shareClassId: string;
+  side: 'buy' | 'sell';
+  holder: HolderRef;
+  /** 尚未成交的剩余股数。 */
+  shares: number;
+  limitPrice: number;
+  createdTick: number;
+  note: string;
+}
+
+export interface StockTrade {
+  id: string;
+  tick: number;
+  companyId: string;
+  shareClassId: string;
+  buyer: HolderRef;
+  seller: HolderRef;
+  shares: number;
+  unitPrice: number;
+  value: number;
+  origin: 'secondary' | 'primary';
+}
+
+export interface FinancingOffer {
+  id: string;
+  companyId: string;
+  investor: HolderRef;
+  /** 逐出资方决定：本次融资给予的股份类别。 */
+  kind: ShareKind;
+  amount: number;
+  pricePerShare: number;
+  shares: number;
+  status: 'open' | 'accepted' | 'declined' | 'expired';
+  createdTick: number;
+  note: string;
+}
+
+export interface SecuritiesState {
+  classes: ShareClass[];
+  holdings: ShareHolding[];
+  orders: StockOrder[];
+  /** 最近一个结算月成交的股票交易，供界面与审计。 */
+  lastTrades: StockTrade[];
+  offers: FinancingOffer[];
+}
+
+// ---------------------------------------------------------------- 董事会与治理
+
+export interface BoardSeat {
+  holder: HolderRef;
+  votingShares: number;
+  sinceTick: number;
+}
+
+export interface Board {
+  companyId: string;
+  seats: BoardSeat[];
+  chair: HolderRef | null;
+  lastElectionTick: number;
+  note: string;
+}
+
+export type MotionKind = 'dividendPolicy' | 'operatorAppointment';
+
+export interface MotionVote {
+  holder: HolderRef;
+  vote: 'for' | 'against' | 'abstain';
+  votingShares: number;
+  tick: number;
+}
+
+export interface Motion {
+  id: string;
+  companyId: string;
+  kind: MotionKind;
+  title: string;
+  proposedBy: HolderRef;
+  createdTick: number;
+  /** 在该 tick 的月度结算中计票。 */
+  closesAtTick: number;
+  /** dividendPolicy: { ratio }；operatorAppointment: { operatorType, operatorId }。 */
+  params: Record<string, number | string>;
+  status: 'open' | 'passed' | 'rejected';
+  votes: MotionVote[];
+  decidedTick: number | null;
+  result: string;
+  note: string;
+}
+
+export interface CompanyControl {
+  companyId: string;
+  /** 'management' 表示职业经理人经营；换成具体持有人需经议案通过。 */
+  operator: HolderRef | 'management';
+  basis: 'management' | 'boardAppointment';
+  sinceTick: number;
+  note: string;
+}
+
+export interface GovernanceState {
+  boards: Board[];
+  motions: Motion[];
+  controls: CompanyControl[];
+}
+
+// ---------------------------------------------------------------- 居民投资实体
+
+export interface InvestorGroup {
+  id: string;
+  cityId: string;
+  name: string;
+  cash: number;
+  /** 占本城居民的比例（0–1），用于收入分配；不代表额外人口。 */
+  populationShare: number;
+  /** 0–1 的演示风险偏好，用于自动投资规则。 */
+  riskAppetite: number;
+  dividendsReceived: number;
+  lastDividend: number;
+  note: string;
+}
+
+// ---------------------------------------------------------------- 政府牵头的跨城协议
+
+export type AgreementStatus = 'proposed' | 'active' | 'completed' | 'cancelled';
+
+export interface AgreementParticipant {
+  companyId: string;
+  cityId: string;
+  side: 'buyer' | 'seller';
+  decision: 'pending' | 'accepted' | 'declined';
+  decidedTick: number | null;
+  note: string;
+}
+
+export type AgreementItemStatus = 'pending' | 'active' | 'fulfilled' | 'failed' | 'declined';
+
+export interface AgreementItem {
+  id: string;
+  good: GoodId;
+  buyerCompanyId: string;
+  sellerCompanyId: string;
+  qtyPerMonth: number;
+  unitPrice: number;
+  months: number;
+  deliveredQty: number;
+  paidValue: number;
+  monthsExecuted: number;
+  status: AgreementItemStatus;
+  lastNote: string;
+}
+
+export interface TradeAgreement {
+  id: string;
+  title: string;
+  sponsorCityId: string;
+  partnerCityId: string;
+  createdTick: number;
+  /** government = 由市政府组织；demo = 明确标注的演示/测试场景。 */
+  createdBy: 'government' | 'demo';
+  status: AgreementStatus;
+  participants: AgreementParticipant[];
+  items: AgreementItem[];
+  note: string;
+}
+
+// ---------------------------------------------------------------- 玩家通知
+
+export type NotificationAudience = 'personal' | 'company' | 'city';
+export type NotificationKind = 'dividend' | 'vote' | 'major' | 'agreement' | 'market';
+
+export interface PlayerNotification {
+  id: string;
+  tick: number;
+  audience: NotificationAudience;
+  kind: NotificationKind;
+  priority: 'normal' | 'important';
+  companyId?: string;
+  cityId?: string;
+  title: string;
+  body: string;
+  read: boolean;
+}
+
+// ---------------------------------------------------------------- 世界与存档
+
 export interface WorldState {
   seed: number;
   rngState: number;
@@ -285,6 +522,11 @@ export interface WorldState {
   companies: Company[];
   tradeRoutes: TradeRoute[];
   player: PlayerState;
+  securities: SecuritiesState;
+  governance: GovernanceState;
+  investors: InvestorGroup[];
+  agreements: TradeAgreement[];
+  notifications: PlayerNotification[];
   history: WorldHistoryPoint[];
   log: LogEntry[];
   lastTick: {
@@ -325,7 +567,11 @@ export interface SaveReadResult {
   text?: string;
   savedAt?: string;
   error?: string;
+  /** 读取失败分类：not-found 表示首次运行；其他错误意味着文件可能存在但无法读取，必须保护。 */
+  code?: SaveReadErrorCode;
 }
+
+export type SaveReadErrorCode = 'not-found' | 'read-error' | 'too-large' | 'invalid-slot';
 
 export interface SaveWriteResult {
   ok: boolean;
@@ -360,4 +606,12 @@ export interface InvestmentResult {
   shares?: number;
   price?: number;
   companyName?: string;
+}
+
+export interface TradeActionResult {
+  ok: boolean;
+  error?: string;
+  shares?: number;
+  unitPrice?: number;
+  value?: number;
 }

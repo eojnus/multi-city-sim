@@ -17,9 +17,11 @@ export function planCompanies(
     const stock = company.inventory[output] ?? 0;
     const wageBill = monthlyWageBill(company);
 
-    if (company.lastMonth.produced > 0.01) {
+    // 经营计划读取上一个完整结算月：本期开始时 lastMonth 已被重置为本月累计值。
+    if (company.previousMonth.produced > 0.01) {
       const sellRatio =
-        (company.lastMonth.sold + company.lastMonth.exported) / company.lastMonth.produced;
+        (company.previousMonth.sold + company.previousMonth.exported) /
+        company.previousMonth.produced;
       company.utilization += (sellRatio - 1) * config.company.utilizationAdjust;
     }
     if (stock > Math.max(1, company.capacity * 0.8)) {

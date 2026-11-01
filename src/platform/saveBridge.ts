@@ -3,10 +3,12 @@ import type { DesktopSimApi, SaveSlotInfo } from './desktop';
 const STORAGE_PREFIX = 'lanwan-save:';
 const MAX_SAVE_LENGTH = 8 * 1024 * 1024;
 
+export type SaveReadCode = 'not-found' | 'read-error' | 'too-large' | 'invalid-slot';
+
 export interface SaveBridge {
   mode: 'desktop' | 'browser';
   list(): Promise<SaveSlotInfo[]>;
-  read(slot: string): Promise<{ ok: boolean; text?: string; error?: string }>;
+  read(slot: string): Promise<{ ok: boolean; text?: string; error?: string; code?: SaveReadCode }>;
   write(slot: string, text: string): Promise<{ ok: boolean; error?: string }>;
   remove(slot: string): Promise<{ ok: boolean; error?: string }>;
   onMenuAction(callback: (action: string) => void): () => void;
@@ -29,7 +31,12 @@ export function createSaveBridge(): SaveBridge {
       },
       async read(slot) {
         const result = await desktop.saves.read(slot);
-        return { ok: result.ok, text: result.text, error: result.error };
+        return {
+          ok: result.ok,
+          text: result.text,
+          error: result.error,
+          code: result.code as SaveReadCode | undefined,
+        };
       },
       async write(slot, text) {
         if (text.length > MAX_SAVE_LENGTH) return { ok: false, error: '存档过大' };
@@ -78,7 +85,10 @@ export function createSaveBridge(): SaveBridge {
     },
     async read(slot) {
       const text = localStorage.getItem(STORAGE_PREFIX + slot);
-      if (!text) return { ok: false, error: '存档不存在' };
+      if (text === null) return { ok: false, error: '存档不存在', code: 'not-found' };
+      if (text.length > MAX_SAVE_LENGTH) {
+        return { ok: false, error: '存档过大（超过 8MB 限制）', code: 'too-large' };
+      }
       return { ok: true, text };
     },
     async write(slot, text) {

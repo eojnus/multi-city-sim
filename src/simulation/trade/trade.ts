@@ -80,7 +80,7 @@ export function executeTradeRoutes(
     exporter.cash = round2(exporter.cash + value);
     importer.cash = round2(importer.cash - value);
     exporter.lastMonth.revenue = round2(exporter.lastMonth.revenue + value);
-    exporter.lastMonth.sold = round2(exporter.lastMonth.sold + qty);
+    // 跨城合同只计出口，避免经营计划里 sold + exported 重复计算同一批货。
     exporter.lastMonth.exported = round2(exporter.lastMonth.exported + qty);
     importer.lastMonth.inputCost = round2(importer.lastMonth.inputCost + value);
 

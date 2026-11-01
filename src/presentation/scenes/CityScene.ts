@@ -18,6 +18,11 @@ export class CityScene extends Phaser.Scene {
   private dragStart: { x: number; y: number; scrollX: number; scrollY: number } | null = null;
   private didDrag = false;
   private selectedBuildingId: string | null = null;
+  private readonly handleResize = (): void => {
+    if (!this.cameras || !this.cameras.main || !this.scene.isActive()) return;
+    this.applyCameraViewport();
+    this.cameras.main.setZoom(Phaser.Math.Clamp(this.cameras.main.zoom, 0.45, 1.8));
+  };
 
   constructor() {
     super('CityScene');
@@ -49,8 +54,10 @@ export class CityScene extends Phaser.Scene {
     this.setupInput();
 
     this.unsub = this.store.subscribe(() => this.onStoreChange());
+    this.scale.on('resize', this.handleResize, this);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.unsub?.();
+      this.scale.off('resize', this.handleResize, this);
     });
   }
 
@@ -264,10 +271,12 @@ export class CityScene extends Phaser.Scene {
   }
 
   private applyCameraViewport(): void {
+    const camera = this.cameras?.main;
+    if (!camera) return;
     const insets = this.viewportInsets();
     const width = Math.max(360, this.scale.width - insets.left - insets.right);
     const height = Math.max(300, this.scale.height - insets.top - insets.bottom);
-    this.cameras.main.setViewport(insets.left, insets.top, width, height);
+    camera.setViewport(insets.left, insets.top, width, height);
   }
 
   private setupCamera(): void {
@@ -312,11 +321,6 @@ export class CityScene extends Phaser.Scene {
       const camera = this.cameras.main;
       const next = Phaser.Math.Clamp(camera.zoom * (dy > 0 ? 0.9 : 1.1), 0.45, 1.8);
       camera.setZoom(next);
-    });
-    this.scale.on('resize', () => {
-      this.applyCameraViewport();
-      const camera = this.cameras.main;
-      camera.setZoom(Phaser.Math.Clamp(camera.zoom, 0.45, 1.8));
     });
   }
 }

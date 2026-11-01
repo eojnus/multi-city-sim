@@ -40,6 +40,8 @@ export function executeIntercityPurchase(
     options.buyerCompanyId === undefined
       ? undefined
       : world.companies.find((company) => company.id === options.buyerCompanyId);
+  // 只有卖方城市与买方所在城市不同时才算出口；居民跨城补货同样计入出口。
+  const buyerCityId = buyer ? buyer.cityId : buyerCity.id;
 
   const sellers = world.companies
     .filter(
@@ -100,10 +102,17 @@ export function executeIntercityPurchase(
     seller.company.inventory[goodId] = round2(currentStock - qty);
     seller.company.cash = round2(seller.company.cash + cost);
     seller.company.lastMonth.revenue = round2(seller.company.lastMonth.revenue + cost);
-    seller.company.lastMonth.sold = round2(
-      seller.company.lastMonth.sold +
-        (goodId === seller.company.recipeOutput ? qty : 0),
-    );
+    // 只有卖出自身产出才计入企业统计；跨城成交计出口，本地成交计内销。
+    const producedQty = goodId === seller.company.recipeOutput ? qty : 0;
+    if (seller.company.cityId !== buyerCityId) {
+      seller.company.lastMonth.exported = round2(
+        seller.company.lastMonth.exported + producedQty,
+      );
+    } else {
+      seller.company.lastMonth.sold = round2(
+        seller.company.lastMonth.sold + producedQty,
+      );
+    }
 
     if (buyer) {
       buyer.cash = round2(buyer.cash - cost);

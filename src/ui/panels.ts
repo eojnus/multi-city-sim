@@ -2,8 +2,19 @@
 import { DEMO_CONFIG } from '../data/config';
 import { GOODS, RECIPES } from '../data/demo-data';
 import type { BuildingDefinition, DistrictDefinition } from '../data/city-layout';
-import type { City, Company, MarketState } from '../simulation/contracts/types';
+import type {
+  AgreementItemStatus,
+  AgreementStatus,
+  City,
+  Company,
+  HolderRef,
+  MarketState,
+  Motion,
+  ShareKind,
+  TradeAgreement,
+} from '../simulation/contracts/types';
 import type { GameStore, LayerMode, ViewMode } from '../app/gameStore';
+import { renderPopulationPie, POPULATION_PIE_COLORS } from './charts/pie';
 import {
   aggregateTradeFlows,
   buildingKindLabel,
@@ -87,6 +98,71 @@ function investLabel(amount: number): string {
 
 function layerDefinition(layer: LayerMode): LayerDefinition {
   return LAYERS.find((entry) => entry.id === layer) ?? LAYERS[0]!;
+}
+
+const SHARE_KIND_LABELS: Record<ShareKind, string> = {
+  voting: '有表决权',
+  nonVoting: '仅分红',
+};
+
+const MOTION_STATUS_LABELS: Record<Motion['status'], string> = {
+  open: '待表决',
+  passed: '已通过',
+  rejected: '已否决',
+};
+
+const VOTE_LABELS: Record<'for' | 'against' | 'abstain', string> = {
+  for: '赞成',
+  against: '反对',
+  abstain: '弃权',
+};
+
+const AGREEMENT_STATUS_LABELS: Record<AgreementStatus, string> = {
+  proposed: '协商中',
+  active: '生效',
+  completed: '完成',
+  cancelled: '取消',
+};
+
+const AGREEMENT_ITEM_STATUS_LABELS: Record<AgreementItemStatus, string> = {
+  pending: '待履约',
+  active: '履约中',
+  fulfilled: '完成',
+  failed: '失败',
+  declined: '被拒绝',
+};
+
+const DECISION_LABELS: Record<'pending' | 'accepted' | 'declined', string> = {
+  pending: '待定',
+  accepted: '接受',
+  declined: '拒绝',
+};
+
+function shareKindLabel(kind: ShareKind): string {
+  return SHARE_KIND_LABELS[kind];
+}
+
+function holderKey(holder: HolderRef): string {
+  return `${holder.type}:${holder.id}`;
+}
+
+/** 界面上的持有人名称：玩家、企业名或居民投资实体名；不展示实体现金等内部明细。 */
+function holderLabel(store: GameStore, holder: HolderRef | 'management'): string {
+  if (holder === 'management') return '职业经理人';
+  if (holder.type === 'player') return '玩家';
+  if (holder.type === 'company') {
+    return store.world.companies.find((company) => company.id === holder.id)?.name ?? '其他企业';
+  }
+  return store.world.investors.find((group) => group.id === holder.id)?.name ?? '居民投资实体';
+}
+
+function companyNameOf(store: GameStore, companyId: string): string {
+  return store.world.companies.find((company) => company.id === companyId)?.name ?? '未知企业';
+}
+
+function limitPriceFor(price: number, side: 'buy' | 'sell'): string {
+  const factor = side === 'buy' ? 1.02 : 0.98;
+  return (Math.round(price * factor * 100) / 100).toFixed(2);
 }
 
 function renderLayerSection(store: GameStore, view: ViewMode): string {
@@ -359,6 +435,71 @@ function renderKpis(store: GameStore, city: City): string {
     </div>`;
 }
 
+export function renderPopulationSection(city: City): string {
+  return `
+    <section class="panel-section population-section">
+      <div class="section-head">
+        <div>
+          <span class="kicker">POPULATION MIX</span>
+          <h2>人口结构</h2>
+        </div>
+        <span class="section-tag">互斥口径</span>
+      </div>
+      <div id="population-pie" data-testid="population-pie">
+        ${renderPopulationPie({
+          segments: [
+            {
+              id: 'employed',
+              label: '就业',
+              value: city.population.employed,
+              color: POPULATION_PIE_COLORS.employed,
+            },
+            {
+              id: 'unemployed',
+              label: '失业',
+              value: city.population.unemployed,
+              color: POPULATION_PIE_COLORS.unemployed,
+            },
+            {
+              id: 'nonLabor',
+              label: '非劳动力',
+              value: city.population.nonLabor,
+              color: POPULATION_PIE_COLORS.nonLabor,
+            },
+          ],
+          total: city.population.total,
+          centerLabel: qty(city.population.total),
+          centerCaption: '总人口',
+          ariaLabel: `${city.name}人口构成：就业、失业与非劳动力`,
+          note: '就业 + 失业 + 非劳动力 = 总人口；劳动力（就业 + 失业）不与总人口相加。',
+        })}
+      </div>
+    </section>`;
+}
+
+export function renderMayorDemo(store: GameStore, city: City): string {
+  const active = store.mayorCityId === city.id;
+  return `
+    <div class="mayor-demo ${active ? 'is-active' : ''}">
+      <span class="mayor-demo-kicker" aria-hidden="true">DEMO ROLE</span>
+      <button
+        type="button"
+        class="mayor-demo-btn"
+        data-action="toggle-mayor-demo"
+        data-city-id="${esc(city.id)}"
+        data-testid="mayor-demo-toggle"
+        data-focus-key="mayor-${esc(city.id)}"
+        aria-pressed="${active}"
+        title="${active ? `退出 ${esc(city.name)} 市长演示身份` : '仅用于查看市长专属信息，不代表选举结果'}"
+      >${active ? '退出市长演示' : '以市长身份查看（演示）'}</button>
+      ${
+        active
+          ? '<span class="mayor-demo-badge">演示：市长身份 · 选举系统未实现</span>'
+          : '<span class="mayor-demo-hint">选举未实现，仅作演示入口。</span>'
+      }
+    </div>`;
+}
+
 function renderPulse(city: City): string {
   const history = city.gdpHistory.slice(-18).map((point) => point.value);
   return `
@@ -607,6 +748,135 @@ function renderTradeSummary(store: GameStore): string {
     </section>`;
 }
 
+export function renderAgreementsSection(store: GameStore, city: City): string {
+  const partners = store.agreementPartners(city.id);
+  const agreements = store.agreementsForCity(city.id).slice(0, 6);
+
+  const agreementCard = (agreement: TradeAgreement): string => {
+    const canDecide = agreement.status === 'proposed' || agreement.status === 'active';
+    const parties = agreement.participants
+      .map((participant) => {
+        const isActive = (accept: boolean) =>
+          accept ? participant.decision === 'accepted' : participant.decision === 'declined';
+        return `
+          <div class="agreement-party">
+            <div class="agreement-party-main">
+              <b>${esc(companyNameOf(store, participant.companyId))}</b>
+              <span>${participant.side === 'buyer' ? '买方' : '卖方'} · <em class="decision-${participant.decision}">${DECISION_LABELS[participant.decision]}</em></span>
+            </div>
+            ${
+              canDecide
+                ? `<div class="agreement-party-actions" role="group" aria-label="代 ${esc(companyNameOf(store, participant.companyId))} 表态">
+                    <button
+                      type="button"
+                      class="ken-btn ken-btn--green ken-btn--mini ${isActive(true) ? 'is-active' : ''}"
+                      data-action="decide-agreement"
+                      data-agreement-id="${esc(agreement.id)}"
+                      data-company-id="${esc(participant.companyId)}"
+                      data-accept="true"
+                      data-focus-key="agreement-${esc(agreement.id)}-${esc(participant.companyId)}-accept"
+                      aria-pressed="${isActive(true)}"
+                      title="接受协议参与邀请；仅代表该演示企业表态，不产生玩家个人义务"
+                    >接受（演示：代企业表态）</button>
+                    <button
+                      type="button"
+                      class="ken-btn ken-btn--grey ken-btn--mini ${isActive(false) ? 'is-active' : ''}"
+                      data-action="decide-agreement"
+                      data-agreement-id="${esc(agreement.id)}"
+                      data-company-id="${esc(participant.companyId)}"
+                      data-accept="false"
+                      data-focus-key="agreement-${esc(agreement.id)}-${esc(participant.companyId)}-decline"
+                      aria-pressed="${isActive(false)}"
+                      title="拒绝协议参与邀请；拒绝对局不会产生买卖义务"
+                    >拒绝（演示：代企业表态）</button>
+                  </div>`
+                : ''
+            }
+          </div>`;
+      })
+      .join('');
+
+    const items = agreement.items
+      .map(
+        (item) => `
+        <li class="agreement-item">
+          <div class="agreement-item-main">
+            <b>${esc(goodName(item.good))}</b>
+            <span>${qty(item.qtyPerMonth)} / 月 × ${item.months} 月 · ${num(item.unitPrice, 2)} / 单位</span>
+          </div>
+          <div class="agreement-item-meta">
+            <span>已交付 ${qty(item.deliveredQty)}</span>
+            <span class="agreement-item-state is-${item.status}">${AGREEMENT_ITEM_STATUS_LABELS[item.status]}</span>
+          </div>
+          <p class="agreement-item-note">${esc(item.lastNote)}</p>
+        </li>`,
+      )
+      .join('');
+
+    return `
+      <article class="agreement-card status-${agreement.status}">
+        <div class="agreement-head">
+          <b>${esc(agreement.title)}</b>
+          <span class="agreement-state">${AGREEMENT_STATUS_LABELS[agreement.status]}</span>
+        </div>
+        <div class="agreement-route">
+          ${esc(cityName(store.world, agreement.sponsorCityId))} → ${esc(cityName(store.world, agreement.partnerCityId))}
+          · 发起 T${agreement.createdTick}
+          ${agreement.createdBy === 'demo' ? ' · 演示入口' : ''}
+        </div>
+        <p class="agreement-note">${esc(agreement.note)}</p>
+        <div class="agreement-parties">${parties}</div>
+        ${items ? `<ul class="agreement-items" aria-label="协议条目">${items}</ul>` : ''}
+        ${
+          canDecide
+            ? `<div class="agreement-actions">
+                <button
+                  type="button"
+                  class="ken-btn ken-btn--grey ken-btn--mini"
+                  data-action="withdraw-agreement"
+                  data-agreement-id="${esc(agreement.id)}"
+                  data-focus-key="withdraw-${esc(agreement.id)}"
+                  title="取消协议；未履约条目不再执行"
+                >取消协议（演示）</button>
+              </div>`
+            : ''
+        }
+      </article>`;
+  };
+
+  return `
+    <section class="panel-section agreement-section" data-testid="agreements-section">
+      <div class="section-head">
+        <div>
+          <span class="kicker">CITY AGREEMENTS</span>
+          <h2>跨城贸易协议</h2>
+        </div>
+        <span class="section-tag">${agreements.length} 条</span>
+      </div>
+      <p class="demo-note">市政府牵头（演示入口）。市长选举尚未实现，这里不代表玩家已当选。</p>
+      <div class="agreement-partners">
+        <span class="agreement-partner-label">组织协商</span>
+        ${partners
+          .map(
+            (partner) => `
+            <button
+              type="button"
+              class="chip-btn agreement-partner-btn"
+              data-action="organize-agreement"
+              data-partner-city-id="${esc(partner.id)}"
+              data-focus-key="agreement-${esc(city.id)}-${esc(partner.id)}"
+              title="由市政府（演示）组织 ${esc(city.name)} 与 ${esc(partner.name)} 的跨城协议"
+            >与${esc(partner.name)}协商（演示）</button>`,
+          )
+          .join('')}
+      </div>
+      <div class="agreement-list">
+        ${agreements.length > 0 ? agreements.map(agreementCard).join('') : '<p class="fin-hint">暂无协议记录；可先与伙伴城市协商。</p>'}
+      </div>
+      <p class="fin-hint">只有在协议生效且参与企业接受后，条目才逐月执行；协商中、拒绝或取消都不会产生买卖义务。</p>
+    </section>`;
+}
+
 export function renderRightRegion(store: GameStore, state: PanelState): string {
   const city = store.selectedCity;
   if (!city) {
@@ -625,6 +895,7 @@ export function renderRightRegion(store: GameStore, state: PanelState): string {
       : null;
   return `
     ${renderCityIdentity(store, city, { enter: true })}
+    ${renderMayorDemo(store, city)}
     ${
       focusCompany
         ? renderCompanyDetail(store, focusCompany, { showClose: true, investTestId: false })
@@ -639,12 +910,14 @@ export function renderRightRegion(store: GameStore, state: PanelState): string {
         <span class="section-tag">${esc(store.dateLabel)}</span>
       </div>
       ${renderKpis(store, city)}
+      ${renderPopulationSection(city)}
       ${renderPulse(city)}
     </section>
     ${renderSystems(city)}
     ${renderMarket(city, state.showAllGoods)}
     ${renderCompanies(store, city, state.focusCompanyId)}
-    ${renderTradeSummary(store)}`;
+    ${renderTradeSummary(store)}
+    ${renderAgreementsSection(store, city)}`;
 }
 
 function renderBuildingDetail(
@@ -761,14 +1034,232 @@ export function renderCompanyDetail(
   options: CompanyDetailOptions = {},
 ): string {
   const city = store.world.cities.find((entry) => entry.id === company.cityId);
-  const price = store.citySharePrice(company);
-  const stake = store.playerStake(company.id);
-  const holding = store.world.player.holdings.find((entry) => entry.companyId === company.id);
+  const securities = store.securitiesView(company.id);
+  const governance = store.governanceView(company.id);
+  const price = securities.price;
+  const stake = securities.playerStake;
   const recipe = RECIPES[company.recipeOutput];
   const roleKeys = Object.keys(company.roles) as (keyof Company['roles'])[];
   const roleTotal = roleKeys.reduce((total, key) => total + company.roles[key], 0);
   const playerCash = store.world.player.cash;
   const lastMonth = company.lastMonth;
+
+  const shareClasses = store.world.securities.classes.filter(
+    (shareClass) => shareClass.companyId === company.id,
+  );
+  const votingIssued = shareClasses
+    .filter((shareClass) => shareClass.kind === 'voting')
+    .reduce((total, shareClass) => total + shareClass.issuedShares, 0);
+  const nonVotingIssued = shareClasses
+    .filter((shareClass) => shareClass.kind === 'nonVoting')
+    .reduce((total, shareClass) => total + shareClass.issuedShares, 0);
+  const totalShares =
+    company.totalShares > 0 ? company.totalShares : votingIssued + nonVotingIssued;
+  const playerTotalShares = securities.playerShares;
+  const playerVotingShares = securities.playerVotingShares;
+  const playerNonVotingShares = Math.max(0, playerTotalShares - playerVotingShares);
+  const canVote = playerVotingShares > 0;
+
+  const holdersHtml =
+    securities.holders.length === 0
+      ? '<tr><td class="mini-empty" colspan="4">暂无股东记录。</td></tr>'
+      : securities.holders
+          .map((entry) => {
+            const isPlayer = entry.holder.type === 'player';
+            const ratio = totalShares > 0 ? entry.totalShares / totalShares : 0;
+            const label = holderLabel(store, entry.holder);
+            return `
+              <tr class="${isPlayer ? 'is-player' : ''}">
+                <th scope="row" title="${esc(label)}">${esc(label)}</th>
+                <td>${num(entry.votingShares)}</td>
+                <td>${num(entry.nonVotingShares)}</td>
+                <td>${pct(ratio, 2)}</td>
+              </tr>`;
+          })
+          .join('');
+
+  const seatsByHolder = new Map<
+    string,
+    { holder: HolderRef; count: number; votingShares: number }
+  >();
+  for (const seat of governance.board?.seats ?? []) {
+    const key = holderKey(seat.holder);
+    const entry = seatsByHolder.get(key) ?? {
+      holder: seat.holder,
+      count: 0,
+      votingShares: 0,
+    };
+    entry.count += 1;
+    entry.votingShares += seat.votingShares;
+    seatsByHolder.set(key, entry);
+  }
+  const seats = [...seatsByHolder.values()].sort(
+    (a, b) => b.count - a.count || b.votingShares - a.votingShares,
+  );
+  const chairKey = governance.board?.chair ? holderKey(governance.board.chair) : null;
+  const seatsHtml =
+    seats.length === 0
+      ? '<span class="fin-hint">暂无董事席位。</span>'
+      : seats
+          .map((entry) => {
+            const key = holderKey(entry.holder);
+            const isChair = key === chairKey;
+            return `<span class="gov-seat ${isChair ? 'is-chair' : ''}" title="${num(entry.votingShares)} 股表决权">
+              <b>${esc(holderLabel(store, entry.holder))}</b>
+              <em>${entry.count} 席</em>
+              ${isChair ? '<span class="gov-chair">董事长</span>' : ''}
+            </span>`;
+          })
+          .join('');
+
+  const control = governance.control;
+  const operatorLabel = control ? holderLabel(store, control.operator) : '职业经理人';
+  const basisLabel = control?.basis === 'boardAppointment' ? '董事会任命' : '默认管理';
+
+  const openMotions = governance.motions
+    .filter((motion) => motion.status === 'open')
+    .sort((a, b) => a.closesAtTick - b.closesAtTick)
+    .slice(0, 3);
+  const closedMotions = governance.motions
+    .filter((motion) => motion.status !== 'open')
+    .sort(
+      (a, b) =>
+        (b.decidedTick ?? b.closesAtTick) - (a.decidedTick ?? a.closesAtTick) ||
+        a.id.localeCompare(b.id),
+    )
+    .slice(0, 2);
+
+  const motionCard = (motion: Motion): string => {
+    const forVotes = motion.votes.filter((vote) => vote.vote === 'for');
+    const againstVotes = motion.votes.filter((vote) => vote.vote === 'against');
+    const forWeight = forVotes.reduce((total, vote) => total + vote.votingShares, 0);
+    const againstWeight = againstVotes.reduce((total, vote) => total + vote.votingShares, 0);
+    const playerVote =
+      motion.votes.find(
+        (vote) => vote.holder.type === 'player' && vote.holder.id === 'player',
+      )?.vote ?? null;
+    const voteButtons =
+      motion.status === 'open' && canVote
+        ? `<div class="motion-actions" role="group" aria-label="对「${esc(motion.title)}」投票">
+            ${(['for', 'against', 'abstain'] as const)
+              .map(
+                (vote) => `
+                <button
+                  type="button"
+                  class="chip-btn vote-btn ${playerVote === vote ? 'is-selected' : ''}"
+                  data-action="vote-motion"
+                  data-motion-id="${esc(motion.id)}"
+                  data-vote="${vote}"
+                  data-focus-key="motion-${esc(motion.id)}-${vote}"
+                  aria-pressed="${playerVote === vote}"
+                  title="${VOTE_LABELS[vote]}（演示：按你的表决权计票）"
+                >${VOTE_LABELS[vote]}</button>`,
+              )
+              .join('')}
+          </div>`
+        : '';
+    const result =
+      motion.status !== 'open' && motion.result
+        ? `<p class="motion-result">${esc(motion.result)}</p>`
+        : '';
+    return `
+      <article class="motion-card status-${motion.status}">
+        <div class="motion-head">
+          <b>${esc(motion.title)}</b>
+          <span class="motion-state">${MOTION_STATUS_LABELS[motion.status]}</span>
+        </div>
+        <div class="motion-meta">
+          <span>截止 T${motion.closesAtTick}</span>
+          <span>赞成 ${forVotes.length} 票 · ${num(forWeight)} 权</span>
+          <span>反对 ${againstVotes.length} 票 · ${num(againstWeight)} 权</span>
+        </div>
+        <p class="motion-note">${esc(motion.note)}</p>
+        ${result}
+        ${voteButtons}
+      </article>`;
+  };
+
+  const buyLimit = limitPriceFor(price, 'buy');
+  const sellLimit = limitPriceFor(price, 'sell');
+  const orderRows =
+    securities.orders.length === 0
+      ? '<tr><td class="mini-empty" colspan="5">暂无挂单。</td></tr>'
+      : securities.orders
+          .slice(0, 6)
+          .map((order) => {
+            const kind = shareClasses.find(
+              (shareClass) => shareClass.id === order.shareClassId,
+            )?.kind;
+            return `
+              <tr>
+                <td class="${order.side === 'buy' ? 'is-buy' : 'is-sell'}">${order.side === 'buy' ? '买入' : '卖出'}</td>
+                <td>${kind ? shareKindLabel(kind) : '股份'}</td>
+                <td>${num(order.shares)}</td>
+                <td>${num(order.limitPrice, 2)}</td>
+                <td>T${order.createdTick}</td>
+              </tr>`;
+          })
+          .join('');
+
+  const tradeRows = (['voting', 'nonVoting'] as const)
+    .flatMap((kind) =>
+      (['buy', 'sell'] as const).map((side) => {
+        const limit = side === 'buy' ? buyLimit : sellLimit;
+        const actionLabel = side === 'buy' ? '买入' : '卖出';
+        return `
+          <div class="trade-row">
+            <span class="trade-row-label">${shareKindLabel(kind)} · ${actionLabel}<em>限价 ${limit}</em></span>
+            <div class="trade-btns">
+              ${[100, 1000]
+                .map(
+                  (shares) => `
+                  <button
+                    type="button"
+                    class="ken-btn ken-btn--mini ${side === 'buy' ? 'ken-btn--green' : 'ken-btn--grey'}"
+                    data-action="trade-shares"
+                    data-company-id="${esc(company.id)}"
+                    data-kind="${kind}"
+                    data-side="${side}"
+                    data-shares="${shares}"
+                    data-limit-price="${limit}"
+                    data-focus-key="trade-${esc(company.id)}-${kind}-${side}-${shares}"
+                    title="${actionLabel} ${num(shares)} 股${shareKindLabel(kind)}股份，限价 ${limit} 信用点 / 股（演示）"
+                    aria-label="${actionLabel} ${num(shares)} 股${shareKindLabel(kind)}股份，限价 ${limit} 信用点每股"
+                  >${num(shares)} 股</button>`,
+                )
+                .join('')}
+            </div>
+          </div>`;
+      }),
+    )
+    .join('');
+
+  const offersHtml =
+    securities.offers.length === 0
+      ? '<p class="fin-hint">暂无待处理的融资要约。</p>'
+      : securities.offers
+          .map((offer) => {
+            const fromPlayer = offer.investor.type === 'player';
+            return `
+              <div class="offer-card">
+                <div class="offer-head">
+                  <b>${esc(holderLabel(store, offer.investor))}</b>
+                  <span>${offer.kind === 'voting' ? '有表决权' : '仅分红'}</span>
+                </div>
+                <div class="offer-meta">出资 ${money(offer.amount)} · ${num(offer.shares)} 股 · ${num(offer.pricePerShare, 2)} / 股 · T${offer.createdTick}</div>
+                <p class="offer-note">${esc(offer.note)}</p>
+                ${
+                  fromPlayer
+                    ? `<div class="offer-actions">
+                        <button type="button" class="ken-btn ken-btn--green ken-btn--mini" data-action="accept-offer" data-offer-id="${esc(offer.id)}" data-company-id="${esc(company.id)}" data-focus-key="accept-offer-${esc(offer.id)}" title="接受这份融资要约；资金进入企业，你获得对应股份">接受要约</button>
+                        <button type="button" class="ken-btn ken-btn--grey ken-btn--mini" data-action="decline-offer" data-offer-id="${esc(offer.id)}" data-company-id="${esc(company.id)}" data-focus-key="decline-offer-${esc(offer.id)}" title="拒绝这份融资要约；没有资金或股份变化">拒绝</button>
+                      </div>`
+                    : '<p class="fin-hint">这份要约由其他出资方提出，只有该出资方可以处理。</p>'
+                }
+              </div>`;
+          })
+          .join('');
+
   return `
     <article
       class="company-detail"
@@ -832,7 +1323,7 @@ export function renderCompanyDetail(
         <div class="kpi is-teal">
           <span>玩家持股</span>
           <b>${pct(stake, 2)}</b>
-          <small>${num(holding?.shares ?? 0)} 股</small>
+          <small>${num(playerTotalShares)} 股</small>
         </div>
       </div>
       <div class="finance-grid">
@@ -914,6 +1405,130 @@ export function renderCompanyDetail(
           }).join('')}
         </div>
       </div>
+      <section class="detail-subsection" data-testid="company-holders">
+        <div class="sub-head">
+          <h4>股权结构</h4>
+          <span>账面价 ${num(price, 2)}</span>
+        </div>
+        <div class="sec-issued">
+          <span>有表决权 <b>${num(votingIssued)}</b> 股</span>
+          <span>仅分红 <b>${num(nonVotingIssued)}</b> 股</span>
+        </div>
+        <div class="table-wrap">
+          <table class="sec-table" aria-label="${esc(company.name)} 股东结构">
+            <thead>
+              <tr>
+                <th scope="col">持有人</th>
+                <th scope="col">表决权</th>
+                <th scope="col">仅分红</th>
+                <th scope="col">占比</th>
+              </tr>
+            </thead>
+            <tbody>${holdersHtml}</tbody>
+          </table>
+        </div>
+        <p class="holding-line ${playerTotalShares > 0 ? 'is-player' : ''}">
+          你的持股 <b>${num(playerTotalShares)}</b> 股
+          <span>表决权 <b>${num(playerVotingShares)}</b> 股</span>
+          <span>占比 <b>${pct(stake, 2)}</b></span>
+        </p>
+        <p class="fin-hint">企业作为买方只能持有有表决权股份；居民投资实体只展示汇总持股，不展示内部明细。</p>
+      </section>
+
+      <section class="detail-subsection" data-testid="company-governance">
+        <div class="sub-head">
+          <h4>董事会与经营控制</h4>
+          <span class="mini-tag">演示规则</span>
+        </div>
+        <div class="gov-operator">
+          <span>经营者</span>
+          <b>${esc(operatorLabel)}</b>
+          <em>${basisLabel}</em>
+        </div>
+        <div class="gov-seats">${seatsHtml}</div>
+        <p class="fin-hint">持股产生表决权与董事席位；经营控制权默认属于职业经理人，须经议案表决才能变更（演示规则）。</p>
+        ${
+          canVote
+            ? `<div class="gov-actions">
+                <button
+                  type="button"
+                  class="ken-btn ken-btn--blue ken-btn--mini"
+                  data-action="propose-operator"
+                  data-company-id="${esc(company.id)}"
+                  data-operator="player"
+                  data-focus-key="propose-player-${esc(company.id)}"
+                  title="提出由玩家经营企业的议案；需表决通过（演示）"
+                >提议由玩家经营（演示）</button>
+                <button
+                  type="button"
+                  class="ken-btn ken-btn--grey ken-btn--mini"
+                  data-action="propose-operator"
+                  data-company-id="${esc(company.id)}"
+                  data-operator="management"
+                  data-focus-key="propose-management-${esc(company.id)}"
+                  title="提出恢复职业经理人经营的议案；需表决通过（演示）"
+                >提议恢复职业经理人</button>
+              </div>
+              <p class="gov-vote-note">需表决通过；通过前经营者不变。</p>`
+            : '<p class="fin-hint">你没有该公司的表决权，无法发起经营者议案。</p>'
+        }
+      </section>
+
+      <section class="detail-subsection" data-testid="company-motions">
+        <div class="sub-head">
+          <h4>议案与表决</h4>
+          <span>${openMotions.length} 项待表决</span>
+        </div>
+        <div class="motion-group">
+          <span class="motion-group-label">待表决</span>
+          ${openMotions.length > 0 ? openMotions.map(motionCard).join('') : '<p class="fin-hint">暂无待表决议案。</p>'}
+        </div>
+        ${
+          closedMotions.length > 0
+            ? `<div class="motion-group">
+                <span class="motion-group-label">最近结束</span>
+                ${closedMotions.map(motionCard).join('')}
+              </div>`
+            : ''
+        }
+        ${canVote ? '' : '<p class="fin-hint">你没有该公司的表决权，不会收到表决要求。</p>'}
+      </section>
+
+      <section class="detail-subsection" data-testid="company-trading">
+        <div class="sub-head">
+          <h4>股票交易</h4>
+          <span>账面价 ${num(price, 2)}</span>
+        </div>
+        <div class="trade-holdings">
+          <span>有表决权 <b>${num(playerVotingShares)}</b> 股</span>
+          <span>仅分红 <b>${num(playerNonVotingShares)}</b> 股</span>
+        </div>
+        <div class="table-wrap">
+          <table class="trade-table" aria-label="${esc(company.name)} 股票挂单">
+            <thead>
+              <tr>
+                <th scope="col">方向</th>
+                <th scope="col">类别</th>
+                <th scope="col">剩余</th>
+                <th scope="col">限价</th>
+                <th scope="col">下单</th>
+              </tr>
+            </thead>
+            <tbody>${orderRows}</tbody>
+          </table>
+        </div>
+        <p class="fin-hint">一级融资（注资）资金进入企业；二级买卖资金只进入卖方，企业不会因此获得资金。</p>
+        <div class="trade-grid" role="group" aria-label="二级市场下单">
+          ${tradeRows}
+        </div>
+        <div class="offer-block">
+          <div class="sub-head">
+            <h4>融资要约</h4>
+            <span>${securities.offers.length} 条待处理</span>
+          </div>
+          ${offersHtml}
+        </div>
+      </section>
       <p class="warning-note">企业现金不足会触发营运资金信贷 / 债务重组（演示）。该机制不是正式金融模型。</p>
     </article>`;
 }
@@ -948,6 +1563,7 @@ export function renderRightCity(store: GameStore, state: PanelState): string {
       </div>`;
   }
   return `
+    ${renderMayorDemo(store, city)}
     ${detail}
     <section class="panel-section overview-section">
       <div class="section-head">
@@ -958,16 +1574,25 @@ export function renderRightCity(store: GameStore, state: PanelState): string {
         <span class="section-tag">${esc(store.dateLabel)}</span>
       </div>
       ${renderKpis(store, city)}
+      ${renderPopulationSection(city)}
       ${renderPulse(city)}
     </section>
     ${renderSystems(city)}
-    ${renderMarket(city, state.showAllGoods)}`;
+    ${renderMarket(city, state.showAllGoods)}
+    ${renderAgreementsSection(store, city)}`;
+}
+
+function isPlayerFacingLog(message: string): boolean {
+  return !/不变量|事务|校验|invariant|transaction/i.test(message);
 }
 
 export function renderLogDock(store: GameStore, collapsed: boolean): string {
   const totals = worldTotals(store.world, store.playerNetWorth);
   const lastDividend = store.world.player.dividendsReceived ?? store.world.player.lastDividend ?? 0;
-  const logs = store.world.log.slice(-14).reverse();
+  const logs = store.world.log
+    .filter((entry) => entry.kind !== 'system' && isPlayerFacingLog(entry.message))
+    .slice(-14)
+    .reverse();
   const history = store.world.history.slice(-18).map((point) => point.gdp);
   return `
     <header class="log-head">
