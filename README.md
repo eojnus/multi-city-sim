@@ -108,7 +108,7 @@ npm run smoke        # 启动 Electron、截图区域/城市、推进、保存/�
 
 - `npm install` 成功（npm 11 对 Electron install-scripts 的拦截已手动处理）。
 - `npm run typecheck` 通过。
-- `npm test`：20 个测试全部通过（4 个测试文件）：24/36 期不变量、固定种子重现、跨城货流、注资、非法注资、存档往返/损坏/版本过新、GDP 口径；以及玩家分红拆分、损坏存档缺 `publicSector`/类型错误、自动存档保留、跨城交易失败回滚。
+- `npm test`：21 个测试全部通过（4 个测试文件）：24/36 期不变量、固定种子重现、跨城货流、注资、非法注资、存档往返/损坏/版本过新、GDP 口径；以及玩家分红拆分、损坏存档缺 `publicSector`/类型错误、自动存档保留、跨城交易失败回滚。
 - `npm run build` 通过。
 - `npm run smoke`：Electron 实际启动、区域/城市/建筑/存档截图、城市进入与返回、图层切换、推进 1 月、企业注资、手动保存→推进→读取、reload 后自动存档恢复、1100×700 无横向溢出；渲染层无 console error。
 - `npx electron .` 实际启动并保持窗口。

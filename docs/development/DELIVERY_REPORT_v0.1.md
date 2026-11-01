@@ -1,6 +1,6 @@
 # 初版交付报告（v0.1）
 
-> 验收修复后：测试增至 **20/20**（`docs/development/ACCEPTANCE_FIXES_v0.2.md`）。本报告保留初版交付时的事实记录；分红、存档校验、交易原子性以修复报告为准。
+> 验收修复后：测试增至 **21/21**（`docs/development/ACCEPTANCE_FIXES_v0.2.md`）。本报告保留初版交付时的事实记录；分红、存档校验、交易原子性以修复报告为准。
 
 日期：2026-11-01\
 工作区：`C:\CODING-worktrees\first-playable`\
@@ -51,7 +51,7 @@ npm run package      # NSIS 安装包
 | 生产构建 | `npm run build` | 通过（Vite 7.3.7；Phaser bundle 约 1.30 MB，gzip 约 362 KB；仅 chunk size 警告） |
 | 打包目录 | `npm run package:dir` | 首次因下载 Electron 包超时失败；设置 `ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/` 后成功生成 `release\win-unpacked\多城经济模拟.exe`（未签名、默认 Electron 图标）。 |
 | NSIS 安装包 | `npx electron-builder --win --x64` | 首次下载 `7zip-win-x64` 时 `connect ETIMEDOUT 20.205.243.166:443`；设置同一镜像后成功生成 `release\多城经济模拟 Setup 0.1.0.exe`。 |
-| 自动化测试 | `npm test` | 初版 9/9；验收修复后 20/20（见修复报告） |
+| 自动化测试 | `npm test` | 初版 9/9；验收修复后 21/21（见修复报告） |
 
 ### 3.2 Electron 启动与交互
 

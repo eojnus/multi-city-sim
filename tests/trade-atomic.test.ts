@@ -89,6 +89,22 @@ describe('跨城交易原子性', () => {
     expect(exporter.lastMonth.exported).toBe(10);
   });
 
+  it('成功交易可以使用营运资金信贷，并把借款与成交一起提交', () => {
+    const { world, exporter, importer } = prepareTrade();
+    importer.cash = 100;
+    importer.baseWageBill = 10; // 信用额度 60；总可负担 160，买 3.2 单位（160）
+    const flows = executeTradeRoutes(world, DEMO_CONFIG, []);
+    expect(flows).toHaveLength(1);
+    expect(flows[0]!.qty).toBe(3.2);
+    expect(flows[0]!.value).toBe(160);
+    expect(importer.cash).toBe(0);
+    expect(importer.debt).toBe(60);
+    expect(importer.inventory.grain).toBe(3.2);
+    expect(importer.lastMonth.inputCost).toBe(160);
+    expect(exporter.inventory.grain).toBe(996.8);
+    expect(exporter.cash).toBe(160);
+  });
+
   it('无效交易主体不会抛异常或改变任何主体', () => {
     const { world, exporter, importer, route } = prepareTrade();
     route.fromCompanyId = 'does-not-exist';
