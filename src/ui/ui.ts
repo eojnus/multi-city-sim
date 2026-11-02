@@ -580,6 +580,16 @@ export class GameUI {
       this.handleAction(actionElement);
     });
 
+    // 可点击卡片（如 KPI「企业数量」）支持键盘 Enter / 空格触发。
+    overlay.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      const active = document.activeElement as HTMLElement | null;
+      const actionElement = active?.closest<HTMLElement>('[role="button"][data-action]');
+      if (!actionElement) return;
+      event.preventDefault();
+      this.handleAction(actionElement);
+    });
+
     overlay.addEventListener('dblclick', (event) => {
       const target = event.target as HTMLElement | null;
       const card = target?.closest<HTMLElement>('[data-action="select-city"]');
@@ -817,9 +827,50 @@ export class GameUI {
       case 'run-for-mayor':
         if (this.store.selectedCityId) this.store.runForMayor(this.store.selectedCityId);
         break;
+      case 'show-companies': {
+        // KPI 卡片直达企业列表：只滚动右侧栏，不改选择状态。
+        const target = this.overlay?.querySelector<HTMLElement>(
+          '#right-scroll [data-testid="companies-section"]',
+        );
+        target?.scrollIntoView({ block: 'start', behavior: 'auto' });
+        break;
+      }
       case 'invest-transport': {
         const target = element.dataset.target;
         if (target) this.store.investTransport(target);
+        break;
+      }
+      // ---------------------------------------------------------- v0.7 债券
+      case 'issue-bond': {
+        const targetCity = cityId ?? this.store.selectedCityId;
+        if (!targetCity) {
+          this.rejectAction('请先选择城市。');
+          break;
+        }
+        const panel = element.closest<HTMLElement>('.fiscal-panel');
+        const input = panel?.querySelector<HTMLInputElement>('input[data-bond-plan-units]') ?? null;
+        const parsed = Number(input?.value.trim() ?? '');
+        if (!Number.isFinite(parsed) || parsed <= 0 || !Number.isInteger(parsed)) {
+          this.rejectAction('计划份数必须是正整数。');
+          break;
+        }
+        this.store.issueBond(targetCity, parsed);
+        break;
+      }
+      case 'subscribe-bond': {
+        const issuanceId = element.dataset.issuanceId;
+        if (!issuanceId) {
+          this.rejectAction('债券批次无效。');
+          break;
+        }
+        const card = element.closest<HTMLElement>('.bond-offer');
+        const input = card?.querySelector<HTMLInputElement>('input[data-bond-subscribe-units]') ?? null;
+        const parsed = Number(input?.value.trim() ?? '');
+        if (!Number.isFinite(parsed) || parsed <= 0 || !Number.isInteger(parsed)) {
+          this.rejectAction('认购份数必须是正整数。');
+          break;
+        }
+        this.store.subscribeBond(issuanceId, parsed);
         break;
       }
       case 'found-company': {
