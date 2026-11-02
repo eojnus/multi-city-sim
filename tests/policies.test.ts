@@ -516,3 +516,18 @@ function SimpsonWorld(): WorldState {
   for (const city of world.cities) city.treasury = 0;
   return world;
 }
+
+describe('财政不足的错误文案不泄漏精确金额（界面审计 #9）', () => {
+  it('只给定性提示，不含财政余额或预算数字', () => {
+    const world = Simulation.create().state;
+    const city = world.cities[0];
+    if (!city) throw new Error('缺少城市');
+    city.treasury = 1;
+    const result = startPolicy(world, city.id, 'hiringSubsidy', DEMO_CONFIG, {
+      budget: DEMO_CONFIG.policies.minBudget,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe('该政策当前无法执行：城市财政资金不足');
+    expect(result.error).not.toMatch(/[0-9]/);
+  });
+});
