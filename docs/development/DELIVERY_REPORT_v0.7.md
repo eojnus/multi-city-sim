@@ -53,7 +53,9 @@
 
 ### 2.3 统计字段（v1.4 #37，可选字段，未填充时报告标“近似”）
 
-`CompanyMonthlyStats.operatingCashFlow`；`HouseholdMonthlyStats.budget/loanDrawn/loanFinancedConsumption/unmetFunding`（DECISIONS v1.5 #40 确认追加：只加不改、既有字段语义不变、存档 v7 校验接受缺省、块3 填充）；`CityMonthlyReport.consumerLoanDrawn/consumerLoanRepaid/consumerLoanOutstanding/bondInterestPaid/bondPrincipalPaid/bankAdvanceThisMonth/totalDebtAtMonthEnd/debtRatioAtMonthEnd/gdpJudgementValue`。
+`CompanyMonthlyStats.operatingCashFlow`；`HouseholdMonthlyStats.budget/loanDrawn/loanFinancedConsumption/unmetFunding`（DECISIONS v1.5 #40 确认追加：只加不改、既有字段语义不变、存档 v7 校验接受缺省、块3 填充）。
+
+**v1.5 #40 四字段定稿**：`HouseholdMonthlyStats` 追加 `budget`（本月消费预算）、`loanDrawn`（本月新借消费贷）、`loanFinancedConsumption`（贷款融资的消费额）、`unmetFunding`（预算缺口），均为**可选**（`?`）字段，旧档/暂未填充时为 `undefined`，不改变既有字段语义；块3 负责填充并补报告口径。`CityMonthlyReport.consumerLoanDrawn/consumerLoanRepaid/consumerLoanOutstanding/bondInterestPaid/bondPrincipalPaid/bankAdvanceThisMonth/totalDebtAtMonthEnd/debtRatioAtMonthEnd/gdpJudgementValue`。
 
 ### 2.4 契约追加清单（DECISIONS v1.5 #40–#43，追加式、不改既有语义）
 
@@ -191,6 +193,13 @@ totalDebt = bankLoanPrincipal          // 普通政府贷款未偿本金
 - 桌面走查、Xvfb 截图与泄漏回归由验收员按验收矩阵执行，本文不预填结果。
 - `tests/economy-stability.test.ts` 的 120 月用例超时由 30s 放宽到 60s（commit `74629d1`）：2 核本机多 worktree 并行时该用例实测 36–38s，属环境争用，非功能回退。
 
+### 8.1 块6 实测事实（36 月独立复跑，`1d138a6`，**已发生，不是理论上限**）
+
+- 破产：岚港 t20、铁谷 t30 实际进入破产（银行兑付未到期债券本息后勾销政府银行债务）。
+- 负债率峰值：岚港 97.0%、铁谷 91.0%；t36 回落至 73.0% / 20.0%。
+- 破产兑付银行垫付合计 788,239,137 信用点。
+- 该结果说明现有参数下破产在 36 月观察窗内真实触发，经济平衡需按“已发生”而非“理论上限”评估。
+
 ## 9. 验收证据（由验收员补齐）
 
 - [ ] 三件套实际输出（typecheck / vitest 文件与用例数 / build）
@@ -202,18 +211,31 @@ totalDebt = bankLoanPrincipal          // 普通政府贷款未偿本金
 
 ## 10. 集成记录（秘书处/架构师填）
 
-| 步骤 | 分支 | merge SHA | typecheck | vitest | build |
-|---|---|---|---|---|---|
-| 0 | `feature/arch-foundation`（块0） | `1b1459c`（块0）、`22adfc4`（报告骨架） | ✓ | 40 文件 / 306 用例 ✓ | ✓ |
-| 0b | `feature/arch-foundation`（#40–#43） | `2983c2c`（秘书处合入，含 `19e394c`/`74629d1`/`5fec771`/`73b8ce5`/`9011ad9`） | ✓ | 41 文件 / 315 用例 ✓ | ✓ |
-| 1 | `feature/sim-fiscal`（债券第一批） | `ee1a949`（含 `6bdcea1` 合 arch、`df7dd1d` 状态机） | ✓ | 42 文件 / 328 用例 ✓ | ✓ |
-| 2 | `feature/data-tuning` | `da2dcaa`（数值参数回填、36 月基线报告脚本与基线档案、块6 观察表，含 `391909e`） | ✓ | 42 文件 / 328 用例 ✓ | ✓ |
-| 3 | `feature/ui-fiscal` | `644085a`（秘书处提前合入第一批；独立用例数未单记） | ✓ | 与 sim 合并后合计 42 文件 / 328 用例 ✓ | ✓ |
-| 4 | `qa/acceptance` | 待填 | — | — | — |
+| 步骤 | 来源分支 | merge SHA | 提交主题 | typecheck | vitest | build |
+|---|---|---|---|---|---|---|
+| 0 | `feature/arch-foundation` | `1b1459c` | 块0 契约冻结：v0.7 财政契约与存档 v7 | ✓ | 40 文件 / 306 用例 ✓ | ✓ |
+| 0b | `feature/arch-foundation` | `22adfc4` | v0.7 交付报告骨架（仅 docs） | ✓ | 40 文件 / 306 用例 ✓ | ✓ |
+| 0c | `feature/ui-fiscal` | `644085a` | 财政可见性第一批（审计 #1/#3–#8/#10–#13/#16 + 回归） | ✓ | 未单记；下一合并点合计 41 文件 / 315 用例 ✓ | ✓ |
+| 0d | `feature/arch-foundation` | `2983c2c` | 契约追加 #40–#43 + 稳定性用例超时放宽 | ✓ | 41 文件 / 315 用例 ✓ | ✓ |
+| 1 | `feature/sim-fiscal` | `ee1a949` | 政府债券状态机（发行/认购/票息/到期/破产兑付/垫付）+ 审计 #9 | ✓ | 42 文件 / 328 用例 ✓ | ✓ |
+| 2 | `feature/data-tuning` | `da2dcaa` | 数值参数回填、36 月基线脚本与档案、块6 观察表 | ✓ | 42 文件 / 328 用例 ✓ | ✓ |
+| 3 | `feature/ui-fiscal` | `7c5edf7` | 块4 财政面板/债券市场/KPI 企业数（投影+命令+走查） | ✓ | 未单记；下一合并点合计 42 文件 / 328 用例 ✓ | ✓ |
+| 4 | `feature/arch-foundation` | `b24afdd` | 契约追加 `BondPayment.holdingId`（幂等键） | ✓ | 42 文件 / 328 用例 ✓ | ✓ |
+| 5 | `feature/sim-fiscal` | `1d138a6` | 块1 债券状态机 + 块2 破产清算/月结六阶段/12 月 GDP 窗口 + holdingId 幂等补全 | ✓ | 44 文件 / 345 用例 ✓ | ✓ |
 
-- 当前集成分支 HEAD：`da2dcaa`（42 文件 / 328 用例，typecheck/build/vitest 三绿，架构复核日 2026-11-02）。
-- 用例数分阶段口径：块0 `1b1459c` 306 → #40–#43 `2983c2c` 315 → 债券第一批 + UI 第一批 `ee1a949` 328 → 数值参数回填 `da2dcaa` 仍 328（数据/脚本，未增减用例）。
+- 当前集成分支 HEAD：`acf7656`（报告提交；其后仅文档追加，代码合并点仍为 `1d138a6`）。仅文档变更，用例数不变：44 文件 / 345 用例（typecheck/build/vitest 三绿，核对日 2026-11-02）。
+- 用例数分阶段口径：块0 `1b1459c` 306 → #40–#43 `2983c2c` 315 → 债券第一批 `ee1a949` 328 → 数据/UI 合并 `da2dcaa`/`7c5edf7`/`b24afdd` 328 → 块2 `1d138a6` 345。
 - 数值段合并后核对：`aiGovernment` 保持 #43 新键名（`triggerBelowExpenseMonths`/`maxIssuesPerCityMonth`/`topUpToExpenseMonths`/`maxDebtRatioToIssue`），`maxPlanUnitsPerIssue 100_000`，无结构回退。
 
 - 交付分支：`feature/economy-fiscal-balance`；禁止推送 main、禁止 force push。
 - 推送状态：本机无推送凭据（`git push --dry-run` 返回 `could not read Username`），交付以本地完整 SHA + bundle/patch 为准。
+
+## 11. 缺陷与修复记录（架构师维护）
+
+| # | 现象 / 根因 | 处理 | 状态 |
+|---|---|---|---|
+| 1 | `economy-stability` 确定性用例在 index 6 红灯：AI 自动发债的认购序列含 `player`，导致玩家现金被被动扣光、后续投资失败 | sim 批次2 修复（`54e2d7f`）：`maybeAutoIssueGovernmentBond` 认购循环跳过 `holder.kind === 'player'`，玩家买债只能由玩家主动操作 | 已修，345 用例绿 |
+| 2 | `payablesPaid` 把“支付笔数”混入金额累加（`debt.ts:565/578/592/611`），`result.payablesPaid` 可大于 `payablesCreated`，月报统计失真 | 复核发现，归 sim 批次3 修复：金额与笔数分字段统计（详见 `docs/architecture/REVIEW_debt_batch2.md`） | 待修 |
+| 3 | `tests/economy-stability.test.ts` 120 月用例 30s 超时 | `74629d1` 放宽到 60s 并注明定性依据：2 核多 worktree 并行争用 36–40s，基线单跑 12–16s；单跑 3 用例 13.60s 通过 | 已修 |
+| 4 | 贷款分期欠付未计入 `payablesInArrears`：`payGovernmentPayables` 只统计债券两类（`debt.ts:504` 生成 `loanInstalment`；`debt.ts:864-872` 在 `serviceGovernmentLoans` 内回填状态，但其 `inArrears` 未并入 `GovernmentSettlementResult`），月报少计政府贷款欠付 | 归 sim 批次3 修：贷款欠付并入 `payablesInArrears`。注：复核确认 payable 状态有回填，不会“永远 pending” | 待修 |
+| 5 | `scripts/economy-balance-report.ts:68` 使用不存在的 `world.investorGroups`（应为 `world.investors`，见 `types.ts:1852`）；脚本不在 tsconfig 内故 typecheck 未拦住，交付分支上直接运行崩溃 | 数值岗工作区已修，待提交并合入交付分支 | 待修（待合入） |
