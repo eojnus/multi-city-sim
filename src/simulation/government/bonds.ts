@@ -457,6 +457,24 @@ export function accrueBondInterest(
   return total;
 }
 
+
+/** 债券付款幂等键：(issuanceId, holdingId, tick, kind)。同一债权同一 tick 同一 kind 只允许一条流水。 */
+function bondPaymentExists(
+  ledger: BondLedger,
+  issuanceId: string,
+  holdingId: string,
+  tick: number,
+  kind: BondPayment['kind'],
+): boolean {
+  return ledger.payments.some(
+    (payment) =>
+      payment.issuanceId === issuanceId &&
+      payment.holdingId === holdingId &&
+      payment.tick === tick &&
+      payment.kind === kind,
+  );
+}
+
 function nextPaymentId(world: WorldState, ledger: BondLedger, note: string): string {
   const id = `bondpayment-${ledger.nextPaymentNumber}`;
   ledger.nextPaymentNumber += 1;
@@ -514,12 +532,14 @@ export function payBondCoupon(
       holding.accruedInterest = round2(holding.accruedInterest - interest);
       holding.interestPaid = round2(holding.interestPaid + interest);
       remainingCash = round2(remainingCash - interest);
+      if (bondPaymentExists(ledger, issuance.id, holding.id, tick, 'coupon')) continue;
       const payment: BondPayment = {
         id: nextPaymentId(world, ledger, '票息'),
         tick,
         issuanceId: issuance.id,
         cityId: issuance.cityId,
         holder: holding.holder,
+        holdingId: holding.id,
         kind: 'coupon',
         principalPaid: 0,
         interestPaid: interest,
@@ -631,18 +651,21 @@ export function settleBondMaturity(
   let totalInterestPaid = 0;
 
   const makePayment = (
+    holdingId: string,
     holder: BondHolder,
     principal: number,
     interest: number,
     fundedByBankAdvance: boolean,
   ): void => {
     if (principal <= 0.005 && interest <= 0.005) return;
+    if (bondPaymentExists(ledger, issuance.id, holdingId, tick, 'principal')) return;
     const payment: BondPayment = {
       id: nextPaymentId(world, ledger, '到期兑付'),
       tick,
       issuanceId: issuance.id,
       cityId: issuance.cityId,
       holder,
+      holdingId,
       kind: 'principal',
       principalPaid: round2(principal),
       interestPaid: round2(interest),
@@ -668,8 +691,8 @@ export function settleBondMaturity(
     remainingPrincipalTreasury = round2(remainingPrincipalTreasury - principalT);
     remainingPrincipalAdvance = round2(remainingPrincipalAdvance - principalA);
 
-    makePayment(holding.holder, principalT, interestT, false);
-    makePayment(holding.holder, principalA, interestA, true);
+    makePayment(holding.id, holding.holder, principalT, interestT, false);
+    makePayment(holding.id, holding.holder, principalA, interestA, true);
 
     holding.accruedInterest = 0;
     holding.interestPaid = round2(holding.interestPaid + interestT + interestA);
@@ -761,12 +784,14 @@ export function settleBondBankruptcyRedemption(
     }
     const loanId = advance.loan?.id ?? null;
     for (const holding of holdings) {
+      if (bondPaymentExists(ledger, issuance.id, holding.id, tick, 'bankruptcyRedemption')) continue;
       const payment: BondPayment = {
         id: nextPaymentId(world, ledger, '破产兑付'),
         tick,
         issuanceId: issuance.id,
         cityId: city.id,
         holder: holding.holder,
+        holdingId: holding.id,
         kind: 'bankruptcyRedemption',
         principalPaid: holding.principal,
         interestPaid: holding.accruedInterest,

@@ -59,7 +59,7 @@
 |---|---|---|
 | `BondIssuance` 发行批次 | `cityId`、`issuedTick`、`closedTick`、`faceValue`、`couponRateAnnual`、`interestPeriodMonths`、`termMonths`、`planUnits`、`soldUnits`、`unsoldUnits`、`principal`、`maturityTick`、`status`、`lastCouponTick`、`accruedInterest`、`arrearsInterest`、`interestPaid`、`couponsPaid`、`principalRepaid`、`bankAdvancedAmount`、`redeemedTick`、`redemptionReason` | 计划/成交分开；`principal = soldUnits × faceValue`；`unsoldUnits = planUnits − soldUnits`；`accruedInterest`/`arrearsInterest` 为**对账汇总**（权威在持债明细）。批次统计口径（v1.4 #37）：`couponsPaid` 已付票息期数（0–3）、`principalRepaid` 已还本金累计、`bankAdvancedAmount` 累计银行垫付（本金+欠息） |
 | `BondHolding` 持债记录 | `issuanceId`、`holder`、`units`、`principal`、`purchasedTick`、`interestStartTick`、`maturityTick`、`lastCouponTick`、`accruedInterest`、`interestPaid`、`redeemedTick`、`status` | 按“持有人 × 批次 × 购买时点”一条；计息从 `max(purchasedTick, issuedTick)` 起 |
-| `BondPayment` 兑付流水 | `issuanceId`、`holder`、`kind: coupon \| principal \| bankruptcyRedemption`、`principalPaid`、`interestPaid`、`fundedByBankAdvance`、`advanceLoanId` | 逐笔可追溯；同笔债权只兑付一次 |
+| `BondPayment` 兑付流水 | `issuanceId`、`holdingId?`、`holder`、`kind: coupon \| principal \| bankruptcyRedemption`、`principalPaid`、`interestPaid`、`fundedByBankAdvance`、`advanceLoanId` | 逐笔可追溯；幂等键 `(issuanceId, holdingId, tick, kind)`，同笔债权同月同 kind 只兑付一次 |
 | `BondHolder` | `kind: player \| investorGroup \| company` | 首版**银行不得认购国债**；可跨城购买 |
 
 ### 3.2 政府债务与破产（`city.government: CityGovernmentState`）

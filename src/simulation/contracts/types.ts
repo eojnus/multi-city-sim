@@ -1446,6 +1446,11 @@ export interface BondPayment {
   tick: number;
   issuanceId: string;
   cityId: string;
+  /**
+   * 对应 BondHolding.id（v0.7 复核追加，可选以兼容既有存档与调用方）。
+   * 幂等键约定为 (issuanceId, holdingId, tick, kind)：同一债权同一 tick 同一 kind 只允许一条流水。
+   */
+  holdingId?: string;
   holder: BondHolder;
   kind: BondPaymentKind;
   principalPaid: number;
