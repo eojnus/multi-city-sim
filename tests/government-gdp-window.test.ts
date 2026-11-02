@@ -98,7 +98,7 @@ describe('12 个月 GDP 判定窗口', () => {
     const problems = checkInvariants(world).filter((problem) => problem.includes('GDP'));
     expect(problems).toEqual([]);
 
-    const parsed = parseSave(serializeSave(world, 1_700_000_000_000));
+    const parsed = parseSave(serializeSave(world, '2026-11-02T00:00:00.000Z'));
     expect(parsed.ok).toBe(true);
     const restored = parsed.world!;
     const restoredCity = restored.cities[0]!;
