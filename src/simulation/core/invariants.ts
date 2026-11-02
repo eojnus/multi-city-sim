@@ -146,6 +146,8 @@ export function checkInvariants(world: WorldState, audits: GoodsAudit[] = []): s
   problems.push(...checkHouseholds(world));
   problems.push(...checkManagement(world));
   problems.push(...checkBanking(world));
+  // ---- v0.7 政府债务、债券、居民消费金融与 GDP 判定窗口 ----
+  checkGovernmentDebtInvariants(world, problems);
 
   for (const audit of audits) {
     if (Math.abs(audit.endStock - audit.expectedEndStock) > 0.2) {
@@ -797,4 +799,221 @@ function checkBanking(world: WorldState): string[] {
     }
   }
   return problems;
+}
+
+/**
+ * v0.7：政府债务/债券/居民消费金融/GDP 窗口的不变量（只写当前空态也成立的检查）。
+ * 全量口径（DECISIONS v1.1 #11 更正版）：总负债只计一次垫付——
+ *   政府全部银行贷款未偿本金（含 bondAdvance）+ 未偿债券本金 + 已计提未付利息。
+ * 不变量逐项检查，失败时把中文问题串 push 进 problems。
+ */
+export function checkGovernmentDebtInvariants(world: WorldState, problems: string[]): void {
+  const cityIds = new Set(world.cities.map((city) => city.id));
+  const issuanceById = new Map(
+    (world.bonds?.issuances ?? []).map((issuance) => [issuance.id, issuance] as const),
+  );
+
+  // ---- 债券账本 ----
+  if (world.bonds) {
+    const holdingsByIssuance = new Map<string, { units: number; principal: number; accrued: number }>();
+    for (const holding of world.bonds.holdings) {
+      const issuance = issuanceById.get(holding.issuanceId);
+      if (!issuance) {
+        problems.push(`持债记录 ${holding.id}: 引用了不存在的债券批次 ${holding.issuanceId}`);
+        continue;
+      }
+      if (holding.units < 0) problems.push(`持债记录 ${holding.id}: 份数为负`);
+      if (holding.principal < -0.01) problems.push(`持债记录 ${holding.id}: 本金为负`);
+      const expectedPrincipal = round2(holding.units * issuance.faceValue);
+      if (Math.abs(expectedPrincipal - holding.principal) > 0.01) {
+        problems.push(
+          `持债记录 ${holding.id}: 本金 ${holding.principal} 与份数×面额 ${expectedPrincipal} 不一致`,
+        );
+      }
+      const aggregate = holdingsByIssuance.get(holding.issuanceId) ?? {
+        units: 0,
+        principal: 0,
+        accrued: 0,
+      };
+      aggregate.units += holding.units;
+      aggregate.principal = round2(aggregate.principal + holding.principal);
+      aggregate.accrued = round2(aggregate.accrued + holding.accruedInterest);
+      holdingsByIssuance.set(holding.issuanceId, aggregate);
+    }
+    const paymentIds = new Set<string>();
+    for (const payment of world.bonds.payments) {
+      if (paymentIds.has(payment.id)) problems.push(`债券兑付流水 ID 重复：${payment.id}`);
+      paymentIds.add(payment.id);
+      if (!issuanceById.has(payment.issuanceId)) {
+        problems.push(`债券兑付流水 ${payment.id}: 引用了不存在的债券批次`);
+      }
+      if (payment.principalPaid < -0.01 || payment.interestPaid < -0.01) {
+        problems.push(`债券兑付流水 ${payment.id}: 金额为负`);
+      }
+    }
+    for (const issuance of world.bonds.issuances) {
+      if (!cityIds.has(issuance.cityId)) {
+        problems.push(`债券批次 ${issuance.id}: 引用了不存在的城市 ${issuance.cityId}`);
+      }
+      if (issuance.soldUnits < 0 || issuance.soldUnits > issuance.planUnits) {
+        problems.push(`债券批次 ${issuance.id}: 实售份数 ${issuance.soldUnits} 越过 [0, 计划份数]`);
+      }
+      if (issuance.unsoldUnits !== issuance.planUnits - issuance.soldUnits) {
+        problems.push(`债券批次 ${issuance.id}: 未售份数与 计划−实售 不一致`);
+      }
+      const expectedPrincipal = round2(issuance.soldUnits * issuance.faceValue);
+      if (Math.abs(expectedPrincipal - issuance.principal) > 0.01) {
+        problems.push(
+          `债券批次 ${issuance.id}: 本金 ${issuance.principal} 与 实售份数×面额 ${expectedPrincipal} 不一致`,
+        );
+      }
+      if (issuance.accruedInterest < -0.01 || issuance.arrearsInterest < -0.01) {
+        problems.push(`债券批次 ${issuance.id}: 应计/欠付利息为负`);
+      }
+      const aggregate = holdingsByIssuance.get(issuance.id);
+      const aggregateUnits = aggregate?.units ?? 0;
+      const aggregatePrincipal = aggregate?.principal ?? 0;
+      if (issuance.soldUnits !== aggregateUnits) {
+        problems.push(
+          `债券批次 ${issuance.id}: 实售份数 ${issuance.soldUnits} 与持债份数合计 ${aggregateUnits} 不一致`,
+        );
+      }
+      if (Math.abs(issuance.principal - aggregatePrincipal) > 0.01) {
+        problems.push(
+          `债券批次 ${issuance.id}: 本金 ${issuance.principal} 与持债本金合计 ${aggregatePrincipal} 不一致`,
+        );
+      }
+      // 汇总字段与持债明细对账（容差 0.05，吸收逐笔四舍五入）。
+      const aggregateAccrued = aggregate?.accrued ?? 0;
+      if (Math.abs(issuance.accruedInterest - aggregateAccrued) > 0.05) {
+        problems.push(
+          `债券批次 ${issuance.id}: 汇总应计利息 ${issuance.accruedInterest} 与持债明细 ${aggregateAccrued} 不一致`,
+        );
+      }
+    }
+  }
+
+  // ---- 各城政府债务、GDP 窗口 ----
+  for (const city of world.cities) {
+    const window = city.gdpWindow ?? [];
+    if (window.length > 12) problems.push(`${city.name}: GDP 判定窗口超过 12 条`);
+    let lastTick = -Infinity;
+    for (const point of window) {
+      if (point.value < 0) problems.push(`${city.name}: GDP 判定窗口出现负值`);
+      if (typeof point.estimated !== 'boolean') {
+        problems.push(`${city.name}: GDP 判定窗口缺 estimated 标注`);
+      }
+      if (point.estimated && point.tick >= 0) {
+        problems.push(`${city.name}: 估计月 tick ${point.tick} 应为负数`);
+      }
+      if (!point.estimated && point.tick <= 0) {
+        problems.push(`${city.name}: 真实月 tick ${point.tick} 应为正数`);
+      }
+      if (point.tick <= lastTick) {
+        problems.push(`${city.name}: GDP 判定窗口未按 tick 升序`);
+      }
+      lastTick = point.tick;
+    }
+
+    const government = city.government;
+    if (!government) continue;
+
+    // 政府贷款：余额与已还本金一致，垫付贷款合计 = 汇总中的 bankAdvancePrincipal。
+    let ordinaryPrincipal = 0;
+    let advancePrincipal = 0;
+    let loanAccrued = 0;
+    for (const loan of government.loans) {
+      if (loan.outstanding < -0.01) problems.push(`政府贷款 ${loan.id}: 未偿本金为负`);
+      const expected = round2(loan.principal - loan.paidPrincipal);
+      if (Math.abs(expected - loan.outstanding) > 0.01) {
+        problems.push(
+          `政府贷款 ${loan.id}: 未偿本金 ${loan.outstanding} 与已还本金不一致（应 ${expected}）`,
+        );
+      }
+      if (loan.status === 'active' || loan.status === 'writtenOff') {
+        if (loan.purpose === 'bondAdvance') {
+          advancePrincipal = round2(advancePrincipal + loan.outstanding);
+        } else {
+          ordinaryPrincipal = round2(ordinaryPrincipal + loan.outstanding);
+        }
+        loanAccrued = round2(loanAccrued + loan.accruedInterest + loan.arrearsInterest);
+      }
+    }
+
+    // 应付项：金额非负；pending 项不得标记已结清时间。
+    for (const payable of government.payables) {
+      if (payable.principalDue < -0.01 || payable.interestDue < -0.01) {
+        problems.push(`应付项 ${payable.id}: 金额为负`);
+      }
+      if (payable.status === 'pending' && payable.paidTick !== null) {
+        problems.push(`应付项 ${payable.id}: 未结清却有结清 tick`);
+      }
+    }
+
+    // 垫付流水：总额 = 本金 + 利息。
+    for (const advance of government.advances) {
+      const expected = round2(advance.principalAdvanced + advance.interestAdvanced);
+      if (Math.abs(expected - advance.totalAdvanced) > 0.01) {
+        problems.push(`垫付记录 ${advance.id}: 总额与本金+利息不一致`);
+      }
+    }
+
+    // 总负债口径：五段相加，且与政府贷款/持债明细对账（垫付只在 bondAdvance 贷款里计一次）。
+    const summary = government.lastDebt;
+    if (summary) {
+      const segments = round2(
+        summary.bankLoanPrincipal +
+          summary.bankAdvancePrincipal +
+          summary.bondPrincipalOutstanding +
+          summary.loanAccruedInterest +
+          summary.bondAccruedInterest,
+      );
+      if (Math.abs(segments - summary.totalDebt) > 0.05) {
+        problems.push(
+          `${city.name}: 总负债 ${summary.totalDebt} 与五段分子合计 ${segments} 不一致`,
+        );
+      }
+      if (Math.abs(summary.bankAdvancePrincipal - advancePrincipal) > 0.05) {
+        problems.push(
+          `${city.name}: 汇总垫付本金 ${summary.bankAdvancePrincipal} 与垫付贷款未偿合计 ${advancePrincipal} 不一致`,
+        );
+      }
+      if (Math.abs(summary.bankLoanPrincipal - ordinaryPrincipal) > 0.05) {
+        problems.push(
+          `${city.name}: 汇总普通贷款本金 ${summary.bankLoanPrincipal} 与贷款未偿合计 ${ordinaryPrincipal} 不一致`,
+        );
+      }
+      if (Math.abs(summary.loanAccruedInterest - loanAccrued) > 0.05) {
+        problems.push(`${city.name}: 汇总贷款应计利息与贷款明细不一致`);
+      }
+      const judgement = Math.max(1, summary.gdpWindowSum);
+      if (Math.abs(summary.gdpJudgementValue - judgement) > 0.05) {
+        problems.push(`${city.name}: 判定分母 ${summary.gdpJudgementValue} 与 max(1, 窗口合计) 不一致`);
+      }
+      const ratio = summary.totalDebt / Math.max(summary.gdpJudgementValue, 0.0001);
+      if (Math.abs(ratio - summary.debtRatio) > 0.001) {
+        problems.push(`${city.name}: 债务/GDP ${summary.debtRatio} 与 totalDebt/判定分母 不一致`);
+      }
+      if (summary.riskLevel === 'bankrupt' && government.bankruptcy.status !== 'bankrupt') {
+        problems.push(`${city.name}: 汇总标记破产但政府状态不是破产`);
+      }
+    }
+  }
+
+  // ---- 居民消费金融 ----
+  if (world.householdFinance) {
+    const groupIds = new Set(world.households?.groups.map((group) => group.id) ?? []);
+    for (const loan of world.householdFinance.loans) {
+      if (!cityIds.has(loan.cityId)) {
+        problems.push(`居民消费贷款 ${loan.id}: 引用了不存在的城市`);
+      }
+      if (!groupIds.has(loan.groupId)) {
+        problems.push(`居民消费贷款 ${loan.id}: 引用了不存在的居民群体`);
+      }
+      if (loan.outstanding < -0.01) problems.push(`居民消费贷款 ${loan.id}: 未偿本金为负`);
+      if (loan.outstanding > round2(loan.principal - loan.paidPrincipal) + 0.01) {
+        problems.push(`居民消费贷款 ${loan.id}: 未偿本金超过合同本金`);
+      }
+    }
+  }
 }

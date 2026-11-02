@@ -2311,12 +2311,17 @@ const LOAN_PURPOSE_LABELS: Record<BankLoanView['purpose'], string> = {
   expansion: '扩张贷款',
   personal: '个人贷款',
   migratedDebt: '旧债务承接',
+  // v0.7：枚举扩展后的展示文案（接口契约要求，非界面改版）。
+  government: '政府借款',
+  bondAdvance: '债券垫付转借款',
+  householdConsumption: '居民消费贷款',
 };
 
 const LOAN_STATUS_LABELS: Record<BankLoanView['status'], string> = {
   active: '还款中',
   repaid: '已结清',
   defaulted: '已违约',
+  writtenOff: '已核销',
 };
 
 const PROPOSAL_STATUS_LABELS: Record<ProposalView['status'], string> = {

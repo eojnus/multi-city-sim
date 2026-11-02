@@ -1,7 +1,12 @@
 import type {
   City,
+  CityGovernmentState,
+  CityGdpPoint,
   Company,
+  GdpEstimateInfo,
   GoodId,
+  BondState,
+  HouseholdFinanceState,
   MarketState,
   WorldState,
 } from '../contracts/types';
@@ -30,6 +35,7 @@ import {
   recordHouseholdWealthStats,
 } from '../population/household-groups';
 import { createInitialBanking } from '../banking/banking';
+import { laborCapacity } from '../production/production';
 import { createInitialManagement } from '../management/manager-pool';
 
 function createMarket(): Record<GoodId, MarketState> {
@@ -154,6 +160,11 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
       demand: Math.round(seed.totalPopulation * 0.3),
       rentSubsidyPaid: 0,
     },
+    // v0.7：政府债务与破产为全新状态；GDP 窗口在全部企业/市场就绪后统一播种估计值。
+    government: createEmptyGovernmentState(),
+    gdpWindow: [],
+    gdpEstimate: null,
+    bankruptcy: { status: 'solvent', tick: null, recordId: null, debtRatio: null },
   }));
 
   const companies: Company[] = COMPANY_SEEDS.map((seed, companyIndex) => {
@@ -319,6 +330,9 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
     households: { groups: [], lastStats: [] },
     management: { operators: [], playerOperations: [], nextOperatorNumber: 1 },
     banking: createInitialBanking(config),
+    // v0.7：债券与居民消费金融全新建账（空账本；迁移旧档时同样为空+迁移日志）。
+    bonds: createEmptyBondState(),
+    householdFinance: createEmptyHouseholdFinanceState(),
     history: [],
     log: [],
     lastTick: {
@@ -358,6 +372,9 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
         : '由 politics 模块管理。',
     };
   }
+
+  // v0.7：开局 12 个月 GDP 估计（估计值必须标注，不得写成真实历史）。
+  seedOpeningGdpEstimates(world, config);
 
   world.history.push({
     tick: 0,
@@ -432,4 +449,130 @@ function createInitialShareStructure(world: WorldState, config: DemoConfig): voi
 
 export function currentDemoConfig(): DemoConfig {
   return DEMO_CONFIG;
+}
+
+// ---------------------------------------------------------------- v0.7 政府/债券/居民金融空状态与开局 GDP 估计
+
+/** 空的政府债务状态（新世界与 v6→v7 迁移共用）。 */
+export function createEmptyGovernmentState(): CityGovernmentState {
+  return {
+    loans: [],
+    nextLoanNumber: 1,
+    payables: [],
+    nextPayableNumber: 1,
+    advances: [],
+    nextAdvanceNumber: 1,
+    lastDebt: null,
+    bankruptcy: { status: 'solvent', tick: null, recordId: null, debtRatio: null },
+    records: [],
+    settledTicks: [],
+  };
+}
+
+/** 空的债券全局账本。 */
+export function createEmptyBondState(): BondState {
+  return {
+    issuances: [],
+    holdings: [],
+    payments: [],
+    nextIssuanceNumber: 1,
+    nextHoldingNumber: 1,
+    nextPaymentNumber: 1,
+  };
+}
+
+/** 空的居民消费金融状态。 */
+export function createEmptyHouseholdFinanceState(): HouseholdFinanceState {
+  return {
+    loans: [],
+    nextLoanNumber: 1,
+    budgets: [],
+    note: '尚未发生消费预算结算；首次居民消费结算后写入快照。',
+  };
+}
+
+/**
+ * 开局月度 GDP 估计（DECISIONS v1 #6、v1.4 #32，口径冻结，估计值不是真实交易）：
+ *   每城月度估计 = Σ 本城企业 [ q̂ × (产出市场价 − Σ配方投入×市场价) ]
+ *   其中 q̂ = min(capacity, laborCapacity) × utilizationAssumption，**80% 只乘一次**；
+ *   laborCapacity 复用生产模块口径（员工数×人均生产率×技术×技能×政策×laborCapacityFactor）。
+ * 不含工资、贷款、还款与财政拨款。数值只写 city.gdpEstimate / city.gdpWindow，
+ * 不写 city.gdp、不写 gdpHistory。
+ */
+export function estimateCityMonthlyGdp(
+  world: WorldState,
+  city: City,
+  config: DemoConfig,
+): GdpEstimateInfo {
+  const assumption = config.government.gdpEstimate.utilizationAssumption;
+  let monthlyValue = 0;
+  for (const company of world.companies) {
+    if (company.cityId !== city.id) continue;
+    const recipe = RECIPES[company.recipeOutput];
+    const outputPrice = city.market[company.recipeOutput]?.price ?? 0;
+    let inputCost = 0;
+    for (const input of recipe.inputs) {
+      inputCost += input.qty * (city.market[input.good]?.price ?? 0);
+    }
+    const unitValueAdded = Math.max(0, outputPrice - inputCost);
+    // v1.4 #32：q̂ = min(产能, 劳动力可支撑产量) × 80%，80% 只乘一次。
+    const laborOutput = laborCapacity(company, city, config, world);
+    const producible = Math.min(company.capacity, laborOutput);
+    monthlyValue += producible * assumption * unitValueAdded;
+  }
+  const rounded = round2(monthlyValue);
+  return {
+    monthlyValue: rounded,
+    annualValue: round2(rounded * config.government.gdpEstimate.windowMonths),
+    utilizationAssumption: assumption,
+    minAnnualGdp: config.government.fiscalRisk.minAnnualGdp,
+    method: config.government.gdpEstimate.method,
+    createdAtTick: world.time.tick,
+    note: '开局 12 个月估计值（同一数值填入），真实月度 GDP 到来后从最早月份逐月替换；估计值不是真实交易。',
+  };
+}
+
+/**
+ * 构建 12 个月 GDP 判定窗口：
+ * - 真实月份优先（按 tick 升序取最近 windowMonths 条，estimated=false）；
+ * - 不足部分用开局估计补齐（estimated=true，tick 取 -missing…-1，表示游戏开始前的估计月）；
+ * - 返回按 tick 升序的最多 windowMonths 条。
+ * 迁移与开局共用同一函数，保证口径一致。
+ */
+export function buildGdpWindow(
+  world: WorldState,
+  city: City,
+  config: DemoConfig,
+  realPoints: CityGdpPoint[],
+): { points: CityGdpPoint[]; estimate: GdpEstimateInfo } {
+  const windowMonths = config.government.gdpEstimate.windowMonths;
+  const estimate = estimateCityMonthlyGdp(world, city, config);
+  const real = realPoints
+    .filter((point) => !point.estimated)
+    .sort((a, b) => a.tick - b.tick)
+    .slice(-windowMonths)
+    .map((point) => ({ tick: point.tick, value: point.value, estimated: false }));
+  const missing = Math.max(0, windowMonths - real.length);
+  const estimates: CityGdpPoint[] = [];
+  for (let index = missing; index > 0; index -= 1) {
+    estimates.push({ tick: -index, value: estimate.monthlyValue, estimated: true });
+  }
+  return { points: [...estimates, ...real], estimate };
+}
+
+/**
+ * 新世界播种：每城 12 条估计值；真实历史为空（新开局 city.gdp 初始为 0，不得用首月实际 GDP×12）。
+ * 迁移入口复用 buildGdpWindow（真实历史优先，缺口用估计填补并标注）。
+ */
+export function seedOpeningGdpEstimates(world: WorldState, config: DemoConfig): void {
+  for (const city of world.cities) {
+    const realPoints: CityGdpPoint[] = city.gdpHistory.map((point) => ({
+      tick: point.tick,
+      value: point.value,
+      estimated: point.estimated === true,
+    }));
+    const { points, estimate } = buildGdpWindow(world, city, config, realPoints);
+    city.gdpWindow = points;
+    city.gdpEstimate = estimate;
+  }
 }

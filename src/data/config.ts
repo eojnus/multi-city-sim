@@ -37,6 +37,12 @@ export const DEMO_CONFIG = {
       '【暂定】存款月息 0.10%、周转贷款 0.50%/24 月、扩张贷款 0.60%/36 月、个人贷款 0.60%/24 月；等额本金、次月起还。',
       '【暂定】逾期宽限 1 个月，第 2 个月仍欠付标记违约；首版不加罚息、不收提前还款费。',
       '【暂定】旧 company.debt 迁移为银行承接贷款，利息与还款从此有对手方与留痕。',
+      '【暂定】债券面额 1,000/份、整数份成交；票面年利率 4%、每满 12 个月付息、期限 36 个月；仅实售份数形成债务。',
+      '【暂定】政府普通银行贷款 0.50%/24 月等额本金；银行强制垫付转贷款 0.50%/24 月，不受授信限制。',
+      '【暂定】总负债 = 银行贷款未偿本金 + 银行垫付未偿余额 + 未偿债券本金 + 已计提未付利息；债务/GDP ≥ 100% 破产。',
+      '【暂定】开局 12 个月 GDP 估计 = 理论产量 × 80% ×（产出单价 − 单位投入成本）；最小年 GDP 判定值 1。',
+      '【暂定】居民消费预算 = 上月收入 × 80% + 手头现金 × 5%（受现金约束）；消费贷款额度 = 群体财产 × 50%。',
+      '【暂定】旧档负财政余额在 v6→v7 迁移中等额转为政府银行贷款、财政余额归零，不额外发放现金。',
     ],
   },
   simulation: {
@@ -413,6 +419,35 @@ export const DEMO_CONFIG = {
     tierThresholds: { middle: 15_000, high: 60_000 },
     /** 展示用：保留最近几个月的阶层统计。 */
     maxStatsMonths: 24,
+    /** v0.7：居民消费预算首版公式（暂定；用户未确认具体数值）。 */
+    consumerBudget: {
+      /** 参考消费额中的上月实际可支配收入比例（首版 80%）。 */
+      lastIncomeShare: 0.8,
+      /** 参考消费额中的当时手头现金比例（首版 5%）。 */
+      cashShare: 0.05,
+      /** 是否把银行存款自动计入现金预算（首版 false：只用现金，不偷偷把存款复制到手头）。 */
+      depositsIncluded: false,
+    },
+    /** v0.7：居民群体消费贷款/授信（与玩家个人贷款配置分开；默认值数值岗定）。 */
+    householdCredit: {
+      /** 月利率 0.60%（名义年化 7.2%），与玩家个人贷款同档。 */
+      rateMonthly: 0.006,
+      termMonths: 24,
+      /** 额度 = max(0, 群体财产基准) × 该比例（与银行个人授信同口径 50%）。 */
+      creditLimitRate: 0.5,
+      /** 单笔最低金额（信用点）。 */
+      minLoanAmount: 100,
+      /** v1.4 #35：新授信冻结条件——存在未结清违约合同时不得新增消费贷。 */
+      denyWhenDefaulted: true,
+      /** v1.4 #35：连续欠付达到该月数时不得新增消费贷（宽限沿用 banking.graceMonths，不新开 grace 键）。 */
+      denyWhenArrearsMonthsAtLeast: 2,
+      /** 每群体每月最多新增贷款笔数，防止拆单绕过额度。 */
+      maxLoansPerGroupPerMonth: 1,
+      /** 无资产无抵押信用默认关闭（仅作额度口径占位；实际授信条件以 #35 为准）。 */
+      allowUnsecuredNoAsset: false,
+    },
+    /** 消费预算快照保留月数（审计、界面与测试用）。 */
+    budgetSnapshotMonths: 24,
     /** 群体名称（界面展示用，不含模拟规则）。 */
     labels: {
       management: '管理层',
@@ -473,6 +508,113 @@ export const DEMO_CONFIG = {
     /** 手动模式持续计划的有效月数（到期后需要玩家重新设定）。 */
     standingPlanMonths: 12,
   },
+  /**
+   * v0.7：政府债券、政府银行债务、财政风险与破产。
+   * 所有数值均为「首版暂定方案」，不是用户已确认的策划规则；集中在此处便于数值岗整段替换。
+   */
+  government: {
+    /** 债券市场参数（面额/票息/期限/付息周期；数值为暂定，数值岗可整段替换）。 */
+    bondMarket: {
+      /** 面额：1,000 信用点/份；发行与认购都以整数份为单位。 */
+      faceValue: 1000,
+      /** 票面年利率 4%（按年化、按月计提）。 */
+      couponRateAnnual: 0.04,
+      /** 付息周期：每满 12 个月支付一次已计提利息。 */
+      interestPeriodMonths: 12,
+      /** 期限：36 个游戏月。 */
+      termMonths: 36,
+      /** 单次发行计划上限（份/城/次），防止误操作把债务放大到不可解释。 */
+      maxPlanUnitsPerIssue: 10_000,
+      /** 同一城市两次发行之间的最小间隔（月）；0 表示可连续发行。 */
+      minMonthsBetweenIssues: 1,
+      /** 单次实际售出占计划份数的上限（1 = 允许全部售出）。 */
+      maxSoldRatio: 1,
+      /** 认购主体排序（确定性顺序；是否认购仍由各自真实可用资金与策略决定）。 */
+      subscriptionOrder: ['player', 'investorGroup', 'company'],
+      /** 是否按风险等级调整票面利率（首版固定票面利率，暂不做风险定价）。 */
+      riskPricedCoupon: false,
+      /** 首版银行不得认购国债（任务书列举主体为玩家/居民投资实体/企业，DECISIONS v1.2 #21）。 */
+      allowBankSubscription: false,
+      /** 认购窗口：发行当月一次撮合，不跨月续售（DECISIONS v1.2 #21）。 */
+      singleMonthSubscription: true,
+      /** 12/24 月票息财政不足时不垫付、记欠付利息；36 月到期与破产才由银行无条件垫付（#19）。 */
+      couponGuaranteedByBank: false,
+    },
+    /**
+     * v1.4 #23/#37：企业认购国债的流动性保留口径（数值岗：各留 1 个月）。
+     * 可用于购债上限 = 企业现金 − 上月实发工资 × wageMonths − 上月应付利息 × interestMonths；低于 0 不可认购。
+     */
+    companyPurchaseReserve: {
+      wageMonths: 1,
+      interestMonths: 1,
+    },
+    /** 政府普通银行贷款（沿用现有银行规则：等额本金、次月起还、月利率计提）。 */
+    loan: {
+      /** 月利率 0.50%（名义年化 6.0%），沿用企业周转贷款口径。 */
+      rateMonthly: 0.005,
+      termMonths: 24,
+      /** 单笔最低金额（信用点）。 */
+      minAmount: 10_000,
+      /** 是否允许政府主动申请贷款（首版允许，用于维持性支出与周转）。 */
+      allowActiveBorrowing: true,
+    },
+    /** 银行强制垫付转为政府贷款的口径；额度不受任何授信限制。 */
+    advance: {
+      rateMonthly: 0.005,
+      termMonths: 24,
+      /** 垫付时是否立即形成新贷款合同（首版 true；垫付必须逐笔可追溯）。 */
+      createLoanContract: true,
+    },
+    /** 财政风险分档与破产门槛（50/75/100 分档；首版展示参数，不提前触发破产）。 */
+    fiscalRisk: {
+      /** < 50% 正常。 */
+      normalBelow: 0.5,
+      /** 50%–75% 关注。 */
+      watchBelow: 0.75,
+      /** 75%–100% 高风险；≥ 100% 破产。 */
+      bankruptAt: 1.0,
+      /** 最小年 GDP 判定值（防除零；只用于计算，不创造产出与现金）。 */
+      minAnnualGdp: 1,
+      /** 趋势容差：比率变化绝对值小于该值视为持平。 */
+      trendEpsilon: 0.005,
+    },
+    /** 开局 12 个月 GDP 估计（估计值必须标注，不得当作真实历史）。 */
+    gdpEstimate: {
+      /** 理论可生产量 × 该利用率假设（首版暂定 80%）。 */
+      utilizationAssumption: 0.8,
+      /** 破产判定窗口月数。 */
+      windowMonths: 12,
+      /** 估算口径（写入存档 gdpEstimate.method；文字不是数值参数）。 */
+      method:
+        '企业理论产出价值 − 中间投入价值（Σ 企业产能 × 利用率假设 ×（产出单价 − 单位投入成本）），不含工资、贷款、还款与财政拨款',
+    },
+    /** 破产与重选（团队暂定：判定当月结算内立即触发重选；过渡期现任市长看守、仅维持性操作）。 */
+    bankruptcy: {
+      triggerElectionSameTick: true,
+      /** 破产政府持股分配：无 CEO 时在除破产政府外的现有股东之间按股东主体数量平均分配。 */
+      shareDistribution: 'byHolderCount',
+      /** 无 CEO 且无其他股东时的无表决权托管持股（不得销毁或增发）。 */
+      custodyShareKind: 'nonVoting',
+    },
+    /**
+     * AI 政府的自动发债策略占位（首版默认关闭；数值与阈值由数值岗给）。
+     * 只影响 AI 市长操作，不改变契约；开启前需游戏程序设计稿确认。
+     */
+    aiGovernment: {
+      /** 是否允许 AI 市长自动发债（首版 false；数值岗给 {0.5, 1.0, 1}，含义待确认）。 */
+      enabled: false,
+      /** 触发阈值：财政余额低于该值（信用点）时考虑发债（数值岗给 1.0，暂按信用点理解）。 */
+      autoIssueWhenTreasuryBelow: 1.0,
+      /** 每次自动发行的计划份数（整数份；数值岗给 1）。 */
+      autoIssuePlanUnits: 1,
+      /** 仅当债务/GDP 低于该比例时允许自动发债，防止破产前继续举债（数值岗给 0.5）。 */
+      maxDebtRatioToIssue: 0.5,
+    },
+    /** 应付项保留月数（同月幂等与审计）。 */
+    payableRetentionMonths: 24,
+    /** 破产记录保留条数。 */
+    maxBankruptcyRecords: 8,
+  },
   /** v0.4：独立银行系统（资金无限、不会倒闭；额度由财产/市值决定）。 */
   banking: {
     /** 活期存款月利率 0.10%（名义年化 1.2%）。 */
@@ -483,6 +625,12 @@ export const DEMO_CONFIG = {
       expansion: { rateMonthly: 0.006, termMonths: 36, label: '企业扩张贷款' },
       personal: { rateMonthly: 0.006, termMonths: 24, label: '玩家个人贷款' },
       migratedDebt: { rateMonthly: 0.005, termMonths: 12, label: '旧债务承接' },
+      /** v0.7：政府银行借款（权威账本在 city.government.loans，银行台账仅展示口径）。 */
+      government: { rateMonthly: 0.005, termMonths: 24, label: '政府借款' },
+      /** v0.7：债券到期/破产时银行无条件垫付形成的政府借款。 */
+      bondAdvance: { rateMonthly: 0.005, termMonths: 24, label: '债券垫付转借款' },
+      /** v0.7：居民群体消费贷款（权威账本在 world.householdFinance.loans）。 */
+      householdConsumption: { rateMonthly: 0.006, termMonths: 24, label: '居民消费贷款' },
     },
     /** 授信上限 = 授信基准 × 该比例。 */
     creditLimitRate: 0.5,
