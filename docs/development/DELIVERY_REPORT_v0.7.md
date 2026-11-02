@@ -206,10 +206,13 @@ totalDebt = bankLoanPrincipal          // 普通政府贷款未偿本金
 |---|---|---|---|---|---|
 | 0 | `feature/arch-foundation`（块0） | `1b1459c`（块0）、`22adfc4`（报告骨架） | ✓ | 40 文件 / 306 用例 ✓ | ✓ |
 | 0b | `feature/arch-foundation`（#40–#43） | `2983c2c`（秘书处合入，含 `19e394c`/`74629d1`/`5fec771`/`73b8ce5`/`9011ad9`） | ✓ | 41 文件 / 315 用例 ✓ | ✓ |
-| 1 | `feature/sim-fiscal` | 待填 | — | — | — |
-| 2 | `feature/data-tuning` | 待填 | — | — | — |
-| 3 | `feature/ui-fiscal` | 待填 | — | — | — |
+| 1 | `feature/sim-fiscal`（债券第一批） | `ee1a949`（含 `6bdcea1` 合 arch、`df7dd1d` 状态机） | ✓ | 42 文件 / 328 用例 ✓ | ✓ |
+| 2 | `feature/data-tuning` | 待填（数值岗 `bb46ff6` 已在自身分支，未合） | — | — | — |
+| 3 | `feature/ui-fiscal` | `644085a`（秘书处提前合入第一批；独立用例数未单记） | ✓ | 与 sim 合并后合计 42 文件 / 328 用例 ✓ | ✓ |
 | 4 | `qa/acceptance` | 待填 | — | — | — |
+
+- 当前集成分支 HEAD：`ee1a949`（42 文件 / 328 用例三绿）；块0 时为 40 文件 / 306 用例，分阶段数据如下口径。
+- 用例数分阶段口径：块0 `1b1459c` 306；#40–#43 `2983c2c` 315；债券第一批 + UI 第一批 `ee1a949` 328。
 
 - 交付分支：`feature/economy-fiscal-balance`；禁止推送 main、禁止 force push。
 - 推送状态：本机无推送凭据（`git push --dry-run` 返回 `could not read Username`），交付以本地完整 SHA + bundle/patch 为准。
