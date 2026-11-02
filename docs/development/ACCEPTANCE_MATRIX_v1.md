@@ -1,7 +1,7 @@
 # 验收矩阵 v1 — 经济与财政系统
 
-- 版本：v1（规划稿，尚未执行）
-- 基线：`9cef5b5`（= 任务书参考基线，v0.6.0，`SAVE_FORMAT_VERSION = 6`）
+- 版本：v1（终稿；交付前最后一轮已执行，结果见 §1.7 与 `ACCEPTANCE_RESULTS_v0.7.md`）
+- 基线：规划时 `9cef5b5`（v0.6.0，`SAVE_FORMAT_VERSION = 6`）；**最终验收基线 `21e699a`**（qa merge `78cfc2c`）
 - 工作区：`project/wt/qa`，分支 `qa/acceptance`
 - 依据：`briefs/Game3_Combined_Brief.md` §八（验证与交付标准）、`briefs/SUPPLEMENT_ARCHITECT_v1.md`、`briefs/DECISIONS_v1.md`、`TEAM_RULES.md`
 - 口径优先级：补充指令 > 合并版任务书 > `DECISIONS_v1` > 仓库 `docs/design/GAME_DESIGN_DISCUSSIONS.md`（仅背景）
@@ -210,6 +210,19 @@
 - AC-E07 手工改群体收入后需同步 `lastMonth.netCashChange` 才能通过 `parseSave` 不变量校验（测试夹具修正）。
 - 契约文档歧义（已按 DECISIONS #26 执行）：`ConsumerBudgetSnapshot.effectiveBudget` 类型注释写“= cashBudget + loanAvailable”，实现为 `= cashBudget`；D/E 测试与实现一致，建议架构文档修正注释。
 
+### 1.7 第六轮（交付前最后一轮）验收执行记录（2026-11-02，交付分支 `21e699a` 合入 `qa/acceptance` = `78cfc2c`）
+
+- `git merge 21e699a` → qa **`78cfc2c`**（含 sim `3d0d21b` AC-F08 修复：到期兑付把财政段与垫付段合并为一次支付+一次入账）。
+- 基线：`npm run typecheck` ✓ 退出 0；`npm run build` ✓ 退出 0；业务 `npx vitest run --exclude 'tests/acceptance/**' --no-file-parallelism` **45 文件 / 366 用例全过**。
+- 验收：`npx vitest run tests/acceptance --no-file-parallelism` → **11 文件 / 101 用例全过（101/101，0 红）**。
+  - 重点回归：**AC-F08 转绿**（`principalRepaid=10,000`、持有人净收 11,200）；B12/B14 三条货币守恒仍绿；D/E/G/H/I 无回退。
+  - H 组存档矩阵 v1–v6 → v7 往返 14 条 + 读档重复结算 3 条全绿（`migration-v7.test.ts`、`settlement-resume.test.ts`）。
+- 桌面走查（Xvfb :99 1600x1000x24 + `--no-sandbox --disable-dev-shm-usage`，窗口 1440×900，最终构建）：
+  - 新脚本 `scripts/acceptance-final.cjs` → `artifacts/qa-final/`：**8 张 + manifest.json**（逐张 sha256 / city / 身份 / tick / dom 摘要，consoleErrors=[]）。覆盖市民受限态（`fiscal-restricted`）与市长财政面板（`mayor-fiscal-panel`）同城同 tick 对照、债券市场发行/认购（计划 200 份、认购 20 份后 `soldUnits=20`、`totalDebt=20,066.67`）、月度报告非市长财政列占位、市长区域卡片仍无财政。
+  - `scripts/smoke-main.cjs` → **退出 0**：27 项交互、存档 formatVersion=7、存读档日期一致（2027-02）、1100 宽无横向溢出、损坏自动存档安全降级（“自动存档已暂停”、字节保留）；`errors` 仅 8 条 WebGL 软件回退告警（无头噪声）。合并结果存 `artifacts/qa-final/smoke-main.json`。
+- 唯一红条清单：**无**。历史红条（B12/B14、I07、G04、F08）均已在后续分支修复并复验核销。
+- 收敛文档：本轮结果表见 `docs/development/ACCEPTANCE_RESULTS_v0.7.md`（交付报告 §9 引用）。
+
 ## 2. 验收矩阵
 
 图例：优先级 P0 = 交付前必须通过（失败即阻断）；P1 = 应通过，失败须书面说明缺口；P2 = 观察项/一致性检查。
@@ -299,7 +312,7 @@
 | AC-F05 | 破产幂等 | 同一结算点只清算一次；重复结算/重复 tick 不重复破产、不重复选举 | IT | 二次调用后状态不变断言 | P0 | 已执行→通过（重复结算/重复 tick 状态不变） |
 | AC-F06 | 提前兑付未到期债券 | 破产时立即兑付未到期本金（+ 计提未付利息）；已兑付不得在 36 月到期时重复付 | IT | 兑付次数/金额断言 | P0 | 已执行→通过（F06 + F-R3：12 期提前兑付；到期不重复付） |
 | AC-F07 | 债务勾销 | 原政府银行贷款 + 垫付贷款一并勾销；不新增现金；不保留为政府债务 | IT | 勾销前后负债/现金断言 | P0 | 已执行→通过（F07 + F-R5：12 笔 bondAdvance + 6 笔政府贷款勾销、未偿清零、不新增现金） |
-| AC-F08 | 同月到期 + 破产 | 到期债券与提前兑付债券各只付一次；先兑付后勾销；无重复支付/重复计债 | IT | 同月场景账目断言 | P0 | 已执行→红（实现有 bug：同月“财政 8,800 + 垫付 1,200”两段兑付，`src/simulation/government/bonds.ts:672` 幂等键 `(issuanceId,holdingId,tick,'principal')` 不含出资来源，第二段被丢弃：流水只记 8,800、`principalRepaid=8,800`（应 10,000），持有人少收 1,200） |
+| AC-F08 | 同月到期 + 破产 | 到期债券与提前兑付债券各只付一次；先兑付后勾销；无重复支付/重复计债 | IT | 同月场景账目断言 | P0 | 已执行→通过（`21e699a` 修复：财政段+垫付段合并为一次支付一次入账；断言 `principalRepaid=10,000`、持有人净收 11,200；复跑 `bankruptcy.test.ts` 14/14 绿） |
 | AC-F09 | 有 CEO 分股（Brief §4.1.6） | 政府股份全部转给现任 CEO（玩家或 AI）；保留权利类别；发行总量不变；不转给 CEO 所经营的公司 | UT | 持股表断言 | P0 | 已执行→通过（有 CEO：政府股份全部转 CEO，总量不变） |
 | AC-F10 | 无 CEO 分股（Brief §4.1.6） | 除破产政府外现有股东按主体数量平分（非按比例）；余数按可复现固定顺序；其他政府算一个主体 | UT | 持股断言（含不整除场景） | P0 | 已执行→通过（无 CEO：按主体数量平分、余数固定顺序、其他政府算一个主体） |
 | AC-F11 | 无股东兜底 | 无 CEO 且无其他股东时，无表决权托管持股保存，不销毁不增发 | UT | 持股总量断言 | P1 | 已执行→通过（无股东兜底：托管持股保存，不销毁不增发） |
@@ -360,7 +373,7 @@
 | --- | --- | --- | --- | --- | --- | --- |
 | AC-J01 | 启动与稳定性（Brief §六、§八.2） | `Xvfb :99 -screen 0 1600x1000x24` + `electron --no-sandbox --disable-dev-shm-usage scripts/acceptance-fiscal.cjs` 启动成功；无 renderer gone、无应用级 console error（WebGL 软件回退/ReadPixels 性能提示按无头环境噪声记录，不计为应用错误） | DESK | 启动日志 + 错误分类清单 + 截图 | P0 | 已执行→通过（smoke-main 27 项、fiscal-ui 22/22、acceptance-desktop 18/18 退出 0；console 仅 2 条 WebGL 软件回退告警，按无头噪声记录） |
 | AC-J02 | 导航与基础操作 | 区域 → 城市 → 返回；HUD 日期/GDP/现金更新；时间推进 | DESK | 截图 + DOM 读数 JSON | P1 | 已执行→通过（smoke-main：区域→城市→返回、HUD 日期/GDP/现金、时间推进） |
-| AC-J03 | 发债操作 | 市长面板显示发债入口；认购 → 部分成交 → 未售出金额 → 政府资金到账；非市长无入口 | DESK | 截图 + 前后数值 JSON | P0 | 部分通过（走查 05/06：发债 200 份→认购 20→次月 active、财政到账；部分成交/未售未在桌面覆盖） |
+| AC-J03 | 发债操作 | 市长面板显示发债入口；认购 → 部分成交 → 未售出金额 → 政府资金到账；非市长无入口 | DESK | 截图 + 前后数值 JSON | P0 | 部分通过（`qa-final` 05/06 + 块2 走查：发债计划 200 份→认购 20 份→次月 active、财政到账、总负债 20,066.67；**部分成交/未售**未在桌面覆盖） |
 | AC-J04 | 债券到期 | 推进 36 个月，持有人收到本息；到期状态与账目一致 | DESK | 截图 + tick 序列数据 | P0 | 未完成（36 月桌面推进未执行；到期单测 B10 已通过） |
 | AC-J05 | 银行垫付 | 政府余额不足场景仍足额兑付；面板说明垫付 | DESK | 截图 + 贷款/负债读数 | P0 | 未完成（桌面垫付场景未造；B12 实现缺口未修，桌面复验待修复后） |
 | AC-J06 | 风险预警 | 分级颜色 + 文字 + 环比方向；仅市长可见 | DESK | 截图（市长/非市长对比） | P1 | 部分通过（走查 04：normal 档 + 环比占位；high/破产档未桌面覆盖） |
@@ -368,8 +381,8 @@
 | AC-J08 | 权限视图 | 同城非市长逐页面 DOM 断言无敏感字段；A/B 城切换；换任后立即变化 | DESK | DOM 断言 JSON + 截图 | P0 | 已执行→通过（fiscal-ui 22/22 + leaks-after 7/7 + after-block2 7 张 DOM 断言） |
 | AC-J09 | 存读档 | 保存 → 推进 → 读取日期/数据一致；重启恢复自动存档；不覆盖用户存档 | DESK | 截图 + 读数 JSON + 文件字节 | P0 | 已执行→通过（smoke-main：存档→推进→读档日期一致；损坏自动存档安全降级） |
 | AC-J10 | 窗口尺寸 | 1100×700 无横向溢出、文字不裁切 | DESK | `scrollWidth ≤ innerWidth + 2` + 截图 | P2 | 已执行→通过（fiscal-ui 1100×700：`scrollWidth ≤ innerWidth`） |
-| AC-J11 | 截图清单 | 归档 `artifacts/`，命名与步骤对应；注明无头环境与分辨率局限 | DESK | 截图路径清单 | P1 | 已执行→通过（`artifacts/{qa-before,qa-after,qa-after-block2,ui-fiscal,acceptance-*}` 清单见 §4） |
-| AC-J12 | 缺口如实报告 | 无法完成项写明原因、已尝试方式、替代证据；不用单测冒充 UI 验收 | AUDIT | 报告缺口章节 | P0 | 待执行 |
+| AC-J11 | 截图清单 | 归档 `artifacts/`，命名与步骤对应；注明无头环境与分辨率局限 | DESK | 截图路径清单 | P1 | 已执行→通过（`artifacts/{qa-final,qa-before,qa-after,qa-after-block2,ui-fiscal,acceptance-*}` 清单见 §4） |
+| AC-J12 | 缺口如实报告 | 无法完成项写明原因、已尝试方式、替代证据；不用单测冒充 UI 验收 | AUDIT | 报告缺口章节 | P0 | 部分通过（缺口已在 §4 与 `ACCEPTANCE_RESULTS_v0.7.md` §5 如实披露；交付报告缺口章节待撰写人引用） |
 
 ### K. 交付报告（Brief §八.3–8.5 + SUPP §8）
 
@@ -415,7 +428,7 @@
 | `company-bond-subscription.test.ts` | AC-C01–C05 | 5 条，全绿。 |
 | `household-consumption.test.ts` | AC-D01–D09 | 9 条，全绿（消费预算/四层分账/群体隔离/供给不足/守恒）。 |
 | `household-loans.test.ts` | AC-E01–E08 | 8 条，全绿（额度/无资产/真实债务/不借多余钱/违约/迁移/读档幂等/需求分层）。 |
-| `bankruptcy.test.ts` | AC-F01–F14 | 14 条，13 绿 / 1 红（F08 同月两段兑付被幂等键吞掉）。 |
+| `bankruptcy.test.ts` | AC-F01–F14 | 14 条，全绿（AC-F08 于 `21e699a` 修复后转绿）。 |
 | `bankruptcy-real-run.test.ts` | AC-F01/F04/F06/F07/F09–F13 的真实样本交叉验证 | 8 条，全绿（块3/4 后新固定样本，见 §1.6：岚港 t27）。 |
 | `gdp-estimate.test.ts` | AC-G01–G08 | 8 条，全绿。 |
 | `migration-v7.test.ts` | AC-H01–H07 | 14 条，全绿。 |
@@ -424,15 +437,16 @@
 | `scripts/acceptance-leaks-before.cjs` | AC-I07、LK-1–6 | 修复前证据采集（已执行），产物 `artifacts/qa-before/`。 |
 | `scripts/acceptance-leaks-after.cjs` | LK-1–5、AC-I07a–e | 修复后同机位复拍 + 7/7 断言（已执行），产物 `artifacts/qa-after/`。 |
 | `scripts/acceptance-after-block2.cjs` | AC-I01–I04、J03、J06、J08 | 块2 桌面证据 7 张 + manifest（已执行），产物 `artifacts/qa-after-block2/`。 |
+| `scripts/acceptance-final.cjs` | AC-I01–I04、J03、J04 发行/认购、J08 | 最终轮桌面证据 8 张 + manifest（sha256/city/身份/tick/DOM），产物 `artifacts/qa-final/`。 |
 | `scripts/smoke-main.cjs`（代码组已有） | AC-J01/J02/J09/J10 | 27 项交互通过（已执行）。 |
 | `scripts/smoke-fiscal-ui.cjs`（UI 块4 随附） | AC-J08/J10、AC-I07 | 22/22 通过（已执行），产物 `artifacts/ui-fiscal/`。 |
 | `scripts/acceptance-desktop.cjs` | AC-J01/J02 | 18/18 通过（已执行），产物 `artifacts/acceptance-*.png`。 |
 | `docs/development/ACCEPTANCE_MATRIX_v1.md` | — | 本文件。 |
-| `docs/development/ACCEPTANCE_REPORT_v1.md` | AC-K01–K10 | 交付前填写。 |
+| `docs/development/ACCEPTANCE_RESULTS_v0.7.md` | AC-K01–K10 | 最终结果表（组别/用例数/通过/失败/证据路径），交付报告 §9 引用。 |
 
-当前验收用例总数 **101**（业务基线 363 之外）；P0 余红 **1 条（AC-F08）**，已按 file:line 定位并报秘书处（§1.6）。
+当前验收用例总数 **101**（业务基线 366 之外）；**P0 余红 0 条**（AC-F08 于 `21e699a` 修复并复验通过，§1.7）。
 
-预计新增用例约 90–110 个；加上现有 306 个，集成后全量目标约 400+ 用例。
+规划值约 90–110 个，实际落地 101 个；最终构建全量 = 业务 366 + 验收 101 = 467 用例。
 
 ---
 
@@ -442,7 +456,7 @@
 
 **环境修复记录**：`/var/lib/xkb` 原为指向沙箱外不可写路径的符号链接，Xvfb 启动报 `Cannot open "/var/lib/xkb/server-99.xkm"` 后段错误；用一次 `danger-full-access` 执行 `rm -f /var/lib/xkb && mkdir -p /var/lib/xkb && chmod 1777 /var/lib/xkb` 后恢复。另注意：清理 Xvfb 不能用 `pkill -f "Xvfb :99"`（会匹配到执行该命令的 shell 自身，SIGTERM 掉整条作业），改用 `pgrep -x Xvfb | xargs -r kill`。
 
-> **第五轮状态（`65c4c28`）**：本轮未重跑桌面脚本（J04 到期/J05 垫付/J07 破产重选仍待 UI“债券期”截图与 AC-F08 修复后复验）；下列产物均产出于块3/4 合入**之前**，仍可作历史证据但已非现行构建。`artifacts/` 被 `.gitignore` 忽略，仅磁盘留档。
+> **第六轮（最终）状态（`21e699a` = qa `78cfc2c`）**：已重跑桌面走查，修后证据在 `artifacts/qa-final/`（8 张 + manifest，含市民/市长同城同 tick 对照、债券市场发行与认购）与 `artifacts/smoke-main.json`（27 项交互、存读档、损坏档降级，退出 0）。下表 `qa-before`/`qa-after`/`qa-after-block2` 产物为历史轮次留档，非现行构建。`artifacts/` 被 `.gitignore` 忽略，仅磁盘留档。
 
 
 | 产物目录 | 脚本 | 张数/断言 | 内容 |
@@ -452,8 +466,9 @@
 | `artifacts/qa-after-block2/` | `acceptance-after-block2.cjs` | 7 张 + manifest（sha256/身份/DOM）；7/7 断言 | 非市长：区域卡片无财政、政府章节受限、月报财政列“—”；市长：财政面板、债券市场、认购 20 份后推进 1 月、月报仅本市有财政 |
 | `artifacts/ui-fiscal/` | `smoke-fiscal-ui.cjs` | 15 张；22/22 检查 | 城市卡片、非市长/市长政府面板、跨城不泄漏、通知过滤、月报财政列、读档市长身份、GDP 窗口 12 行、债券市场空态、1100×700 |
 | `artifacts/acceptance-*.png` | `acceptance-desktop.cjs` | 11 张；18/18 检查 | v0.5 九组操作（区域/城市/阶层/操作模式/贷款/选举/银行/存读档） |
+| `artifacts/qa-final/` | `acceptance-final.cjs` | 8 张 + manifest（sha256/身份/tick/DOM）；consoleErrors=0 | 市民受限态 vs 市长财政面板（同城同 tick）、债券发行 200 份/认购 20 份后结算、月报财政列、区域卡片无财政 |
 
-**缺口（如实记录）**：J04（36 月桌面到期）、J05（桌面垫付）、J07（桌面破产重选）、F14 high/破产档面板截图未完成；原因：需长时桌面推进或注入高负债，本轮以单测/真实 36 月脚本替代，交付报告将在缺口章节注明。
+**缺口（如实记录）**：J04 仅覆盖“发行/认购”桌面路径，**36 月桌面到期**未走；J05（桌面垫付）、J07（桌面破产重选）仍未做桌面截图；F14 high/破产档面板截图未完成。原因：需桌面连续推进 36 月或注入高负债，本轮以单测 + 真实 36 月脚本（`bankruptcy-real-run.test.ts`）+ 债券市场桌面路径替代，交付报告需在缺口章节注明。
 
 ## 5. 证据与判定规范
 
