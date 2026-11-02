@@ -12,8 +12,10 @@ import {
 } from '../src/simulation/government/bonds';
 import {
   borrowForGovernment,
+  buildGovernmentPayables,
   distributeBankruptGovernmentShares,
   governmentLoanAccrual,
+  payGovernmentPayables,
   settleCityGovernmentDebt,
   settleGovernmentDebt,
 } from '../src/simulation/government/debt';
@@ -211,6 +213,24 @@ describe('debt：政府应付项计数与贷款分期结清', () => {
     expect(second.payablesCreated).toBe(0);
     expect(second.payablesPaid).toBe(0);
     expect(second.payablesInArrears).toBe(0);
+  });
+
+  it('debt：同 tick 重复调用 payGovernmentPayables 不重复加计数', () => {
+    const world = newWorld();
+    const { city } = sellIssue(world, 0);
+    city.treasury = 5_000;
+
+    world.time.tick = 12;
+    const payables = buildGovernmentPayables(world, city, CONFIG, 12);
+    expect(payables).toHaveLength(1);
+
+    const first = payGovernmentPayables(world, city, CONFIG, payables, 12, []);
+    expect(first.paid).toBe(1);
+    expect(first.inArrears).toBe(0);
+
+    const second = payGovernmentPayables(world, city, CONFIG, payables, 12, []);
+    expect(second.paid).toBe(0);
+    expect(second.inArrears).toBe(0);
   });
 
   it('debt：M36 到期两笔应付项（票息 + 本金）各计 1 次，不按付款流水重复累加', () => {
