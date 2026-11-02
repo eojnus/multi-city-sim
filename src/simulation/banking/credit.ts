@@ -47,6 +47,10 @@ export function ownerLabel(world: WorldState, owner: BankOwner): string {
       const group = world.households?.groups.find((entry) => entry.id === owner.id);
       return group ? `居民群体 · ${group.name}` : `居民群体 · ${owner.id}`;
     }
+    case 'government': {
+      const city = world.cities.find((entry) => entry.id === owner.id);
+      return city ? `城市政府 · ${city.name}` : `城市政府 · ${owner.id}`;
+    }
   }
 }
 
@@ -71,6 +75,9 @@ export function ownerCash(world: WorldState, owner: BankOwner): number {
       return round2(world.investors.find((group) => group.id === owner.id)?.cash ?? 0);
     case 'household':
       return round2(world.households?.groups.find((entry) => entry.id === owner.id)?.cash ?? 0);
+    case 'government':
+      // 政府“现金”即财政余额；银行不把政府存款另记一份，避免财政余额被复制。
+      return round2(world.cities.find((entry) => entry.id === owner.id)?.treasury ?? 0);
   }
 }
 
@@ -95,6 +102,11 @@ export function creditOwnerCash(world: WorldState, owner: BankOwner, amount: num
     case 'household': {
       const group = world.households?.groups.find((entry) => entry.id === owner.id);
       if (group) group.cash = round2(group.cash + value);
+      return;
+    }
+    case 'government': {
+      const city = world.cities.find((entry) => entry.id === owner.id);
+      if (city) city.treasury = round2(city.treasury + value);
       return;
     }
   }
@@ -129,6 +141,12 @@ export function debitOwnerCash(world: WorldState, owner: BankOwner, amount: numb
       const group = world.households?.groups.find((entry) => entry.id === owner.id);
       if (!group) return false;
       group.cash = round2(Math.max(0, group.cash - value));
+      return true;
+    }
+    case 'government': {
+      const city = world.cities.find((entry) => entry.id === owner.id);
+      if (!city) return false;
+      city.treasury = round2(Math.max(0, city.treasury - value));
       return true;
     }
   }
@@ -230,6 +248,9 @@ function ownerCreditBase(world: WorldState, owner: BankOwner, config: DemoConfig
         ),
         method: 'netWorth',
       };
+    case 'government':
+      // 政府债务走 city.government 独立账本，不使用普通授信口径；这里返回 0，避免误放普通贷款。
+      return { baseValue: 0, method: 'netWorth' };
   }
 }
 

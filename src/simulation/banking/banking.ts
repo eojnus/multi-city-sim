@@ -39,6 +39,10 @@ const LOAN_PURPOSE_LABELS: Record<LoanPurpose, string> = {
   expansion: '企业扩张贷款',
   personal: '玩家个人贷款',
   migratedDebt: '旧债务承接',
+  // v0.7：政府与居民债务的展示标签（账本在 government / householdFinance，银行台账只读展示）。
+  government: '政府借款',
+  bondAdvance: '债券垫付转借款',
+  householdConsumption: '居民消费贷款',
 };
 
 /** 银行初始状态：空账户、空合同、空快照；资金无限，因此没有“银行资本”字段。 */
@@ -81,6 +85,9 @@ function ownerExists(world: WorldState, owner: BankOwner): boolean {
       return world.investors.some((group) => group.id === owner.id);
     case 'household':
       return world.households?.groups.some((group) => group.id === owner.id) ?? false;
+    case 'government':
+      // v0.7：政府主体的 id 即 cityId，只有真实存在的城市政府才算存在。
+      return world.cities.some((city) => city.id === owner.id);
   }
 }
 

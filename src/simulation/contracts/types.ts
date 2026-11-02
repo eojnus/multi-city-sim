@@ -2,8 +2,8 @@
 // 这些类型描述的是“演示方案 v0.2”的数据结构，不代表最终策划规则。
 // v0.2 新增证券/治理/居民投资/协议/通知数据；旧 v1 存档由 core/save.ts 迁移。
 
-export const SAVE_FORMAT_VERSION = 6;
-export const GAME_VERSION = '0.6.0';
+export const SAVE_FORMAT_VERSION = 7;
+export const GAME_VERSION = '0.7.0';
 
 export type GoodId =
   | 'grain'
@@ -103,6 +103,11 @@ export interface CompanyMonthlyStats {
   capacityChange: number;
   /** v0.2：企业作为股东从其他企业取得的股息（进入企业现金，不重复计入居民收入）。 */
   dividendIncome: number;
+  /**
+   * v0.7：经营活动现金流 = 销售收入 − 采购/工资/利息/税等经营支出（不含融资与股息）。
+   * 可选：块1/数据块填充；未填充时报告用近似式并标注“近似”。
+   */
+  operatingCashFlow?: number;
 }
 
 export interface Company {
@@ -236,6 +241,21 @@ export interface CityMonthlyReport {
   policySpending: number;
   /** v0.3：本月交通维护与建设支出。 */
   transportSpending: number;
+  /**
+   * v0.7：财政与居民消费金融月度汇总（可选；块1/块3 填充，未填充时报告用近似式并标注）。
+   * 单位均与既有字段一致（信用点）；不改变任何判定口径。
+   */
+  consumerLoanDrawn?: number;
+  consumerLoanRepaid?: number;
+  consumerLoanOutstanding?: number;
+  bondInterestPaid?: number;
+  bondPrincipalPaid?: number;
+  bankAdvanceThisMonth?: number;
+  /** 月末总负债（五段口径，见 IMPLEMENTATION_v0.7 §4）。 */
+  totalDebtAtMonthEnd?: number;
+  /** 本月债务/GDP 判定值与分母。 */
+  debtRatioAtMonthEnd?: number;
+  gdpJudgementValue?: number;
   note: string;
 }
 
@@ -256,7 +276,8 @@ export interface City {
   householdIncomeLastMonth: number;
   market: Record<GoodId, MarketState>;
   gdp: number;
-  gdpHistory: { tick: number; value: number }[];
+  /** v0.7：gdpHistory 只放真实月度 GDP；估计值带 estimated=true 且不得冒充真实历史。 */
+  gdpHistory: { tick: number; value: number; estimated?: boolean }[];
   lastMonth: CityMonthlyReport;
   technology: TechnologyState;
   politics: PoliticsState;
@@ -265,6 +286,25 @@ export interface City {
   workforce: WorkforceState;
   /** v0.3：住房最小状态。 */
   housing: HousingState;
+  /**
+   * v0.7：政府债务、应付项、银行垫付与破产状态。
+   * 市长专属财政信息的数据源；界面必须经权限投影后再展示（见 MayorFiscalView）。
+   */
+  government: CityGovernmentState;
+  /**
+   * v0.7：破产判定用的最近 12 个游戏月 GDP 窗口（按 tick 升序，最多 12 条）。
+   * 开局 12 条为估计值（estimated=true，tick 为负数表示游戏开始前的估计月），
+   * 真实月度 GDP 到来后从最早的估计月逐月替换。**只有这里**用于债务/GDP 判定；
+   * gdpHistory 仍是展示用的真实历史，不参与破产判定。
+   */
+  gdpWindow: CityGdpPoint[];
+  /** v0.7：开局 12 个月估计 GDP 的来源与参数说明；迁移旧档时记录填补口径。 */
+  gdpEstimate: GdpEstimateInfo | null;
+  /**
+   * v0.7：破产状态镜像（与 government.bankruptcy 同值，兼容旧读档与界面快速判断）。
+   * 迁移后必定存在；旧档 v6 及以前没有该字段。
+   */
+  bankruptcy?: CityBankruptcyState;
 }
 
 export interface TradeRoute {
@@ -354,6 +394,12 @@ export interface LogEntry {
   tick: number;
   kind: LogKind;
   message: string;
+  /**
+   * v0.7：可见性标注（数据层权限表达）。
+   * undefined 表示旧存档迁移前的历史条目：写档时由迁移/规范化补全，渲染期按保守规则处理。
+   * 含义见 FiscalVisibility；渲染层必须按**当前** mayorCityId 重新过滤，不能只在写入时过滤。
+   */
+  visibility?: FiscalVisibility;
 }
 
 export interface WorldHistoryPoint {
@@ -390,7 +436,15 @@ export interface ShareClass {
   note: string;
 }
 
-export type HolderType = 'player' | 'company' | 'investorGroup' | 'city';
+export type HolderType =
+  | 'player'
+  | 'company'
+  | 'investorGroup'
+  | 'city'
+  /** v0.7：AI 经营者（CEO）以个人身份持股。 */
+  | 'operator'
+  /** v0.7：无股东时的无表决权托管持股（破产政府股份暂存，不销毁、不转给公司）。 */
+  | 'trust';
 
 export interface HolderRef {
   type: HolderType;
@@ -608,7 +662,15 @@ export interface TradeAgreement {
 // ---------------------------------------------------------------- 玩家通知
 
 export type NotificationAudience = 'personal' | 'company' | 'city';
-export type NotificationKind = 'dividend' | 'vote' | 'major' | 'agreement' | 'market';
+export type NotificationKind =
+  | 'dividend'
+  | 'vote'
+  | 'major'
+  | 'agreement'
+  | 'market'
+  /** v0.7：市级财政/债券/破产事件（公开事件或市长专属，由 visibility 决定）。 */
+  | 'fiscal'
+  | 'bankruptcy';
 
 export interface PlayerNotification {
   id: string;
@@ -621,6 +683,11 @@ export interface PlayerNotification {
   title: string;
   body: string;
   read: boolean;
+  /**
+   * v0.7：可见性标注（数据层权限表达）。与 audience（通知目标类型）是两个不同维度：
+   * audience 表示“这条通知属于玩家/企业/城市哪一类主体”，visibility 表示“哪些玩家有资格看到”。
+   */
+  visibility?: FiscalVisibility;
 }
 
 // ---------------------------------------------------------------- 领导人、政策与财政流水
@@ -711,7 +778,16 @@ export interface FiscalEntry {
     | 'debtForgiven'
     | 'liquidationProceeds'
     | 'dividendIncome'
-    | 'electionFee';
+    | 'electionFee'
+    // v0.7：政府融资、债券与垫付（金额方向见各注释；均为真实资金流动）。
+    | 'governmentLoanProceeds'
+    | 'governmentLoanRepayment'
+    | 'governmentLoanInterest'
+    | 'bondIssuanceProceeds'
+    | 'bondInterest'
+    | 'bondPrincipal'
+    | 'bankAdvance'
+    | 'debtWriteOff';
   /** 正数为财政收入，负数为财政支出。 */
   amount: number;
   source: string;
@@ -962,6 +1038,14 @@ export interface HouseholdMonthlyStats {
   savingsContribution: number;
   /** 本月现金净变化 = income - consumption - savingsContribution。 */
   netCashChange: number;
+  /** v0.7：本月消费预算（现金口径；可选，块3 填充）。 */
+  budget?: number;
+  /** v0.7：本月新发放的消费贷款（可选，块3 填充）。 */
+  loanDrawn?: number;
+  /** v0.7：本月由消费贷款支持的消费成交额（可选，块3 填充）。 */
+  loanFinancedConsumption?: number;
+  /** v0.7：因资金不足未满足的消费（与供给不足缺口分开；可选，块3 填充）。 */
+  unmetFunding?: number;
 }
 
 export interface HouseholdGroup {
@@ -1097,7 +1181,7 @@ export interface ManagementState {
 
 // ---------------------------------------------------------------- 银行（独立系统，资金无限、不会倒闭）
 
-export type BankOwnerKind = 'player' | 'household' | 'company' | 'investorGroup';
+export type BankOwnerKind = 'player' | 'household' | 'company' | 'investorGroup' | 'government';
 
 export interface BankOwner {
   kind: BankOwnerKind;
@@ -1116,8 +1200,18 @@ export interface DepositAccount {
   note: string;
 }
 
-export type LoanPurpose = 'workingCapital' | 'expansion' | 'personal' | 'migratedDebt';
-export type LoanStatus = 'active' | 'repaid' | 'defaulted';
+export type LoanPurpose =
+  | 'workingCapital'
+  | 'expansion'
+  | 'personal'
+  | 'migratedDebt'
+  /** v0.7：政府普通银行借款（id 为 cityId）。 */
+  | 'government'
+  /** v0.7：债券到期/破产时银行无条件垫付形成的政府借款。 */
+  | 'bondAdvance'
+  /** v0.7：居民群体消费贷款（借款人 id 为居民群体 id）。 */
+  | 'householdConsumption';
+export type LoanStatus = 'active' | 'repaid' | 'defaulted' | 'writtenOff';
 
 export interface LoanPayment {
   tick: number;
@@ -1191,6 +1285,547 @@ export interface BankingState {
   nextLoanNumber: number;
 }
 
+// ---------------------------------------------------------------- 财政可见性（v0.7 数据层权限表达）
+
+/**
+ * 财政信息的可见范围。
+ * - public：普通玩家可见（城市公开经济信息、已发行债券的必要投资信息、自己的持债记录）。
+ * - mayor：只有该城市**现任**市长可见。
+ *
+ * 权限是数据层契约：模拟层可以读全部字段，但对外投影（store/UI/IPC）只能暴露
+ * MayorFiscalView / PublicBondOfferView / OwnBondHoldingView 三种形状。
+ * 渲染期必须按**当前** player.roles.mayorCityId 重新校验，换任、离职、破产重选、读档后立即生效。
+ */
+export type FiscalVisibilityScope = 'public' | 'mayor';
+
+export interface FiscalVisibility {
+  scope: FiscalVisibilityScope;
+  /** scope==='mayor' 时必填：cityId 现任市长可见；scope==='public' 时必须为 null。 */
+  cityId: string | null;
+}
+
+/** 当前查看者的身份投影（只含权限判断所需字段，不含任何财政金额）。 */
+export interface ViewerIdentity {
+  playerId: string;
+  /** 当前担任市长的城市；未任市长为 null。 */
+  mayorCityId: string | null;
+}
+
+// ---------------------------------------------------------------- 开局 GDP 估计与 12 个月判定窗口（v0.7）
+
+/** 开局 12 个月估计 GDP 的来源说明（估计值不是真实交易，不得计入历史现金流）。 */
+export interface GdpEstimateInfo {
+  /** 每城估计的月度 GDP；12 个估计月填同一值。 */
+  monthlyValue: number;
+  /** monthlyValue × 12。 */
+  annualValue: number;
+  /** 估算时采用的理论产能利用率假设（首版暂定 0.8）。 */
+  utilizationAssumption: number;
+  /** 破产判定/风险比率的最小年 GDP 兜底值（首版暂定 1 信用点）。 */
+  minAnnualGdp: number;
+  /** 估算口径说明（产出价值 − 中间投入，不含工资/贷款/财政）。 */
+  method: string;
+  createdAtTick: number;
+  note: string;
+}
+
+/** 破产判定窗口中的一个月份。 */
+export interface CityGdpPoint {
+  /** 游戏内 tick；估计月的 tick 为负数（-12…-1），表示游戏开始前的估计月份。 */
+  tick: number;
+  value: number;
+  /** true = 估计值（不得当成真实交易）；false = 该月真实结算 GDP。 */
+  estimated: boolean;
+}
+
+// ---------------------------------------------------------------- 政府债券（v0.7）
+
+export type BondHolderKind = 'player' | 'investorGroup' | 'company';
+
+/**
+ * 债券持有人。玩家本人、居民投资实体、企业都可以购买（含跨城购买）。
+ * 居民以居民投资实体为购买主体；不得把债券记到不存在的持有人上。
+ */
+export interface BondHolder {
+  kind: BondHolderKind;
+  id: string;
+}
+
+export type BondIssuanceStatus = 'offering' | 'active' | 'redeemed';
+export type BondRedemptionReason = 'maturity' | 'bankruptcy';
+
+/**
+ * 一次债券发行批次（发行计划与实际成交分开记录）。
+ * 权威口径：只有 soldUnits 形成债务，principal = soldUnits × faceValue；未售出份数不形成债务。
+ */
+export interface BondIssuance {
+  id: string;
+  cityId: string;
+  /** 发行结算 tick。 */
+  issuedTick: number;
+  /** 认购截止 tick（首版与 issuedTick 同月）；null 表示仍在认购期。 */
+  closedTick: number | null;
+  /** 面额（信用点/份），首版 1000。 */
+  faceValue: number;
+  /** 票面年利率（如 0.04 = 4%），按年化、按月计提。 */
+  couponRateAnnual: number;
+  /** 付息周期（月），首版 12：每满 12 个月支付一次已计提利息。 */
+  interestPeriodMonths: number;
+  /** 期限（月），首版 36。 */
+  termMonths: number;
+  /** 计划发行份数（整数份）。 */
+  planUnits: number;
+  /** 实际成交份数（整数份，≤ planUnits）。 */
+  soldUnits: number;
+  /** 未售出份数 = max(0, planUnits − soldUnits)；关闭时记录，不形成债务（DECISIONS v1.2 #21）。 */
+  unsoldUnits: number;
+  /** 实际形成本金 = soldUnits × faceValue。 */
+  principal: number;
+  maturityTick: number;
+  status: BondIssuanceStatus;
+  /** 最近一次付息 tick；null = 尚未付息。付息周期见 interestPeriodMonths。 */
+  lastCouponTick: number | null;
+  /**
+   * 到期票息财政不足、银行不垫付时累计的欠付利息（DECISIONS v1.2 #19）。
+   * 该金额计入总负债；到期/破产时连同本金一并由银行垫付兑付。
+   */
+  arrearsInterest: number;
+  /**
+   * 本批次全部持有人已计提、尚未支付的利息合计（对账汇总字段）。
+   * 权威明细在 BondHolding.accruedInterest；不变量要求两者一致。
+   */
+  accruedInterest: number;
+  /** 已支付利息累计（含破产提前兑付时支付的利息）。 */
+  interestPaid: number;
+  /** 已支付票息期数（M12/M24/M36 各一次，首版最多 3 期）。 */
+  couponsPaid: number;
+  /** 已归还本金累计（到期/破产提前兑付均计入）。 */
+  principalRepaid: number;
+  /** 累计由银行垫付的金额（本金+欠息，含到期与破产兑付）。 */
+  bankAdvancedAmount: number;
+  redeemedTick: number | null;
+  redemptionReason: BondRedemptionReason | null;
+  note: string;
+}
+
+/**
+ * 某持有人对某发行批次的一份持债记录（同一持有人可分多次、不同月份买入）。
+ * 计息从 interestStartTick 起按月计提；每满 interestPeriodMonths 支付一次已计提利息；
+ * 破产提前兑付时按**实际持有月份**计付未付利息，不支付未来利息。
+ */
+export interface BondHolding {
+  id: string;
+  issuanceId: string;
+  cityId: string;
+  holder: BondHolder;
+  units: number;
+  principal: number;
+  purchasedTick: number;
+  /** 计息起点 = max(purchasedTick, issuedTick)。 */
+  interestStartTick: number;
+  maturityTick: number;
+  lastCouponTick: number | null;
+  accruedInterest: number;
+  interestPaid: number;
+  redeemedTick: number | null;
+  status: 'active' | 'redeemed';
+  note: string;
+}
+
+export type BondPaymentKind = 'coupon' | 'principal' | 'bankruptcyRedemption';
+
+/** 债券兑付流水（逐笔可追溯；利息与本金分开记，禁止重复支付同一笔债权）。 */
+export interface BondPayment {
+  id: string;
+  tick: number;
+  issuanceId: string;
+  cityId: string;
+  holder: BondHolder;
+  kind: BondPaymentKind;
+  principalPaid: number;
+  interestPaid: number;
+  /** true = 该笔兑付由政府不足额时银行的**无条件垫付**资金支付（垫付转为政府贷款）。 */
+  fundedByBankAdvance: boolean;
+  /** fundedByBankAdvance=true 时必填：垫付形成的 GovernmentLoanContract.id。 */
+  advanceLoanId: string | null;
+  note: string;
+}
+
+/** 债券全局账本（跨城持有人共用一本账；权威数据，禁止另建副本）。 */
+export interface BondState {
+  issuances: BondIssuance[];
+  holdings: BondHolding[];
+  payments: BondPayment[];
+  nextIssuanceNumber: number;
+  nextHoldingNumber: number;
+  nextPaymentNumber: number;
+}
+
+// ---------------------------------------------------------------- 政府银行债务、应付项与破产（v0.7）
+
+/** 政府银行贷款用途：普通政府借款 / 债券到期时的银行强制垫付。 */
+export type GovernmentLoanPurpose = 'government' | 'bondAdvance';
+
+/** writtenOff = 破产清算时银行勾销（银行无限资金、不倒闭；勾销必须留痕）。 */
+export type GovernmentLoanStatus = 'active' | 'repaid' | 'writtenOff';
+
+/**
+ * 政府银行贷款合同（权威账本在 city.government.loans）。
+ * 银行资金无限；授信限制不适用于政府普通借款，也不适用于任何强制垫付。
+ * 还款沿用现有银行规则：等额本金、次月起还、月利率按月计提。
+ */
+export interface GovernmentLoanContract {
+  id: string;
+  cityId: string;
+  purpose: GovernmentLoanPurpose;
+  /** 原始本金。 */
+  principal: number;
+  /** 未偿本金余额。 */
+  outstanding: number;
+  monthlyPrincipal: number;
+  rateMonthly: number;
+  termMonths: number;
+  startTick: number;
+  /** 首期还款 tick（放款后的下一月）。 */
+  nextDueTick: number;
+  paidPrincipal: number;
+  paidInterest: number;
+  /** 已计息但尚未支付的利息（月结计提；纳入总负债口径）。 */
+  accruedInterest: number;
+  arrearsPrincipal: number;
+  arrearsInterest: number;
+  /** 连续欠付月数；≥2 标记违约（政府债务不因此触发别的东西，只影响欠息口径）。 */
+  missedPayments: number;
+  status: GovernmentLoanStatus;
+  payments: LoanPayment[];
+  /** purpose==='bondAdvance' 时必填：垫付覆盖的债券批次。 */
+  bondIssuanceId: string | null;
+  note: string;
+}
+
+export type GovernmentPayableKind = 'bondCoupon' | 'bondPrincipal' | 'loanInstalment';
+export type GovernmentPayableStatus =
+  | 'pending'
+  | 'paid'
+  /** 债券到期/破产时由银行垫付结清。 */
+  | 'paidByAdvance'
+  /** 票息到期但财政不足：银行不垫付，转为欠付利息，等最终付息/到期/破产时一并处理（DECISIONS v1.2 #19）。 */
+  | 'arrears'
+  /** 破产清算时勾销。 */
+  | 'writtenOff';
+
+/**
+ * 当月应付项（月结阶段②生成、③④结清）。
+ * 幂等权威：同一 (cityId, tick, kind, issuanceId/holder) 只生成一次；
+ * 已结清的应付项保留至保留期，用于证明“同月到期与破产只付一次”。
+ */
+export interface GovernmentPayable {
+  id: string;
+  cityId: string;
+  /** 应付月份 tick。 */
+  tick: number;
+  kind: GovernmentPayableKind;
+  issuanceId: string | null;
+  loanId: string | null;
+  holder: BondHolder | null;
+  principalDue: number;
+  interestDue: number;
+  status: GovernmentPayableStatus;
+  paidTick: number | null;
+  /** 结清时对应的 BondPayment.id（贷款分期为 null）。 */
+  paymentId: string | null;
+  note: string;
+}
+
+/** 银行垫付单列记录（DECISIONS v1.1：垫付必须可追溯，且不进普通政府贷款授信口径）。 */
+export interface GovernmentAdvanceRecord {
+  id: string;
+  cityId: string;
+  tick: number;
+  issuanceId: string;
+  /** maturity = 债券到期垫付；bankruptcy = 破产兑付垫付。票息欠付不产生垫付。 */
+  purpose: 'maturity' | 'bankruptcy';
+  /** 本次垫付覆盖的应付项 id。 */
+  payableIds: string[];
+  principalAdvanced: number;
+  interestAdvanced: number;
+  totalAdvanced: number;
+  /** 垫付形成的政府贷款合同 id。 */
+  loanId: string;
+  note: string;
+}
+
+export type GovernmentRiskLevel = 'normal' | 'watch' | 'high' | 'bankrupt';
+export type GovernmentRiskTrend = 'up' | 'down' | 'flat' | 'unknown';
+
+/**
+ * 政府债务汇总（每月结算末生成快照，city.government.lastDebt）。
+ *
+ * 总负债口径（DECISIONS v1.1 #11，冻结）：
+ *   totalDebt = bankLoanPrincipal + bankAdvancePrincipal + bondPrincipalOutstanding
+ *               + loanAccruedInterest + bondAccruedInterest
+ * 债务/GDP = totalDebt / max(minAnnualGdp, 最近 12 个月 GDP 合计)。
+ * 已计提未付利息必须计入分子：利息在月结阶段②计提，阶段⑤判定前完成，避免晚一拍。
+ */
+export interface GovernmentDebtSummary {
+  cityId: string;
+  tick: number;
+  /** 本月月末财政余额（迁移后不得为负；赤字在月结转为银行贷款）。 */
+  treasury: number;
+  bankLoanPrincipal: number;
+  bankAdvancePrincipal: number;
+  bondPrincipalOutstanding: number;
+  loanAccruedInterest: number;
+  bondAccruedInterest: number;
+  totalDebt: number;
+  gdpWindowMonths: number;
+  gdpWindowSum: number;
+  gdpWindowEstimatedMonths: number;
+  /** 判定用分母 = max(minAnnualGdp, gdpWindowSum)。 */
+  gdpJudgementValue: number;
+  debtRatio: number;
+  riskLevel: GovernmentRiskLevel;
+  riskTrend: GovernmentRiskTrend;
+  /** 上一结算月同口径的债务/GDP（无可比数据为 null）；趋势与它比较。 */
+  previousSettlementDebtRatio: number | null;
+  note: string;
+}
+
+/**
+ * 一次破产清算的完整记录（幂等：同一城市同一 tick 只能有一条）。
+ *
+ * 破产语义（DECISIONS v1.2 #8 更正版，冻结）：
+ * 1. 银行立即兑付**未到期债券本金 + 按实际持有月份计提的未付利息**（不支付未来利息）；
+ * 2. 随后政府原有银行债务与本次垫付形成（含破产兑付形成的）银行债务**一并勾销**；
+ * 3. 不存在“按比例清偿/优先级分配”，财政余额不参与此项兑付。
+ * 同月到期与破产：到期部分先按阶段③/④各付一次，破产阶段只处理**尚未结清**的债权，
+ * 每笔债权只兑付一次，不得重复记债或勾销。
+ */
+export interface GovernmentBankruptcyRecord {
+  id: string;
+  cityId: string;
+  tick: number;
+  totalDebtAtJudgement: number;
+  gdpJudgementValue: number;
+  debtRatio: number;
+  /** 破产时银行兑付的未到期债券本金合计。 */
+  bondsRedeemedPrincipal: number;
+  /** 破产时按实际持有月份计提支付给债券持有人的未付利息合计。 */
+  bondsRedeemedInterest: number;
+  /** 破产兑付次数（逐笔 BondPayment 数量，用于验证每笔只付一次）。 */
+  bondRedemptionCount: number;
+  /** 破产兑付由银行垫付形成的政府贷款金额（垫付利率/期限见 config.government.advance）。 */
+  bankAdvanceCreated: number;
+  /** 勾销的原有政府银行贷款未偿本金合计。 */
+  bankLoansWrittenOff: number;
+  /** 勾销的垫付贷款未偿本金合计。 */
+  advancesWrittenOff: number;
+  /** 勾销后仍未清偿（核销）的债券/贷款利息合计，只作记录，不产生支付。 */
+  interestWrittenOff: number;
+  /** 判定当月结算内立即触发重选；此处记录触发的 tick（未触发为 null）。 */
+  electionTriggeredTick: number | null;
+  /** 破产后是否进入看守期（现任市长仅维持性操作，直到重选完成）。 */
+  caretakerUntilElection: boolean;
+  note: string;
+}
+
+/** 破产状态（city.government.bankruptcy 的权威副本；city.bankruptcy 为同值镜像）。 */
+export interface CityBankruptcyState {
+  status: 'solvent' | 'bankrupt';
+  /** 破产判定 tick；从未破产为 null。 */
+  tick: number | null;
+  /** 当前生效的 GovernmentBankruptcyRecord.id。 */
+  recordId: string | null;
+  /** 判定时的债务/GDP；未破产为 null。 */
+  debtRatio: number | null;
+}
+
+export interface CityGovernmentState {
+  loans: GovernmentLoanContract[];
+  nextLoanNumber: number;
+  /** 应付项保留最近 N 个结算月（N 见 config.government.payableRetentionMonths）。 */
+  payables: GovernmentPayable[];
+  nextPayableNumber: number;
+  advances: GovernmentAdvanceRecord[];
+  nextAdvanceNumber: number;
+  /** 最近一次结算的债务汇总（趋势比较基准；不是权威账本）。 */
+  lastDebt: GovernmentDebtSummary | null;
+  bankruptcy: CityBankruptcyState;
+  records: GovernmentBankruptcyRecord[];
+  /** 已按幂等规则处理过财政金融阶段的 tick（同一 tick 不得重复兑付/清算）。 */
+  settledTicks: number[];
+}
+
+// ---------------------------------------------------------------- 居民消费预算与消费贷款（v0.7）
+
+export type HouseholdLoanStatus = 'active' | 'repaid' | 'defaulted' | 'writtenOff';
+
+/**
+ * 居民群体消费贷款（按群体聚合，不逐人建实体）。
+ * 是真实债务，不是居民收入；资金从银行支付给商品卖方，不经过居民收入口径。
+ * 额度由群体财产（手头现金 + 银行存款 − 未偿本金）决定，禁止无限信用。
+ * 群体迁出/并组/人口变化必须保持债务归属与守恒（业务实现负责）。
+ */
+export interface HouseholdLoanContract {
+  id: string;
+  cityId: string;
+  groupId: string;
+  purpose: 'consumption';
+  principal: number;
+  outstanding: number;
+  monthlyPrincipal: number;
+  rateMonthly: number;
+  termMonths: number;
+  startTick: number;
+  nextDueTick: number;
+  paidPrincipal: number;
+  paidInterest: number;
+  accruedInterest: number;
+  arrearsPrincipal: number;
+  arrearsInterest: number;
+  missedPayments: number;
+  status: HouseholdLoanStatus;
+  payments: LoanPayment[];
+  note: string;
+}
+
+/**
+ * 某群体某月的消费预算快照（首版公式与口径的可审计记录）。
+ * 首版暂定：参考消费额 = 上月实际可支配收入 × 80% + 当时手头现金 × 5%；
+ * 现金预算 = min(手头现金, max(0, 参考消费额))；有积蓄即可消费，上月收入不是硬上限。
+ * 银行存款首版不自动取出（depositsIncluded=false），贷款支持后的有效预算单列。
+ */
+export interface ConsumerBudgetSnapshot {
+  tick: number;
+  cityId: string;
+  groupId: string;
+  /** 上月实际可支配收入（已扣个税，现金口径）。 */
+  lastMonthDisposableIncome: number;
+  /** 上月收入 × 收入参考比例（首版 80%）。 */
+  incomeComponent: number;
+  /** 当时手头现金。 */
+  cash: number;
+  /** 手头现金 × 现金参考比例（首版 5%）。 */
+  cashComponent: number;
+  /** 参考消费额 = incomeComponent + cashComponent。 */
+  referenceSpend: number;
+  /** 现金消费预算 = min(cash, max(0, referenceSpend))。 */
+  cashBudget: number;
+  /** 消费贷款可用额度（未放款前为可借上限）。 */
+  loanAvailable: number;
+  /** 有效预算 = cashBudget + loanAvailable（资金支持后的有效需求，不等于成交）。 */
+  effectiveBudget: number;
+  /** 本月实际发放的消费贷款。 */
+  loanGranted: number;
+  /** 本月实际成交消费。 */
+  actualSpend: number;
+  /** 因资金不足未满足的消费（与供给不足缺口分开）。 */
+  unmetByFunding: number;
+  /** 存款是否计入预算（首版 false）。 */
+  depositsIncluded: boolean;
+  note: string;
+}
+
+/** 居民消费预算快照与消费贷款账本（权威数据）。 */
+export interface HouseholdFinanceState {
+  loans: HouseholdLoanContract[];
+  nextLoanNumber: number;
+  /** 消费预算快照，按 tick 升序保留最近 N 个月。 */
+  budgets: ConsumerBudgetSnapshot[];
+  note: string;
+}
+
+// ---------------------------------------------------------------- 权限投影视图（store/UI 唯一允许读取的形状，v0.7）
+
+/**
+ * 市长财政视图：只有该城现任市长可以取得。
+ * 这些字段是“市长专属”白名单；界面不得绕过本视图直接读取 city.treasury /
+ * city.government.* / 12 月判定合计。
+ */
+export interface MayorFiscalView {
+  cityId: string;
+  tick: number;
+  treasury: number;
+  /** 本月财政收入合计（正数）。 */
+  monthIncome: number;
+  /** 本月财政支出合计（正数）。 */
+  monthExpense: number;
+  bankLoanPrincipal: number;
+  bankAdvancePrincipal: number;
+  bondPrincipalOutstanding: number;
+  loanAccruedInterest: number;
+  bondAccruedInterest: number;
+  totalDebt: number;
+  gdpWindowMonths: number;
+  gdpWindowSum: number;
+  gdpWindowEstimatedMonths: number;
+  /** 判定分母 = max(minAnnualGdp, gdpWindowSum)。 */
+  gdpJudgementValue: number;
+  debtRatio: number;
+  riskLevel: GovernmentRiskLevel;
+  riskTrend: GovernmentRiskTrend;
+  previousSettlementDebtRatio: number | null;
+  /** 本月应付项合计（债券利息/到期本金/贷款分期）。 */
+  payablesDueThisMonth: number;
+  /** 本月由银行垫付的金额合计。 */
+  paidByAdvanceThisMonth: number;
+  bankruptcyStatus: 'solvent' | 'bankrupt';
+  bankruptcyTick: number | null;
+  /** 是否触发“GDP 极低，已使用最低判定值”兜底。 */
+  gdpLowFallback: boolean;
+  /** 债券批次明细（含计划/实售/未售份数，仅市长可见）。 */
+  issuances: MayorBondIssuanceView[];
+}
+
+/** 市长可见的债券批次明细：计划份数、实售份数、未售份数、已形成本金分开列示。 */
+export interface MayorBondIssuanceView {
+  issuanceId: string;
+  faceValue: number;
+  couponRateAnnual: number;
+  interestPeriodMonths: number;
+  termMonths: number;
+  planUnits: number;
+  soldUnits: number;
+  /** unsoldUnits = max(0, planUnits − soldUnits)；未售出部分不形成债务。 */
+  unsoldUnits: number;
+  principal: number;
+  maturityTick: number;
+  status: BondIssuanceStatus;
+  accruedInterest: number;
+  interestPaid: number;
+}
+
+/**
+ * 非市长可见的债券投资信息白名单：发行城市、期限、票面年利率、面额、可认购数量、到期日。
+ * 不包含发行计划总额、全部已售额或政府总债务（补充指令 #7）。
+ */
+export interface PublicBondOfferView {
+  issuanceId: string;
+  cityId: string;
+  faceValue: number;
+  couponRateAnnual: number;
+  interestPeriodMonths: number;
+  termMonths: number;
+  /** 当前可认购份数（整数份）。 */
+  unitsAvailable: number;
+  maturityTick: number;
+  status: BondIssuanceStatus;
+}
+
+/** 玩家自己持有的债券（含到期日与应得款，任何玩家可见自己的）。 */
+export interface OwnBondHoldingView {
+  holdingId: string;
+  issuanceId: string;
+  cityId: string;
+  units: number;
+  principal: number;
+  interestStartTick: number;
+  maturityTick: number;
+  accruedInterest: number;
+  interestPaid: number;
+  redeemedTick: number | null;
+}
+
 // ---------------------------------------------------------------- 世界与存档
 
 export interface WorldState {
@@ -1222,6 +1857,13 @@ export interface WorldState {
   management: ManagementState;
   /** v0.4：独立银行系统（存款、贷款、授信快照）。 */
   banking: BankingState;
+  /**
+   * v0.7：政府债券全局账本（发行批次、持债记录、兑付流水；跨城持有人共用）。
+   * 可选字段：v6 及更早存档没有；迁移后必定存在（空账本），业务代码读取时应兜底。
+   */
+  bonds?: BondState;
+  /** v0.7：居民消费预算快照与居民群体消费贷款账本。 */
+  householdFinance: HouseholdFinanceState;
   history: WorldHistoryPoint[];
   log: LogEntry[];
   lastTick: {
