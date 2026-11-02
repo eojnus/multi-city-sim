@@ -161,6 +161,15 @@ const FISCAL_KIND_LABELS: Record<string, string> = {
   liquidationProceeds: '企业退出清算',
   dividendIncome: '政府股息收入',
   electionFee: '参选费用',
+  // v0.7 财政融资与债券（FiscalEntry.kind 扩展）。
+  governmentLoanProceeds: '政府借款',
+  governmentLoanRepayment: '政府还本',
+  governmentLoanInterest: '政府付息',
+  bondIssuanceProceeds: '债券发行',
+  bondInterest: '债券票息',
+  bondPrincipal: '债券本金兑付',
+  bankAdvance: '银行垫付',
+  debtWriteOff: '债务勾销',
 };
 
 const FOUNDER_LABELS: Record<string, string> = {
@@ -172,6 +181,37 @@ const FOUNDER_LABELS: Record<string, string> = {
 const TRANSPORT_MODE_LABELS: Record<string, string> = {
   road: '公路',
   rail: '铁路',
+};
+
+// ---- v0.7 财政风险与债券展示文案（风险用「文字 + 图标 + 颜色」三重表达，不只靠颜色） ----
+const FISCAL_RISK_LABELS: Record<'normal' | 'watch' | 'high' | 'bankrupt', string> = {
+  normal: '正常',
+  watch: '关注',
+  high: '高风险',
+  bankrupt: '已破产',
+};
+const FISCAL_RISK_ICONS: Record<'normal' | 'watch' | 'high' | 'bankrupt', string> = {
+  normal: '●',
+  watch: '▲',
+  high: '▲',
+  bankrupt: '✖',
+};
+const FISCAL_RISK_CLASSES: Record<'normal' | 'watch' | 'high' | 'bankrupt', string> = {
+  normal: 'is-good',
+  watch: 'is-warn',
+  high: 'is-warn',
+  bankrupt: 'is-bad',
+};
+const FISCAL_TREND_LABELS: Record<'up' | 'down' | 'flat' | 'unknown', string> = {
+  up: '↑ 上升（较上月变差）',
+  down: '↓ 下降（较上月改善）',
+  flat: '→ 持平',
+  unknown: '— 无可比上月',
+};
+const BOND_STATUS_LABELS: Record<'offering' | 'active' | 'redeemed', string> = {
+  offering: '认购中',
+  active: '存续中',
+  redeemed: '已兑付',
 };
 
 const EFFECT_LABELS: Record<string, string> = {
@@ -535,10 +575,17 @@ function renderKpis(store: GameStore, city: City): string {
         <b>${money(city.gdp)}</b>
         <small>增加值口径</small>
       </div>
-      <div class="kpi">
-        <span>财政</span>
-        <b>${money(city.treasury)}</b>
-        <small>个税 ${pct(city.incomeTaxRate, 0)} · 企税 ${pct(city.corporateTaxRate, 0)}</small>
+      <div
+        class="kpi kpi--link"
+        role="button"
+        tabindex="0"
+        data-action="show-companies"
+        data-testid="kpi-companies"
+        title="点击跳到企业列表（财政余额属于市长专属信息，不在此展示）"
+      >
+        <span>企业数量</span>
+        <b>${num(store.companiesForCity(city.id).length)} 家</b>
+        <small>点击查看企业列表</small>
       </div>
       <div class="kpi is-teal">
         <span>居民收入</span>
@@ -550,7 +597,7 @@ function renderKpis(store: GameStore, city: City): string {
       <div class="info-row"><span>非劳动力 N</span><b>${num(city.population.nonLabor)}</b></div>
       <div class="info-row"><span>劳动人口</span><b>${num(city.population.laborForce)}</b></div>
       <div class="info-row"><span>公共岗位</span><b>${num(city.publicSector.employees)}</b></div>
-      <div class="info-row"><span>企业数量</span><b>${num(store.companiesForCity(city.id).length)} 家</b></div>
+      <div class="info-row"><span>税率（个税 · 企税）</span><b>${pct(city.incomeTaxRate, 0)} · ${pct(city.corporateTaxRate, 0)}</b></div>
     </div>`;
 }
 
@@ -994,6 +1041,7 @@ export function renderGovernmentSection(store: GameStore, city: City): string {
               >参选市长（${money(electionCost)}）</button>
             </div>`
       }
+      ${isPlayerMayor ? renderMayorFiscalPanel(store, city) : ''}
       <div class="gov-active">
         <div class="gov-sub-head"><span>生效政策</span><em>${view.active.length} 项</em></div>
         ${activeCards}
@@ -1021,13 +1069,274 @@ export function renderGovernmentSection(store: GameStore, city: City): string {
     </section>`;
 }
 
+/** 开局估计月的 tick 为负，共用 tickDate 会把负 tick 夹到当前月，这里按自然月回推。 */
+function gdpWindowDate(tick: number): string {
+  if (tick >= 0) return tickDate(tick);
+  const start = DEMO_CONFIG.simulation;
+  const months = tick + start.startMonth - 1;
+  const year = start.startYear + Math.floor(months / 12);
+  const month = ((months % 12) + 12) % 12 + 1;
+  return `${year}.${String(month).padStart(2, '0')}`;
+}
+
+/**
+ * 市长财政面板（v0.7 块4，补充指令 §7 白名单）。
+ *
+ * 数据只来自 `store.fiscalView(city.id)`（契约投影，非市长返回 null），
+ * 不直接读 city.treasury / city.government.*。
+ * 12 个月逐月明细用 city.gdpWindow（公开的普通 GDP 历史），判定合计与债务率仍取视图字段。
+ */
+export function renderMayorFiscalPanel(store: GameStore, city: City): string {
+  const view = store.fiscalView(city.id);
+  if (!view) {
+    return `
+      <div class="fiscal-brief is-restricted" data-testid="fiscal-restricted">
+        <div class="gov-sub-head"><span>财政面板</span><em>仅市长可见</em></div>
+        <p class="fiscal-empty">可用资金、当月收支、银行贷款与债券本金、总负债、12 个月 GDP 判定合计、债务/GDP、风险等级与趋势、兑付计划均为市长专属信息，仅该城市现任市长可见。</p>
+      </div>`;
+  }
+
+  const net = view.monthIncome - view.monthExpense;
+  const windowPoints = [...(city.gdpWindow ?? [])].sort((a, b) => a.tick - b.tick);
+  const windowRows =
+    windowPoints.length === 0
+      ? '<li class="fiscal-empty">尚无 GDP 窗口数据。</li>'
+      : windowPoints
+          .map(
+            (point) => `
+            <li class="gdp-window-row">
+              <span>${esc(gdpWindowDate(point.tick))}</span>
+              <b>${money(point.value)}</b>
+              <em class="${point.estimated ? 'is-estimate' : 'is-real'}">${point.estimated ? '估计' : '真实'}</em>
+            </li>`,
+          )
+          .join('');
+
+  const loanCount = (city.government?.loans ?? []).filter((loan) => loan.status === 'active').length;
+  const riskClass = FISCAL_RISK_CLASSES[view.riskLevel];
+  const riskIcon = FISCAL_RISK_ICONS[view.riskLevel];
+  const riskLabel = FISCAL_RISK_LABELS[view.riskLevel];
+  const trendLabel = FISCAL_TREND_LABELS[view.riskTrend];
+
+  const issuanceRows =
+    view.issuances.length === 0
+      ? '<tr><td colspan="8" class="fiscal-empty-cell">尚未发行债券。</td></tr>'
+      : view.issuances
+          .map(
+            (issuance) => `
+            <tr>
+              <td>${esc(issuance.issuanceId)}</td>
+              <td>${num(issuance.planUnits)}</td>
+              <td>${num(issuance.soldUnits)}</td>
+              <td>${num(issuance.unsoldUnits)}</td>
+              <td>${money(issuance.principal)}</td>
+              <td>${pct(issuance.couponRateAnnual, 2)} / ${num(issuance.interestPeriodMonths)} 月</td>
+              <td>${esc(tickDate(issuance.maturityTick))}</td>
+              <td>${esc(BOND_STATUS_LABELS[issuance.status])}</td>
+            </tr>`,
+          )
+          .join('');
+
+  const maxPlanUnits = DEMO_CONFIG.government.bondMarket.maxPlanUnitsPerIssue;
+  const faceValue = DEMO_CONFIG.government.bondMarket.faceValue;
+  const bankruptNotice =
+    view.bankruptcyStatus === 'bankrupt'
+      ? `<div class="fiscal-alert is-bad" data-testid="fiscal-bankrupt-notice">
+          <b>${riskIcon} 已发生破产事件</b>
+          <p>判定月 ${view.bankruptcyTick === null ? '—' : esc(tickDate(view.bankruptcyTick))}，债务/GDP ${pct(view.debtRatio)} ≥ 100%。银行已立即兑付未到期债券本金与已计提未付利息，政府原有银行债务随之一并勾销并留痕；随后重新选举市长，过渡期由看守政府自主施政。</p>
+        </div>`
+      : '';
+
+  return `
+    <div class="fiscal-panel ${riskClass}" data-testid="mayor-fiscal-panel">
+      <div class="gov-sub-head">
+        <span>市长财政面板</span>
+        <em class="fiscal-risk-badge ${riskClass}" data-testid="fiscal-risk-badge" title="风险等级：${esc(riskLabel)}；方向：${esc(trendLabel)}">
+          <span aria-hidden="true">${riskIcon}</span>${esc(riskLabel)} · ${esc(trendLabel)}
+        </em>
+      </div>
+
+      ${bankruptNotice}
+
+      <div class="fiscal-kpi-grid">
+        <div class="fiscal-kpi is-strong"><span>可用资金</span><b data-testid="fiscal-treasury">${money(view.treasury)}</b></div>
+        <div class="fiscal-kpi"><span>当月收入</span><b class="is-good">+${money(view.monthIncome)}</b></div>
+        <div class="fiscal-kpi"><span>当月支出</span><b class="is-bad">−${money(view.monthExpense)}</b></div>
+        <div class="fiscal-kpi"><span>当月净额</span><b class="${net >= 0 ? 'is-good' : 'is-bad'}">${net >= 0 ? '+' : '−'}${money(Math.abs(net))}</b></div>
+      </div>
+
+      <div class="fiscal-debt-grid">
+        <div><span>银行贷款</span><b>${money(view.bankLoanPrincipal)}</b><em>${num(loanCount)} 笔存续</em></div>
+        <div><span>银行垫付本金</span><b>${money(view.bankAdvancePrincipal)}</b><em>到期/破产兑付形成</em></div>
+        <div><span>在外债券本金</span><b>${money(view.bondPrincipalOutstanding)}</b><em>${num(view.issuances.filter((entry) => entry.status !== 'redeemed').length)} 批次存续</em></div>
+        <div><span>应计未付利息</span><b>${money(view.loanAccruedInterest + view.bondAccruedInterest)}</b><em>贷款 ${money(view.loanAccruedInterest)} · 债券 ${money(view.bondAccruedInterest)}</em></div>
+        <div class="is-strong"><span>总负债</span><b data-testid="fiscal-total-debt">${money(view.totalDebt)}</b><em>本金 + 应计未付利息</em></div>
+      </div>
+
+      <div class="fiscal-risk-row">
+        <div><span>债务 / GDP</span><b data-testid="fiscal-debt-ratio">${pct(view.debtRatio)}</b><em>判定分母 ${money(view.gdpJudgementValue)}${view.gdpLowFallback ? '（GDP 极低，已用最低判定值）' : ''}</em></div>
+        <div><span>风险等级</span><b class="${riskClass}">${riskIcon} ${esc(riskLabel)}</b><em>${esc(trendLabel)}</em></div>
+        <div><span>上月同口径</span><b>${view.previousSettlementDebtRatio === null ? '—' : pct(view.previousSettlementDebtRatio)}</b><em>无上月数据时显示 —</em></div>
+      </div>
+
+      <details class="fiscal-gdp-window" data-testid="fiscal-gdp-window">
+        <summary>12 个月 GDP 窗口 · 合计 ${money(view.gdpWindowSum)}（真实 ${num(view.gdpWindowMonths - view.gdpWindowEstimatedMonths)} 月 / 估计 ${num(view.gdpWindowEstimatedMonths)} 月）</summary>
+        <ul class="gdp-window-list">${windowRows}</ul>
+        <p class="fiscal-note">估计月是开局估算值（tick 为负），不是真实交易；判定合计 = 最近 ${num(view.gdpWindowMonths)} 个月之和，不足 12 个月时按实际月数汇总。</p>
+      </details>
+
+      <div class="fiscal-due-row">
+        <div><span>本月应付项</span><b>${money(view.payablesDueThisMonth)}</b><em>票息 / 到期本金 / 贷款分期</em></div>
+        <div><span>本月银行垫付</span><b class="${view.paidByAdvanceThisMonth > 0 ? 'is-warn' : ''}">${money(view.paidByAdvanceThisMonth)}</b><em>垫付转为政府贷款，计入总负债</em></div>
+      </div>
+
+      <p class="fiscal-note">
+        兑付规则：票息每个付息周期支付一次（12/24/36 月各一期，M36 与到期本金同月各付一次）；
+        到期时财政不足的部分由银行无条件垫付并转为政府借款，垫付金额计入总负债；
+        票息到期财政不足时银行不垫付，欠付利息累计到批次，到期/破产时一并处理。
+      </p>
+      <p class="fiscal-note">
+        破产规则：债务/GDP ≥ 100% 判定破产；银行立即兑付未到期债券本金与已计提未付利息（不付未来利息），
+        随后政府银行债务一并勾销并留痕，触发重选。总负债 = 银行贷款未偿本金（含垫付）+ 未偿债券本金 + 已计提未付利息。
+      </p>
+
+      <div class="fiscal-issuance">
+        <div class="gov-sub-head"><span>发债批次</span><em>计划 / 实售 / 未售分开列示</em></div>
+        <div class="fiscal-table-wrap" data-scroll="fiscal-issuances">
+          <table class="fiscal-table">
+            <thead>
+              <tr><th scope="col">批次</th><th scope="col">计划</th><th scope="col">实售</th><th scope="col">未售</th><th scope="col">形成本金</th><th scope="col">票息 / 周期</th><th scope="col">到期</th><th scope="col">状态</th></tr>
+            </thead>
+            <tbody>${issuanceRows}</tbody>
+          </table>
+        </div>
+        <div class="bond-issue-form" data-city-id="${esc(city.id)}">
+          <label>
+            <span>计划份数（面额 ${money(faceValue)}/份）</span>
+            <input
+              type="number"
+              data-bond-plan-units
+              data-testid="bond-plan-units"
+              min="1"
+              max="${maxPlanUnits}"
+              step="1"
+              value="100"
+              inputmode="numeric"
+              title="计划份数 ${num(maxPlanUnits)} 份以内；未售出份数封闭后不形成债务"
+            >
+          </label>
+          <button
+            type="button"
+            class="ken-btn ken-btn--gold ken-btn--mini"
+            data-action="issue-bond"
+            data-city-id="${esc(city.id)}"
+            data-testid="issue-bond"
+            data-focus-key="issue-bond"
+            title="按当前计划份数发起一次发行；认购窗口默认当月撮合"
+          >发起发行</button>
+        </div>
+        <p class="fiscal-note">计划份数上限 ${num(maxPlanUnits)} 份；只有实际售出的份数形成本金，未售出份数关闭后记录但不形成债务。</p>
+      </div>
+    </div>`;
+}
+
+/**
+ * 债券市场（所有玩家可见的公开区）。
+ * 只展示 PublicBondOfferView 白名单字段：不含计划总额、总售额与政府总债务。
+ */
+export function renderBondMarketSection(store: GameStore): string {
+  const offers = store.bondMarketOffers;
+  const holdings = store.ownBondHoldings;
+  const offerRows =
+    offers.length === 0
+      ? `<p class="bond-empty" data-testid="bond-market-empty">暂无已发行债券；市长发起发行后会出现在这里。</p>`
+      : offers
+          .map((offer) => {
+            const cityLabel = cityName(store.world, offer.cityId);
+            const isOffering = offer.status === 'offering' && offer.unitsAvailable > 0;
+            const action = isOffering
+              ? `<span class="bond-buy">
+                  <input
+                    type="number"
+                    data-bond-subscribe-units
+                    min="1"
+                    max="${offer.unitsAvailable}"
+                    step="1"
+                    value="1"
+                    inputmode="numeric"
+                    aria-label="认购 ${esc(cityLabel)} 债券份数（最多 ${num(offer.unitsAvailable)} 份）"
+                  >
+                  <button
+                    type="button"
+                    class="ken-btn ken-btn--green ken-btn--mini"
+                    data-action="subscribe-bond"
+                    data-issuance-id="${esc(offer.issuanceId)}"
+                    data-testid="subscribe-bond-${esc(offer.issuanceId)}"
+                    data-focus-key="subscribe-${esc(offer.issuanceId)}"
+                    title="用可用资金认购；不可贷款购债"
+                  >认购</button>
+                </span>`
+              : `<span class="bond-closed" data-testid="bond-closed-${esc(offer.issuanceId)}">${esc(BOND_STATUS_LABELS[offer.status])}${offer.status === 'offering' ? '（已售罄）' : ''}</span>`;
+            return `
+              <div class="bond-offer" data-issuance-id="${esc(offer.issuanceId)}">
+                <div class="bond-offer-head">
+                  <b>${esc(cityLabel)} · 政府债券</b>
+                  <span class="bond-status">${esc(BOND_STATUS_LABELS[offer.status])}</span>
+                </div>
+                <div class="bond-offer-grid">
+                  <span>面额<b>${money(offer.faceValue)}</b></span>
+                  <span>票面年利率<b>${pct(offer.couponRateAnnual, 2)}</b></span>
+                  <span>期限<b>${num(offer.termMonths)} 月</b></span>
+                  <span>付息周期<b>每 ${num(offer.interestPeriodMonths)} 月</b></span>
+                  <span>到期<b>${esc(tickDate(offer.maturityTick))}</b></span>
+                  <span>可认购<b>${num(offer.unitsAvailable)} 份</b></span>
+                </div>
+                <div class="bond-offer-foot">${action}</div>
+              </div>`;
+          })
+          .join('');
+
+  const holdingRows =
+    holdings.length === 0
+      ? `<p class="bond-empty" data-testid="own-bond-empty">你还没有持有债券。</p>`
+      : `<ul class="bond-holding-list">${holdings
+          .map(
+            (holding) => `
+            <li class="bond-holding" data-testid="own-bond-${esc(holding.holdingId)}">
+              <span class="bond-holding-city">${esc(cityName(store.world, holding.cityId))}</span>
+              <span>${num(holding.units)} 份 · 本金 <b>${money(holding.principal)}</b></span>
+              <span>应计利息 <b>${money(holding.accruedInterest)}</b></span>
+              <span>到期 ${esc(tickDate(holding.maturityTick))}${holding.redeemedTick === null ? '' : `（${esc(tickDate(holding.redeemedTick))} 已兑付）`}</span>
+            </li>`,
+          )
+          .join('')}</ul>`;
+
+  return `
+    <section class="panel-section bond-market-section" data-testid="bond-market-section">
+      <div class="section-head">
+        <div>
+          <span class="kicker">BOND MARKET</span>
+          <h2>债券市场</h2>
+        </div>
+        <span class="section-tag">${num(offers.filter((offer) => offer.status === 'offering').length)} 批次认购中</span>
+      </div>
+      <p class="fiscal-note">公开信息只含发行城市、面额、票面年利率、期限与到期日；发行计划总额、总售额与政府总债务不公开。认购只使用可用资金，不可贷款购债。</p>
+      ${offerRows}
+      <div class="bond-holdings">
+        <div class="gov-sub-head"><span>我的持债</span><em>${num(holdings.length)} 条记录</em></div>
+        ${holdingRows}
+      </div>
+    </section>`;
+}
+
 export function renderTransportSection(store: GameStore, city: City): string {
   const view = store.transportView(city.id);
   const stats = view.stats;
   // 补充指令 §7：政府可用资金与支出明细仅该城市市长可见。
   // 非市长不读取余额、不做"资金是否够"的比较，也不展示投资入口为可用。
   const isMayor = store.isMayorOf(city.id);
-  const treasury = isMayor ? city.treasury : null;
+  // 财政余额只从市长财政视图读取（契约投影），非市长为 null，不直接读 city.treasury。
+  const treasury = isMayor ? store.fiscalView(city.id)?.treasury ?? null : null;
   const corridors = new Map(view.corridors.map((entry) => [entry.withCityId, entry]));
 
   const linkRows =
@@ -1389,7 +1698,7 @@ function renderCompanies(store: GameStore, city: City, focusCompanyId: string | 
   );
   const totalEmployees = companies.reduce((total, company) => total + company.employees, 0);
   return `
-    <section class="panel-section">
+    <section class="panel-section" data-testid="companies-section">
       <div class="section-head">
         <div>
           <span class="kicker">PRIVATE EMPLOYERS</span>
@@ -1626,6 +1935,7 @@ export function renderRightRegion(store: GameStore, state: PanelState): string {
     ${renderMarket(city, state.showAllGoods)}
     ${renderCompanies(store, city, state.focusCompanyId)}
     ${renderTradeSummary(store)}
+    ${renderBondMarketSection(store)}
     ${renderAgreementsSection(store, city)}`;
 }
 
@@ -3033,7 +3343,9 @@ export function renderRightCity(store: GameStore, state: PanelState): string {
       ${renderPopulationStrataSection(store, city)}
       ${renderPulse(city)}
     </section>
+    ${renderCompanies(store, city, state.focusCompanyId)}
     ${renderGovernmentSection(store, city)}
+    ${renderBondMarketSection(store)}
     ${renderTransportSection(store, city)}
     ${renderTalentMarketSection(store, city)}
     ${renderSystems(store, city)}
@@ -3049,7 +3361,9 @@ function isPlayerFacingLog(message: string): boolean {
 export function renderLogDock(store: GameStore, collapsed: boolean): string {
   const totals = worldTotals(store.world, store.playerNetWorth);
   const lastDividend = store.world.player.dividendsReceived ?? store.world.player.lastDividend ?? 0;
-  const logs = store.world.log
+  // 渲染期按当前身份重过滤（IMPLEMENTATION_v0.7 §8）；不得直接读 world.log。
+  const logs = store
+    .visibleLog()
     .filter((entry) => entry.kind !== 'system' && isPlayerFacingLog(entry.message))
     .slice(-14)
     .reverse();

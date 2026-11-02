@@ -7746,3 +7746,438 @@ kbd {
     overflow-y: auto;
   }
 }
+
+/* ---------------------------------------------------------------- v0.7：市长财政面板 / 债券市场 */
+
+.fiscal-panel {
+  margin: 6px 0 8px;
+  padding: 7px 8px 8px;
+  border: 1px solid rgba(124, 196, 205, 0.22);
+  border-left: 2px solid rgba(95, 227, 192, 0.55);
+  border-radius: 6px;
+  background: linear-gradient(180deg, rgba(95, 227, 192, 0.05), rgba(255, 255, 255, 0.01));
+}
+
+.fiscal-panel.is-warn {
+  border-left-color: rgba(242, 193, 78, 0.65);
+}
+
+.fiscal-panel.is-bad {
+  border-left-color: rgba(255, 122, 112, 0.7);
+}
+
+.fiscal-panel .is-good {
+  color: var(--teal);
+}
+
+.fiscal-panel .is-warn {
+  color: var(--gold);
+}
+
+.fiscal-panel .is-bad {
+  color: var(--red);
+}
+
+.fiscal-risk-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 5px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 6.8px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.fiscal-risk-badge.is-good {
+  color: var(--teal);
+}
+
+.fiscal-risk-badge.is-warn {
+  color: var(--gold);
+}
+
+.fiscal-risk-badge.is-bad {
+  color: var(--red);
+}
+
+.fiscal-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 8px;
+  margin-top: 4px;
+}
+
+.fiscal-kpi {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 6px;
+  border: 1px solid rgba(124, 196, 205, 0.14);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.012);
+}
+
+.fiscal-kpi > span,
+.fiscal-debt-grid span,
+.fiscal-risk-row span,
+.fiscal-due-row span {
+  color: var(--faint);
+  font-size: 6.8px;
+}
+
+.fiscal-kpi b {
+  font-family: var(--mono);
+  font-size: 9.4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.fiscal-kpi.is-strong b {
+  color: var(--gold);
+  font-size: 10.6px;
+}
+
+.fiscal-debt-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px 8px;
+  margin-top: 6px;
+}
+
+.fiscal-debt-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 3px 0;
+  border-bottom: 1px dotted rgba(124, 196, 205, 0.12);
+}
+
+.fiscal-debt-grid b {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 8.4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.fiscal-debt-grid em,
+.fiscal-risk-row em,
+.fiscal-due-row em {
+  color: var(--faint);
+  font-size: 6.4px;
+  font-style: normal;
+}
+
+.fiscal-debt-grid .is-strong {
+  grid-column: 1 / -1;
+  border-bottom-color: rgba(242, 193, 78, 0.35);
+}
+
+.fiscal-debt-grid .is-strong b {
+  color: var(--gold);
+  font-size: 10px;
+}
+
+.fiscal-risk-row,
+.fiscal-due-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 3px 8px;
+  margin-top: 6px;
+}
+
+.fiscal-due-row {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.fiscal-risk-row > div,
+.fiscal-due-row > div {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.fiscal-risk-row b,
+.fiscal-due-row b {
+  font-family: var(--mono);
+  font-size: 8.6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.fiscal-gdp-window {
+  margin-top: 6px;
+  padding: 4px 6px;
+  border: 1px solid rgba(124, 196, 205, 0.14);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.012);
+}
+
+.fiscal-gdp-window summary {
+  color: var(--muted);
+  font-size: 7.4px;
+  cursor: pointer;
+}
+
+.gdp-window-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px 10px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gdp-window-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: baseline;
+  gap: 4px;
+  border-bottom: 1px dotted rgba(124, 196, 205, 0.1);
+  color: var(--faint);
+  font-size: 6.8px;
+}
+
+.gdp-window-row b {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.gdp-window-row em {
+  font-size: 6.2px;
+  font-style: normal;
+}
+
+.gdp-window-row em.is-estimate {
+  color: rgba(242, 193, 78, 0.85);
+}
+
+.gdp-window-row em.is-real {
+  color: rgba(95, 227, 192, 0.8);
+}
+
+.fiscal-note {
+  margin: 5px 0 0;
+  color: var(--faint);
+  font-size: 6.8px;
+  line-height: 1.55;
+}
+
+.fiscal-alert {
+  margin: 5px 0;
+  padding: 5px 7px;
+  border: 1px solid rgba(255, 122, 112, 0.35);
+  border-radius: 4px;
+  background: rgba(255, 122, 112, 0.07);
+}
+
+.fiscal-alert b {
+  color: var(--red);
+  font-size: 8px;
+}
+
+.fiscal-alert p {
+  margin: 3px 0 0;
+  color: rgba(255, 190, 185, 0.85);
+  font-size: 6.8px;
+  line-height: 1.5;
+}
+
+.fiscal-issuance {
+  margin-top: 4px;
+}
+
+.fiscal-table-wrap {
+  overflow-x: auto;
+}
+
+.fiscal-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 6.8px;
+}
+
+.fiscal-table th {
+  padding: 2px 4px;
+  border-bottom: 1px solid rgba(124, 196, 205, 0.2);
+  color: var(--faint);
+  font-weight: 500;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.fiscal-table td {
+  padding: 2.5px 4px;
+  border-bottom: 1px dotted rgba(124, 196, 205, 0.1);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.fiscal-empty-cell {
+  color: var(--faint);
+  font-family: var(--ui-font);
+}
+
+.bond-issue-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.bond-issue-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--faint);
+  font-size: 6.8px;
+}
+
+.bond-issue-form input,
+.bond-buy input {
+  width: 84px;
+  padding: 3px 5px;
+  border: 1px solid rgba(124, 196, 205, 0.25);
+  border-radius: 3px;
+  background: rgba(4, 11, 18, 0.8);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
+/* 债券市场（所有玩家可见的公开区） */
+.bond-market-section .fiscal-note {
+  margin: 2px 0 6px;
+}
+
+.bond-offer {
+  margin-bottom: 5px;
+  padding: 5px 7px;
+  border: 1px solid rgba(79, 195, 247, 0.22);
+  border-left: 2px solid rgba(79, 195, 247, 0.5);
+  border-radius: 5px;
+  background: linear-gradient(90deg, rgba(79, 195, 247, 0.05), rgba(255, 255, 255, 0.008));
+}
+
+.bond-offer-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 8px;
+}
+
+.bond-offer-head b {
+  color: var(--text);
+}
+
+.bond-status {
+  color: var(--faint);
+  font-size: 6.6px;
+}
+
+.bond-offer-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px 8px;
+  margin-top: 3px;
+}
+
+.bond-offer-grid span {
+  display: flex;
+  flex-direction: column;
+  color: var(--faint);
+  font-size: 6.4px;
+}
+
+.bond-offer-grid b {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 7.4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.bond-offer-foot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+
+.bond-buy {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.bond-closed {
+  color: var(--faint);
+  font-size: 6.8px;
+}
+
+.bond-empty {
+  margin: 3px 0;
+  color: var(--faint);
+  font-size: 7.2px;
+}
+
+.bond-holdings {
+  margin-top: 6px;
+}
+
+.bond-holding-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.bond-holding {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 2px 8px;
+  padding: 3px 0;
+  border-bottom: 1px dotted rgba(124, 196, 205, 0.12);
+  color: var(--muted);
+  font-size: 6.8px;
+}
+
+.bond-holding-city {
+  color: var(--teal);
+  font-size: 7.2px;
+}
+
+.bond-holding b {
+  color: var(--text);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 1180px) {
+  .bond-offer-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .gdp-window-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* v0.7 #2：企业数量 KPI 可点击直达企业列表 */
+.kpi.kpi--link {
+  cursor: pointer;
+  border-color: rgba(79, 195, 247, 0.28);
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.kpi.kpi--link:hover,
+.kpi.kpi--link:focus-visible {
+  border-color: rgba(79, 195, 247, 0.55);
+  background: rgba(79, 195, 247, 0.06);
+  outline: none;
+}
