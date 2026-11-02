@@ -263,7 +263,8 @@ export class RegionalScene extends Phaser.Scene {
     if (layer === 'population') {
       dataLine = `人口 ${formatNumber(city.population.total)} · 失业 ${(city.population.unemployed / Math.max(1, city.population.laborForce) * 100).toFixed(1)}%`;
     } else if (layer === 'economy') {
-      dataLine = `GDP ${formatMoney(city.gdp)} · 财政 ${formatMoney(city.treasury)}`;
+      // 补充指令 §7：地图是公开视图，不展示政府财政余额。
+      dataLine = `GDP ${formatMoney(city.gdp)} · 企业 ${this.store.companiesForCity(city.id).length}`;
     } else {
       dataLine = `主导产业 ${this.industryLead(city)} · 就业 ${formatNumber(city.population.employed)}`;
     }

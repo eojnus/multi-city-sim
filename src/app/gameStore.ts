@@ -560,7 +560,13 @@ export class GameStore {
 
   /** 通知中心数据：已按玩家身份与持股权利筛选，不含模拟日志。 */
   get notifications(): PlayerNotification[] {
-    return visibleNotifications(this.world);
+    // 补充指令 §7：城市级通知只能在"当前担任该市市长"期间展示。
+    // 旧存档里的城市通知在换任 / 离职 / 破产重选后仍留在通知列表，必须在展示期重过滤；
+    // 模拟层在生成时也校验一次（notifications.ts notificationVisible），这里是第二道防线。
+    const mayorCityId = this.mayorCityId;
+    return visibleNotifications(this.world).filter(
+      (notice) => notice.audience !== 'city' || (notice.cityId ?? null) === mayorCityId,
+    );
   }
 
   get unreadNotificationCount(): number {
@@ -835,8 +841,15 @@ export class GameStore {
     this.emit();
   }
 
-  /** 明确标注的演示身份：用于验证市长专属路径（可绕过选举，不代表选举结果）。 */
+  /**
+   * 明确标注的演示身份：用于验证市长专属路径（可绕过选举，不代表选举结果）。
+   * 生产构建必须移除该后门（补充指令 §7 / DECISIONS v1.1 #15）；界面按钮同步隐藏。
+   */
   setMayorDemo(cityId: string | null): void {
+    if (!import.meta.env.DEV) {
+      this.toast('演示市长身份仅开发构建可用；正式版请通过选举获得身份。', 'warning');
+      return;
+    }
     if (cityId) {
       appointPlayerMayor(this.world, cityId);
       const city = this.world.cities.find((candidate) => candidate.id === cityId);
@@ -867,6 +880,14 @@ export class GameStore {
   /** 玩家当前是否为某城市市长（仅状态；演示设置见 setMayorDemo）。 */
   get mayorCityId(): string | null {
     return this.world.player.roles?.mayorCityId ?? null;
+  }
+
+  /**
+   * 界面与命令共用的市长判据：每次调用现算，不缓存。
+   * 换任、离职、破产重新选举或读档后会立即返回新身份，界面无需额外失效逻辑。
+   */
+  isMayorOf(cityId: string): boolean {
+    return playerIsMayor(this.world, cityId);
   }
 
   agreementsForCity(cityId: string): WorldState['agreements'] {
@@ -967,6 +988,11 @@ export class GameStore {
   stopPolicy(policyId: (typeof POLICY_DEFINITIONS)[number]['id']): boolean {
     const cityId = this.selectedCityId;
     if (!cityId) return false;
+    if (!playerIsMayor(this.world, cityId)) {
+      this.toast('只有该城市市长可以停止政策。', 'warning');
+      this.emit();
+      return false;
+    }
     const result = cancelPolicy(this.world, cityId, policyId);
     if (!result.ok) {
       this.toast(result.error ?? '无法停止政策', 'error');
@@ -1033,6 +1059,13 @@ export class GameStore {
       this.toast('请先选择城市。', 'error');
       return false;
     }
+    // 政府出资属于市长专属财政操作（补充指令 §7）：非市长在命令层直接拒绝，
+    // 不能只靠界面禁用按钮。
+    if (!playerIsMayor(this.world, cityId)) {
+      this.toast('只有该城市市长可以决定市政投资。', 'warning');
+      this.emit();
+      return false;
+    }
     const link = this.world.transport.links.find((entry) => entry.id === target);
     const label = link
       ? `${link.fromCityId}—${link.toCityId} ${link.mode === 'rail' ? '铁路' : '公路'}`
@@ -1069,6 +1102,12 @@ export class GameStore {
     const cityId = this.selectedCityId;
     if (!cityId) {
       this.toast('请先选择城市。', 'error');
+      return false;
+    }
+    // 市政府出资创办企业同属市长专属财政操作，命令层校验。
+    if (founderType === 'government' && !playerIsMayor(this.world, cityId)) {
+      this.toast('只有该城市市长可以以市政府名义创办企业。', 'warning');
+      this.emit();
       return false;
     }
     const result = foundCompany(

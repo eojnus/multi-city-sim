@@ -73,7 +73,7 @@ const LAYERS: LayerDefinition[] = [
     code: '02',
     short: '金线 = 月度 GDP',
     hintRegion:
-      '以城市 GDP 与财政体量读图；城市地图按街区地价系数着色，商务与办公区更亮。',
+      '以城市 GDP 与人口体量读图；城市地图按街区地价系数着色，商务与办公区更亮。',
     hintCity:
       '街区颜色对应地价系数；数值来自布局模板，住房交易与地价形成尚未接入模拟。',
   },
@@ -343,7 +343,7 @@ function cityCard(city: City, selected: boolean): string {
         </span>
         <span class="city-econ">
           <span>GDP <b>${money(city.gdp)}</b></span>
-          <span>财政 <b>${money(city.treasury)}</b></span>
+          <span>劳动力 <b>${num(city.population.laborForce)}</b></span>
         </span>
       </button>
       <div class="city-card-foot">
@@ -597,10 +597,12 @@ export function renderPopulationSection(city: City): string {
 }
 
 export function renderMayorDemo(store: GameStore, city: City): string {
+  // 生产构建移除演示入口（补充指令 §7 / DECISIONS v1.1 #15）；仅开发构建保留，并带 DEV 水印。
+  if (!import.meta.env.DEV) return '';
   const active = store.mayorCityId === city.id;
   return `
     <div class="mayor-demo ${active ? 'is-active' : ''}">
-      <span class="mayor-demo-kicker" aria-hidden="true">DEMO ROLE</span>
+      <span class="mayor-demo-kicker" aria-hidden="true">DEV ONLY · 调试后门</span>
       <button
         type="button"
         class="mayor-demo-btn"
@@ -613,8 +615,8 @@ export function renderMayorDemo(store: GameStore, city: City): string {
       >${active ? '退出市长演示' : '以市长身份查看（演示）'}</button>
       ${
         active
-          ? '<span class="mayor-demo-badge">演示：市长身份 · 政策由你选择</span>'
-          : '<span class="mayor-demo-hint">也可以通过「政府与政策」参选市长（演示规则）。</span>'
+          ? '<span class="mayor-demo-badge">演示：市长身份 · 仅开发构建 · 政策由你选择</span>'
+          : '<span class="mayor-demo-hint">仅开发构建可用；正式版请通过「政府与政策」参选市长。</span>'
       }
     </div>`;
 }
@@ -758,7 +760,10 @@ export function renderGovernmentSection(store: GameStore, city: City): string {
   const leaderParty = isPlayerMayor ? '玩家执政' : politics?.leader?.party ?? '—';
   const termMonths = Math.max(0, politics?.termMonthsLeft ?? 0);
   const electionCost = DEMO_CONFIG.politics.electionCost;
-  const ledger = store.fiscalLedger.filter((entry) => entry.cityId === city.id).slice(0, 6);
+  // 财政流水属于市长专属信息（补充指令 §7）：非市长连数据都不取，避免模板层误用。
+  const ledger = isPlayerMayor
+    ? store.fiscalLedger.filter((entry) => entry.cityId === city.id).slice(0, 6)
+    : [];
 
   const activeCards =
     view.active.length === 0
@@ -774,7 +779,11 @@ export function renderGovernmentSection(store: GameStore, city: City): string {
                   <span>剩余 ${Math.max(0, policy.monthsRemaining)} 个月</span>
                 </div>
                 <div class="policy-active-meta">
-                  已支出 <b>${money(policy.spent)}</b> / 预算 ${money(policy.budget)}
+                  ${
+                    isPlayerMayor
+                      ? `已支出 <b>${money(policy.spent)}</b> / 预算 ${money(policy.budget)}`
+                      : '<span class="is-restricted-inline">预算与支出明细仅该城市市长可见</span>'
+                  }
                 </div>
                 <p class="policy-active-effect">${esc(effectSummary(policy.effects))}</p>
                 ${
@@ -998,17 +1007,27 @@ export function renderGovernmentSection(store: GameStore, city: City): string {
             </div>`
           : ''
       }
-      <div class="fiscal-brief">
-        <div class="gov-sub-head"><span>财政流水</span><em>最近 ${ledger.length} 条</em></div>
-        <ul class="fiscal-list">${ledgerRows}</ul>
-      </div>
+      ${
+        isPlayerMayor
+          ? `<div class="fiscal-brief" data-testid="fiscal-ledger">
+              <div class="gov-sub-head"><span>财政流水</span><em>最近 ${ledger.length} 条</em></div>
+              <ul class="fiscal-list">${ledgerRows}</ul>
+            </div>`
+          : `<div class="fiscal-brief is-restricted" data-testid="fiscal-restricted">
+              <div class="gov-sub-head"><span>财政流水</span><em>仅市长可见</em></div>
+              <p class="fiscal-empty">财政余额、收支与流水明细仅该城市市长可见；公开信息见城市概况与债券市场。</p>
+            </div>`
+      }
     </section>`;
 }
 
 export function renderTransportSection(store: GameStore, city: City): string {
   const view = store.transportView(city.id);
   const stats = view.stats;
-  const treasury = city.treasury;
+  // 补充指令 §7：政府可用资金与支出明细仅该城市市长可见。
+  // 非市长不读取余额、不做"资金是否够"的比较，也不展示投资入口为可用。
+  const isMayor = store.isMayorOf(city.id);
+  const treasury = isMayor ? city.treasury : null;
   const corridors = new Map(view.corridors.map((entry) => [entry.withCityId, entry]));
 
   const linkRows =
@@ -1020,15 +1039,17 @@ export function renderTransportSection(store: GameStore, city: City): string {
             const estimate = link.estimate;
             const construction = link.construction;
             const atMax = link.level >= link.maxLevel;
-            const noMoney = treasury < estimate.cost;
-            const canInvest = estimate.ok && !noMoney;
-            const reason = construction
-              ? `建设中 ${construction.monthsRemaining}/${construction.totalMonths} 月`
-              : atMax
-                ? '已达最高等级'
-                : noMoney
-                  ? '财政资金不足'
-                  : '';
+            const noMoney = treasury !== null && treasury < estimate.cost;
+            const canInvest = isMayor && estimate.ok && !noMoney;
+            const reason = !isMayor
+              ? '仅市长可决定市政投资'
+              : construction
+                ? `建设中 ${construction.monthsRemaining}/${construction.totalMonths} 月`
+                : atMax
+                  ? '已达最高等级'
+                  : noMoney
+                    ? '财政资金不足'
+                    : '';
             const corridor = corridors.get(link.partner);
             return `
               <tr class="${canInvest ? '' : 'is-locked'}">
@@ -1067,20 +1088,24 @@ export function renderTransportSection(store: GameStore, city: City): string {
   const constructionReason = construction
     ? `城内${transportModeLabel(construction.kind)}正在建设中`
     : '';
-  const roadReason = !road
-    ? '暂无城内交通网络'
-    : !road.ok
-      ? constructionReason || '城内道路已达最高等级'
-      : treasury < road.cost
-        ? '财政资金不足'
-        : '';
-  const railReason = !rail
-    ? '暂无城内交通网络'
-    : !rail.ok
-      ? constructionReason || '城内铁路已达最高等级'
-      : treasury < rail.cost
-        ? '财政资金不足'
-        : '';
+  const roadReason = !isMayor
+    ? '仅市长可决定市政投资'
+    : !road
+      ? '暂无城内交通网络'
+      : !road.ok
+        ? constructionReason || '城内道路已达最高等级'
+        : treasury !== null && treasury < road.cost
+          ? '财政资金不足'
+          : '';
+  const railReason = !isMayor
+    ? '仅市长可决定市政投资'
+    : !rail
+      ? '暂无城内交通网络'
+      : !rail.ok
+        ? constructionReason || '城内铁路已达最高等级'
+        : treasury !== null && treasury < rail.cost
+          ? '财政资金不足'
+          : '';
 
   return `
     <section class="panel-section transport-section" data-testid="transport-section">
@@ -1096,8 +1121,8 @@ export function renderTransportSection(store: GameStore, city: City): string {
         <div class="transport-kpi"><span>城际容量</span><b>${qty(stats.capacity)}</b></div>
         <div class="transport-kpi ${stats.penaltyRate > 0 ? 'is-warn' : ''}"><span>惩罚比例</span><b>${pct(stats.penaltyRate, 1)}</b></div>
         <div class="transport-kpi ${stats.capacityLossTotal > 0 ? 'is-warn' : ''}"><span>收益损失合计</span><b>${money(stats.capacityLossTotal)}</b></div>
-        <div class="transport-kpi"><span>财政补偿</span><b>${money(stats.freightSubsidy)}</b></div>
-        <div class="transport-kpi"><span>维护支出</span><b>${money(stats.maintenancePaid)}</b></div>
+        <div class="transport-kpi"><span>财政补偿</span><b>${isMayor ? money(stats.freightSubsidy) : '—'}</b></div>
+        <div class="transport-kpi"><span>维护支出</span><b>${isMayor ? money(stats.maintenancePaid) : '—'}</b></div>
       </div>
       <div class="gov-sub-head"><span>城际线路</span><em>公路 / 铁路</em></div>
       <div class="table-wrap">
@@ -1126,7 +1151,7 @@ export function renderTransportSection(store: GameStore, city: City): string {
                   target: 'intracity:road',
                   testId: 'intracity-road',
                   label: '升级道路',
-                  disabled: !road?.ok || treasury < (road?.cost ?? 0),
+                  disabled: !isMayor || !road?.ok || (treasury ?? 0) < (road?.cost ?? 0),
                   reason: roadReason,
                   hint: '由财政出资开工城内道路升级',
                 })}
@@ -1139,7 +1164,7 @@ export function renderTransportSection(store: GameStore, city: City): string {
                   target: 'intracity:rail',
                   testId: 'intracity-rail',
                   label: '升级铁路',
-                  disabled: !rail?.ok || treasury < (rail?.cost ?? 0),
+                  disabled: !isMayor || !rail?.ok || (treasury ?? 0) < (rail?.cost ?? 0),
                   reason: railReason,
                   hint: '由财政出资开工城内铁路升级',
                 })}
