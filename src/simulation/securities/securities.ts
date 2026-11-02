@@ -45,11 +45,16 @@ export function holderOf(type: HolderType, id: string): HolderRef {
 }
 
 export function holderExists(world: WorldState, holder: HolderRef): boolean {
-  if (!holder || typeof holder.id !== 'string') return false;
+  if (!holder || typeof holder.id !== 'string' || holder.id.length === 0) return false;
   if (holder.type === 'player') return holder.id === 'player';
   if (holder.type === 'company') return world.companies.some((company) => company.id === holder.id);
   if (holder.type === 'investorGroup') return world.investors.some((group) => group.id === holder.id);
   if (holder.type === 'city') return world.cities.some((city) => city.id === holder.id);
+  // v0.7：AI 经营者以个人身份持股；无股东托管持股由破产清算创建（id = trust-{companyId}）。
+  if (holder.type === 'operator') {
+    return (world.management?.operators ?? []).some((operator) => operator.id === holder.id);
+  }
+  if (holder.type === 'trust') return holder.id.startsWith('trust-');
   return false;
 }
 
@@ -62,6 +67,13 @@ export function holderName(world: WorldState, holder: HolderRef | 'management'):
   if (holder.type === 'city') {
     return world.cities.find((city) => city.id === holder.id)?.name ?? holder.id;
   }
+  if (holder.type === 'operator') {
+    return (
+      world.management?.operators.find((operator) => operator.id === holder.id)?.name ??
+      `AI 经营者 · ${holder.id}`
+    );
+  }
+  if (holder.type === 'trust') return `托管持股 · ${holder.id}`;
   return world.investors.find((group) => group.id === holder.id)?.name ?? holder.id;
 }
 
@@ -140,7 +152,8 @@ export function votingHoldersOf(
   companyId: string,
 ): { holder: HolderRef; shares: number }[] {
   return companyHolders(world, companyId)
-    .filter((entry) => entry.votingShares > 0)
+    // v0.7：托管持股（trust）按契约无表决权；AI 经营者（operator）持股首版暂不参与表决。
+    .filter((entry) => entry.votingShares > 0 && entry.holder.type !== 'trust' && entry.holder.type !== 'operator')
     .map((entry) => ({ holder: entry.holder, shares: entry.votingShares }))
     .sort(
       (a, b) =>
@@ -471,7 +484,10 @@ export function distributeDividend(
       entry.holder.type !== 'player' &&
       entry.holder.type !== 'company' &&
       entry.holder.type !== 'investorGroup' &&
-      entry.holder.type !== 'city'
+      entry.holder.type !== 'city' &&
+      // v0.7：破产托管的 trust 持股与 AI 经营者持股没有个人现金账户，暂不派发现金股息。
+      entry.holder.type !== 'trust' &&
+      entry.holder.type !== 'operator'
     ) {
       throw new Error(`股息分配遇到未知持有人类型：${String(entry.holder.type)}`);
     }
@@ -497,14 +513,18 @@ export function distributeDividend(
     );
   }
 
+  let creditedCents = 0;
   for (const entry of payouts) {
     if (entry.value <= 0) continue;
+    // v0.7：【暂定】托管/经营者持股暂不派发现金股息，对应金额留在企业（不销毁货币、不改变股本）。
+    if (entry.holder.type === 'trust' || entry.holder.type === 'operator') continue;
     // 居民投资实体的股息在下面拆分（留存 / 返还），不能先整笔入账再扣减，
     // 否则同一笔钱会同时留在投资账户和进入居民收入。
     // 政府股东的股息直接进入城市财政，并写财政流水；不计入居民投资收入。
     if (entry.holder.type !== 'investorGroup' && entry.holder.type !== 'city') {
       creditHolderCash(world, entry.holder, entry.value);
     }
+    creditedCents += Math.round(entry.value * 100);
     if (entry.holder.type === 'player') {
       world.player.lastDividend = round2((world.player.lastDividend ?? 0) + entry.value);
       world.player.dividendsReceived = round2((world.player.dividendsReceived ?? 0) + entry.value);
@@ -568,7 +588,8 @@ export function distributeDividend(
     );
   }
 
-  result.total = round2(paidCents / 100);
+  // 实际从企业扣除的金额 = 实际派发到可认领账户的金额（托管/经营者部分留在企业）。
+  result.total = round2(creditedCents / 100);
   return result;
 }
 

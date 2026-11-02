@@ -68,6 +68,11 @@ function holderIsValid(world: WorldState, holder: HolderRef): boolean {
       return (world.investors ?? []).some((group) => group.id === holder.id);
     case 'city':
       return (world.cities ?? []).some((city) => city.id === holder.id);
+    // v0.7：AI 经营者以个人身份持股；托管持股（trust）由破产清算写入持股账本。
+    case 'operator':
+      return (world.management?.operators ?? []).some((operator) => operator.id === holder.id);
+    case 'trust':
+      return holder.id.startsWith('trust-');
     default:
       return false;
   }
@@ -114,6 +119,8 @@ function votingHoldersOf(world: WorldState, companyId: string): { holder: Holder
     if (holding.companyId !== companyId) continue;
     if (!classIds.has(holding.shareClassId)) continue;
     if (!(holding.shares > 0)) continue;
+    // v0.7：托管持股无表决权；AI 经营者持股首版暂不参与表决（避免与不变量口径冲突）。
+    if (holding.holder.type === 'trust' || holding.holder.type === 'operator') continue;
     if (!holderIsValid(world, holding.holder)) continue;
     const key = holderKey(holding.holder);
     const existing = totals.get(key);
