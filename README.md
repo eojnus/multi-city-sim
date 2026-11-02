@@ -108,7 +108,7 @@ npm run package        # 生成 Windows NSIS 安装包（需联网）
 ## 验证状态（2026-11-02，v0.5）
 
 - `npm run typecheck`：通过（渲染层 + Electron 主进程，0 错误）。
-- `npx vitest run`：**37 个测试文件 / 291 项全部通过**（含 v0.5 新增的贷款权限、授权、批次期限、职业工资、按群体消费、人才保留、迁移账户、存档终态记录等用例）。
+- `npx vitest run`：**38 个测试文件 / 296 项全部通过**（含贷款权限、授权、批次期限、职业工资、按群体消费、人才保留、迁移账户、存档终态记录，以及零预算采购融资等用例）。
 - `npm run build`：通过。
 - 桌面逐项验收 `node scripts/acceptance-desktop.cjs`（Xvfb + Electron，隔离 userData）：**18/18 项通过、0 条控制台错误**；截图与 JSON 结果在 `artifacts/`。
 - 详细运行记录、贷款压力复核与 Windows 复验步骤见交付报告第 12 节。
@@ -138,4 +138,5 @@ npm run package        # 生成 Windows NSIS 安装包（需联网）
 - 本次交付报告：`docs/development/DELIVERY_REPORT_population_management_banking.md`
 - v0.4 实现设计（数据权威、结算顺序、暂定参数）：`docs/development/IMPLEMENTATION_PLAN_v0.4.md`
 - v0.5 验收修复记录（7 项修复、桌面逐项验收、贷款压力复核）：交付报告第 12 节
+- v0.5 复验修复（采购预算为零时的授权内融资采购）：交付报告第 13 节
 - 资源核验：`docs/assets/ASSET_REPORT.md`
