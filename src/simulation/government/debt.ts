@@ -37,6 +37,7 @@ import type {
   WorldState,
 } from '../contracts/types';
 import type { DemoConfig } from '../../data/config';
+import { round2 } from '../core/math';
 import { assessCityFiscalRisk } from './metrics';
 
 export interface GovernmentSettlementResult {
@@ -165,17 +166,75 @@ export function applyBankAdvance(
     purpose: 'maturity' | 'bankruptcy';
   },
 ): GovernmentAdvanceResult {
-  void world;
-  void city;
-  void config;
-  void input;
-  return {
-    ok: false,
-    advance: null,
-    loan: null,
-    amountAdvanced: 0,
-    error: '银行垫付尚未实现（块2）',
+  const principal = round2(Math.max(0, input.principal));
+  const interest = round2(Math.max(0, input.interest));
+  const total = round2(principal + interest);
+  const government = city.government;
+  if (!government) {
+    return {
+      ok: false,
+      advance: null,
+      loan: null,
+      amountAdvanced: 0,
+      error: `${city.name} 缺少政府财政状态`,
+    };
+  }
+  if (!Number.isFinite(total) || total <= 0.005) {
+    return { ok: true, advance: null, loan: null, amountAdvanced: 0 };
+  }
+
+  const advanceConfig = config.government.advance;
+  const loanNumber = government.nextLoanNumber;
+  government.nextLoanNumber += 1;
+  const loan: GovernmentLoanContract = {
+    id: `govloan-${city.id}-${loanNumber}`,
+    cityId: city.id,
+    purpose: 'bondAdvance',
+    // 垫付金额（本金 + 欠息）整体资本化为贷款本金，后续按 advance 口径等额本金偿还。
+    principal: total,
+    outstanding: total,
+    monthlyPrincipal: round2(total / Math.max(1, advanceConfig.termMonths)),
+    rateMonthly: advanceConfig.rateMonthly,
+    termMonths: advanceConfig.termMonths,
+    startTick: input.tick,
+    nextDueTick: input.tick + 1,
+    paidPrincipal: 0,
+    paidInterest: 0,
+    accruedInterest: 0,
+    arrearsPrincipal: 0,
+    arrearsInterest: 0,
+    missedPayments: 0,
+    status: 'active',
+    payments: [],
+    bondIssuanceId: input.issuanceId,
+    note: `【暂定】${input.purpose === 'bankruptcy' ? '破产' : '到期'}兑付银行无条件垫付转借款（本金 ${principal} + 利息 ${interest}）`,
   };
+  government.loans.push(loan);
+
+  const advanceNumber = government.nextAdvanceNumber;
+  government.nextAdvanceNumber += 1;
+  const advance: GovernmentAdvanceRecord = {
+    id: `govadvance-${city.id}-${advanceNumber}`,
+    cityId: city.id,
+    tick: input.tick,
+    issuanceId: input.issuanceId,
+    purpose: input.purpose,
+    payableIds: [...input.payableIds],
+    principalAdvanced: principal,
+    interestAdvanced: interest,
+    totalAdvanced: total,
+    loanId: loan.id,
+    note: '银行垫付逐笔可追溯；垫付贷款未偿已计入政府债务，本流水不重复计入。',
+  };
+  government.advances.push(advance);
+
+  // 批次上的累计垫付（唯一记账点，避免调用方重复累加）。
+  const issuance = world.bonds?.issuances.find((entry) => entry.id === input.issuanceId);
+  if (issuance) {
+    issuance.bankAdvancedAmount = round2(issuance.bankAdvancedAmount + total);
+  }
+
+  return { ok: true, advance, loan, amountAdvanced: total };
 }
 
 /** 政府银行借款（普通借款；不包括垫付转借款，后者由 applyBankAdvance 创建）。 */
