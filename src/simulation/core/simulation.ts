@@ -21,6 +21,8 @@ import { runExternalDemand } from '../trade/external';
 import { runConsumerMarket } from '../markets/consumer';
 import { settleCompanyFinance } from '../finance/finance';
 import { settleGovernment, recordMigrationReports } from '../government/fiscal';
+import { settleGovernmentDebt } from '../government/debt';
+import { pushRealGdpPoint } from '../government/gdp-window';
 import { computeCityGdp, playerNetWorth, investInCompany, trimLog } from '../economy/gdp';
 import { checkInvariants } from './invariants';
 import type { GoodsAudit } from './invariants';
@@ -342,6 +344,13 @@ export class Simulation {
 
       // 16. GDP 与历史
       computeCityGdp(this.state);
+      // 16a. v0.7：本月真实 GDP 入 12 个月判定窗口（替换最早的估计月；估计值仍保留 estimated 标注）。
+      for (const city of this.state.cities) {
+        pushRealGdpPoint(this.state, city, this.state.time.tick, city.gdp, this.config);
+      }
+      // 16b. v0.7：政府债务月结唯一入口（内部固定顺序：应付/计提 → 票息与到期兑付 → 银行垫付
+      //      → 贷款分期 → 负债率与破产判定 → 清算与重选）。块0 为空实现，不改变现有结算结果。
+      settleGovernmentDebt(this.state, this.config, logs);
       const netWorth = playerNetWorth(this.state);
       const population = this.state.cities.reduce((tot, city) => tot + city.population.total, 0);
       const employed = this.state.cities.reduce((tot, city) => tot + city.population.employed, 0);
