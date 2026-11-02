@@ -42,7 +42,7 @@
 
 ### 2.3 统计字段（v1.4 #37，可选字段，未填充时报告标“近似”）
 
-`CompanyMonthlyStats.operatingCashFlow`；`HouseholdMonthlyStats.budget/loanDrawn/loanFinancedConsumption/unmetFunding`；`CityMonthlyReport.consumerLoanDrawn/consumerLoanRepaid/consumerLoanOutstanding/bondInterestPaid/bondPrincipalPaid/bankAdvanceThisMonth/totalDebtAtMonthEnd/debtRatioAtMonthEnd/gdpJudgementValue`。
+`CompanyMonthlyStats.operatingCashFlow`；`HouseholdMonthlyStats.budget/loanDrawn/loanFinancedConsumption/unmetFunding`（DECISIONS v1.5 #40 确认追加：只加不改、既有字段语义不变、存档 v7 校验接受缺省、块3 填充）；`CityMonthlyReport.consumerLoanDrawn/consumerLoanRepaid/consumerLoanOutstanding/bondInterestPaid/bondPrincipalPaid/bankAdvanceThisMonth/totalDebtAtMonthEnd/debtRatioAtMonthEnd/gdpJudgementValue`。
 
 ## 3. 存档 v7 与迁移矩阵
 
@@ -138,13 +138,14 @@ totalDebt = bankLoanPrincipal          // 普通政府贷款未偿本金
 - `households.consumerBudget`：`lastIncomeShare 0.8`、`cashShare 0.05`、`depositsIncluded false`。
 - `households.householdCredit`：`rateMonthly 0.006`、`termMonths 24`、`creditLimitRate 0.5`、`minLoanAmount 100`、`denyWhenDefaulted true`、`denyWhenArrearsMonthsAtLeast 2`、`maxLoansPerGroupPerMonth 1`、`allowUnsecuredNoAsset false`（额度口径占位）。
 - `households.budgetSnapshotMonths 24`。
-- `government.bondMarket`：面额 1000、年化 0.04、付息周期 12、期限 36、单次计划上限 10000 份、发行间隔 1 月、认购顺序 `player → investorGroup → company`、银行不得认购、发行月单次撮合。
+- `government.bondMarket`：面额 1000、年化 0.04、付息周期 12、期限 36、单次计划上限 100000 份（数值岗首版值）、发行间隔 1 月、认购顺序 `player → investorGroup → company`、银行不得认购、发行月单次撮合。
 - `government.companyPurchaseReserve`：`wageMonths 1`、`interestMonths 1`（企业购债流动性保留，#23）。
 - `government.loan`（0.005/24/10000）、`government.advance`（0.005/24/createLoanContract）。
+- `City.fiscalExpenseBaseline?`（v1.5 #42，可选）：开局首月财政支出基线，AI 发债按倍数计算的参考；缺省退回上月财政支出，存档 v7 接受缺省。
 - `government.fiscalRisk`：0.5 / 0.75 / 1.0 / minAnnualGdp 1 / trendEpsilon 0.005。
 - `government.gdpEstimate`：0.8、12 月、method 文本。
 - `government.bankruptcy`：`triggerElectionSameTick true`、`shareDistribution 'byHolderCount'`、`custodyShareKind 'nonVoting'`。
-- `government.aiGovernment`：占位（enabled false、阈值 1.0、份数 1、债务率上限 0.5，语义待确认）。
+- `government.aiGovernment`（v1.5 #43 改名冻结）：`enabled true`（#29 AI 默认开启，块1 实现前无副作用）、`triggerBelowExpenseMonths 0.5`（月支出倍数）、`maxIssuesPerCityMonth 1`、`topUpToExpenseMonths 1.0`、`maxDebtRatioToIssue 1.0`；块1 实现触发逻辑。
 - `government.payableRetentionMonths 24`、`maxBankruptcyRecords 8`。
 - `banking.products` 增加 `government`/`bondAdvance`/`householdConsumption` 三项（仅为枚举闭合与台账展示）。
 
@@ -166,6 +167,7 @@ totalDebt = bankLoanPrincipal          // 普通政府贷款未偿本金
 - 统计字段为可选：未填充时报告使用近似式并标注。
 - 政府债务在银行台账中仅镜像展示，权威在 `city.government`；若某块把政府贷款同时写入 `banking.loans` 并可被 `cityDebt` 统计，会构成双计（不变量已提供 `lastDebt` 对账检查）。
 - 桌面走查、Xvfb 截图与泄漏回归由验收员按验收矩阵执行，本文不预填结果。
+- `tests/economy-stability.test.ts` 的 120 月用例超时由 30s 放宽到 60s（commit `74629d1`）：2 核本机多 worktree 并行时该用例实测 36–38s，属环境争用，非功能回退。
 
 ## 9. 验收证据（由验收员补齐）
 

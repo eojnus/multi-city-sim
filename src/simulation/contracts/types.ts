@@ -276,6 +276,12 @@ export interface City {
   householdIncomeLastMonth: number;
   market: Record<GoodId, MarketState>;
   gdp: number;
+  /**
+   * v0.7（DECISIONS v1.5 #42）：开局首月财政支出基线（信用点），供 AI 发债按
+   * 「月支出倍数」计算触发阈值与补足目标；开局首月结算后写入，缺省时退回上月财政支出。
+   * 可选字段，存档 v7 接受缺省。
+   */
+  fiscalExpenseBaseline?: number;
   /** v0.7：gdpHistory 只放真实月度 GDP；估计值带 estimated=true 且不得冒充真实历史。 */
   gdpHistory: { tick: number; value: number; estimated?: boolean }[];
   lastMonth: CityMonthlyReport;
@@ -1038,13 +1044,13 @@ export interface HouseholdMonthlyStats {
   savingsContribution: number;
   /** 本月现金净变化 = income - consumption - savingsContribution。 */
   netCashChange: number;
-  /** v0.7：本月消费预算（现金口径；可选，块3 填充）。 */
+  /** v0.7 / v1.5 #40：本月消费预算（现金口径；可选，块3 填充；存档 v7 接受缺省）。 */
   budget?: number;
-  /** v0.7：本月新发放的消费贷款（可选，块3 填充）。 */
+  /** v0.7 / v1.5 #40：本月新发放的消费贷款（可选，块3 填充；存档 v7 接受缺省）。 */
   loanDrawn?: number;
-  /** v0.7：本月由消费贷款支持的消费成交额（可选，块3 填充）。 */
+  /** v0.7 / v1.5 #40：本月由消费贷款支持的消费成交额（可选，块3 填充；存档 v7 接受缺省）。 */
   loanFinancedConsumption?: number;
-  /** v0.7：因资金不足未满足的消费（与供给不足缺口分开；可选，块3 填充）。 */
+  /** v0.7 / v1.5 #40：因资金不足未满足的消费（与供给不足缺口分开；可选，块3 填充；存档 v7 接受缺省）。 */
   unmetFunding?: number;
 }
 
