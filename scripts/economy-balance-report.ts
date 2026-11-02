@@ -65,7 +65,7 @@ interface BondObservation {
 function holderCityId(world: WorldState, holder: { kind: string; id: string }): string | null {
   if (holder.kind === 'player') return world.player.homeCityId;
   if (holder.kind === 'company') return world.companies.find((item) => item.id === holder.id)?.cityId ?? null;
-  if (holder.kind === 'investorGroup') return world.investorGroups.find((item) => item.id === holder.id)?.cityId ?? null;
+  if (holder.kind === 'investorGroup') return world.investors.find((item) => item.id === holder.id)?.cityId ?? null;
   return null;
 }
 
@@ -133,6 +133,203 @@ function collectBonds(world: WorldState): BondObservation | null {
   }
   const months = [...monthMap.values()].sort((a, b) => a.tick - b.tick);
   return { issues, months };
+}
+
+const GOVERNMENT_FINANCING_KINDS = [
+  'bondIssuanceProceeds',
+  'bondInterest',
+  'bondPrincipal',
+  'bankAdvance',
+  'governmentLoanProceeds',
+  'governmentLoanRepayment',
+  'governmentLoanInterest',
+  'debtWriteOff',
+] as const;
+
+function collectGovernmentProbe(world: WorldState, monthly: MonthRow[], months: number): GovernmentProbe {
+  const cityNames = new Map(world.cities.map((city) => [city.id, city.name]));
+  const bonds = world.bonds;
+
+  const bondIssuanceByCity = world.cities.map((city) => {
+    const list = (bonds?.issuances ?? []).filter((issuance) => issuance.cityId === city.id);
+    return {
+      cityId: city.id,
+      cityName: city.name,
+      issues: list.length,
+      firstTick: list.length > 0 ? Math.min(...list.map((item) => item.issuedTick)) : null,
+      lastTick: list.length > 0 ? Math.max(...list.map((item) => item.issuedTick)) : null,
+      plannedUnits: round2(list.reduce((sum, item) => sum + item.planUnits, 0)),
+      soldUnits: round2(list.reduce((sum, item) => sum + item.soldUnits, 0)),
+      unsoldUnits: round2(list.reduce((sum, item) => sum + item.unsoldUnits, 0)),
+    };
+  });
+
+  const bankruptcies: GovernmentProbe['bankruptcies'] = [];
+  for (const city of world.cities) {
+    for (const record of city.government?.records ?? []) {
+      const election = world.politics.elections.find(
+        (item) => item.tick === record.tick && item.cityId === city.id,
+      );
+      const shareNote = record.note.includes('股份转移：') ? record.note.split('股份转移：')[1]!.trim() : '—';
+      bankruptcies.push({
+        cityId: city.id,
+        cityName: city.name,
+        tick: record.tick,
+        debtRatio: record.debtRatio,
+        totalDebtAtJudgement: record.totalDebtAtJudgement,
+        gdpJudgementValue: record.gdpJudgementValue,
+        bondsRedeemedPrincipal: record.bondsRedeemedPrincipal,
+        bondsRedeemedInterest: record.bondsRedeemedInterest,
+        bondRedemptionCount: record.bondRedemptionCount,
+        bankAdvanceCreated: record.bankAdvanceCreated,
+        bankLoansWrittenOff: record.bankLoansWrittenOff,
+        advancesWrittenOff: record.advancesWrittenOff,
+        interestWrittenOff: record.interestWrittenOff,
+        electionTriggeredTick: record.electionTriggeredTick,
+        caretakerUntilElection: record.caretakerUntilElection,
+        electionWinner: election?.winnerName ?? null,
+        shareNote,
+        note: record.note,
+      });
+    }
+  }
+
+  const elections = world.politics.elections
+    .filter((item) => item.tick > 0)
+    .map((item) => ({
+      tick: item.tick,
+      cityId: item.cityId,
+      cityName: cityNames.get(item.cityId) ?? item.cityId,
+      winnerName: item.winnerName,
+      playerWon: item.playerWon,
+      note: item.note,
+    }));
+
+  const bondHoldersByCity: GovernmentProbe['bondHoldersByCity'] = [];
+  if (bonds) {
+    const aggregate = new Map<string, number>();
+    for (const holding of bonds.holdings) {
+      const issuance = bonds.issuances.find((item) => item.id === holding.issuanceId);
+      if (!issuance) continue;
+      const holderCity = holderCityId(world, holding.holder);
+      const key = `${issuance.cityId}|${holderCity ?? holding.holder.kind}|${holding.holder.kind}`;
+      aggregate.set(key, round2((aggregate.get(key) ?? 0) + holding.units));
+    }
+    const sorted = [...aggregate.entries()].sort(([a], [b]) => a.localeCompare(b));
+    for (const [key, units] of sorted) {
+      const [issuerCityId, holderCityIdOrKind, holderKind] = key.split('|');
+      bondHoldersByCity.push({
+        issuerCityName: cityNames.get(issuerCityId!) ?? issuerCityId!,
+        holderCityName:
+          holderKind === 'investorGroup' || holderKind === 'player' || holderKind === 'company'
+            ? (cityNames.get(holderCityIdOrKind!) ?? holderCityIdOrKind!)
+            : holderKind!,
+        units,
+      });
+    }
+  }
+
+  const financingByCity = world.cities.map((city) => {
+    const byKind: Record<string, number> = {};
+    for (const kind of GOVERNMENT_FINANCING_KINDS) byKind[kind] = 0;
+    for (const entry of world.fiscal.ledger) {
+      if (entry.cityId !== city.id) continue;
+      if (!(GOVERNMENT_FINANCING_KINDS as readonly string[]).includes(entry.kind)) continue;
+      byKind[entry.kind] = round2((byKind[entry.kind] ?? 0) + entry.amount);
+    }
+    const totalIn = round2(
+      Object.values(byKind).filter((value) => value > 0).reduce((sum, value) => sum + value, 0),
+    );
+    const totalOut = round2(
+      -Object.values(byKind).filter((value) => value < 0).reduce((sum, value) => sum + value, 0),
+    );
+    const cityRows = monthly.map((row) => row.cities.find((item) => item.cityId === city.id)).filter(Boolean);
+    const income = round2(cityRows.reduce((sum, row) => sum + (row?.income ?? 0), 0));
+    const expense = round2(cityRows.reduce((sum, row) => sum + (row?.expense ?? 0), 0));
+    const lastRow = cityRows[cityRows.length - 1];
+    return {
+      cityId: city.id,
+      cityName: city.name,
+      byKind,
+      totalIn,
+      totalOut,
+      cumulative: {
+        income,
+        expense,
+        operatingIncome: round2(income - totalIn),
+        operatingExpense: round2(expense - totalOut),
+        netFinancing: round2(totalIn - totalOut),
+        finalTreasury: round2(lastRow?.treasury ?? 0),
+        finalDebt: round2(lastRow?.debt ?? 0),
+      },
+    };
+  });
+
+  const liquidations = world.lifecycle.liquidations;
+  const debtAtLiquidation = round2(liquidations.reduce((sum, item) => sum + item.debt, 0));
+  const repaidAtLiquidation = round2(liquidations.reduce((sum, item) => sum + item.debtRepaid, 0));
+  const forgivenAtLiquidation = round2(liquidations.reduce((sum, item) => sum + item.debtForgiven, 0));
+  let outstandingAtEnd = 0;
+  for (const loan of world.banking.loans) {
+    if (loan.status === 'active' || loan.status === 'defaulted') {
+      outstandingAtEnd = round2(outstandingAtEnd + loan.outstanding);
+    }
+  }
+
+  const highDividendCompanies = world.companies
+    .filter((company) => {
+      const wage = monthlyWageBill(company);
+      return (
+        company.lastMonth.profit > 0 &&
+        company.lastMonth.dividendsPaid >= company.lastMonth.profit * 0.9 &&
+        company.cash < wage * 2
+      );
+    })
+    .map((company) => ({
+      name: company.name,
+      cityName: cityNames.get(company.cityId) ?? company.cityId,
+      cash: round2(company.cash),
+      monthlyWage: round2(monthlyWageBill(company)),
+      dividendsPaid: round2(company.lastMonth.dividendsPaid),
+      profit: round2(company.lastMonth.profit),
+    }));
+
+  const gdpPoints = [1, 12, 24, months]
+    .filter((tick, index, list) => tick <= months && list.indexOf(tick) === index)
+    .map((tick) => ({
+      tick,
+      worldGdp: round2(monthly.find((row) => row.tick === tick)?.world.gdp ?? 0),
+    }));
+
+  return {
+    bondIssuanceByCity,
+    bondHoldersByCity,
+    bankruptcies,
+    elections,
+    financingByCity,
+    lifecycle: {
+      foundings: world.lifecycle.foundings.length,
+      liquidations: liquidations.length,
+      debtAtLiquidation,
+      repaidAtLiquidation,
+      forgivenAtLiquidation,
+      recoveryRatio: debtAtLiquidation > 0 ? repaidAtLiquidation / debtAtLiquidation : null,
+    },
+    knownLimitations: {
+      liquidationZeroRecovery: {
+        count: liquidations.length,
+        debt: debtAtLiquidation,
+        repaid: repaidAtLiquidation,
+        forgiven: forgivenAtLiquidation,
+        shareOfOutstanding: outstandingAtEnd > 0 ? forgivenAtLiquidation / outstandingAtEnd : 0,
+      },
+      bankNegativeSpreadMonths: monthly.filter(
+        (row) => row.world.bankInterestIncome < row.world.bankInterestExpense,
+      ).length,
+      highDividendCompanies,
+    },
+    gdpPoints,
+  };
 }
 
 // ------------------------------------------------------------------ 参数解析
@@ -285,6 +482,67 @@ interface ProfitCashRow {
   reason: string;
 }
 
+
+/** 块6 探针：破产/重选/股份分配、AI 发债与融资拆解、既有异常对照（只读观察，不改实现）。 */
+interface GovernmentProbe {
+  bondIssuanceByCity: Array<{
+    cityId: string;
+    cityName: string;
+    issues: number;
+    firstTick: number | null;
+    lastTick: number | null;
+    plannedUnits: number;
+    soldUnits: number;
+    unsoldUnits: number;
+  }>;
+  bankruptcies: Array<{
+    cityId: string;
+    cityName: string;
+    tick: number;
+    debtRatio: number;
+    totalDebtAtJudgement: number;
+    gdpJudgementValue: number;
+    bondsRedeemedPrincipal: number;
+    bondsRedeemedInterest: number;
+    bondRedemptionCount: number;
+    bankAdvanceCreated: number;
+    bankLoansWrittenOff: number;
+    advancesWrittenOff: number;
+    interestWrittenOff: number;
+    electionTriggeredTick: number | null;
+    caretakerUntilElection: boolean;
+    electionWinner: string | null;
+    shareNote: string;
+    note: string;
+  }>;
+  elections: Array<{ tick: number; cityId: string; cityName: string; winnerName: string; playerWon: boolean; note: string }>;
+  bondHoldersByCity: Array<{ issuerCityName: string; holderCityName: string; units: number }>;
+  financingByCity: Array<{
+    cityId: string;
+    cityName: string;
+    byKind: Record<string, number>;
+    totalIn: number;
+    totalOut: number;
+    /** 36 月累计财政收支（含融资项）与剔除融资后的经营口径。 */
+    cumulative: {
+      income: number;
+      expense: number;
+      operatingIncome: number;
+      operatingExpense: number;
+      netFinancing: number;
+      finalTreasury: number;
+      finalDebt: number;
+    };
+  }>;
+  lifecycle: { foundings: number; liquidations: number; debtAtLiquidation: number; repaidAtLiquidation: number; forgivenAtLiquidation: number; recoveryRatio: number | null };
+  knownLimitations: {
+    liquidationZeroRecovery: { count: number; debt: number; repaid: number; forgiven: number; shareOfOutstanding: number };
+    bankNegativeSpreadMonths: number;
+    highDividendCompanies: Array<{ name: string; cityName: string; cash: number; monthlyWage: number; dividendsPaid: number; profit: number }>;
+  };
+  gdpPoints: Array<{ tick: number; worldGdp: number }>;
+}
+
 interface BankSummary {
   contracts: number;
   open: number;
@@ -344,6 +602,8 @@ interface Report {
   banking: BankSummary;
   /** 块6 扩展点：null = 债券机制未落地（不是"无发行"）。 */
   bonds: BondObservation | null;
+  /** 块6 探针：破产/重选/融资拆解/既有异常对照。 */
+  probe: GovernmentProbe;
   fiscalTop: string[];
   anomalies: string[];
   limitations: string[];
@@ -607,6 +867,7 @@ function run(months: number): { report: Report; elapsedMs: number } {
   };
 
   const snapshot = (tick: number): MonthRow | null => monthly.find((row) => row.tick === tick) ?? null;
+  const probe = collectGovernmentProbe(world, monthly, months);
   const report: Report = {
     meta: {
       generatedAt: new Date().toISOString(),
@@ -616,9 +877,9 @@ function run(months: number): { report: Report; elapsedMs: number } {
       months,
       configSignature: `DEMO_CONFIG seed=${DEMO_CONFIG.simulation.seed} tick0=${DEMO_CONFIG.simulation.startYear}-${DEMO_CONFIG.simulation.startMonth}`,
       note:
-        '固定条件基线观察：玩家无操作、默认 AI；config 为 v0.7 冻结键名 + 数值岗首版暂定值。' +
-        '债券/政府贷款/居民消费贷/破产清算业务由块1/3 实现，本基线尚无发行与借款记录；' +
-        '债务指标由契约函数 cityDebt/assessCityFiscalRisk/recent12MonthGdp 计算，总负债 0 表示“尚未发生”而非健康。',
+        '固定条件探针：玩家无操作、默认 AI；config 为 v0.7 冻结键名 + 数值岗首版暂定值。' +
+        '块1 债券/政府贷款/垫付与块2 破产清算、月结六阶段、12 月真实 GDP 窗口已合入（交付分支 1d138a6）。' +
+        '债务指标由契约函数 cityDebt/assessCityFiscalRisk/recent12MonthGdp 计算；probe 段为块6 观察（破产/重选/融资拆解/既有异常对照）。',
     },
     params: {
       simulation: {
@@ -666,6 +927,7 @@ function run(months: number): { report: Report; elapsedMs: number } {
     profitVsCash,
     banking,
     bonds: collectBonds(world),
+    probe,
   };
 
   // ---------------- 异常判据（设计稿 §E；未实现机制的判据标注跳过） ----------------
@@ -814,12 +1076,52 @@ function run(months: number): { report: Report; elapsedMs: number } {
       anomalies.push(`${issue.cityName} ${issue.issueId}：计划 ${issue.plannedUnits} 份超过 maxPlanUnitsPerIssue=${planUnitsCap}。`);
     }
   }
+  // 17. 破产处置：判定当月重选未触发（进入看守期）。
+  for (const item of probe.bankruptcies) {
+    if (item.caretakerUntilElection) {
+      anomalies.push(
+        `${item.cityName}：第 ${item.tick} 月破产判定后同 tick 重选未触发，进入看守期（债务/GDP ${(item.debtRatio * 100).toFixed(1)}%）。`,
+      );
+    }
+  }
+  // 18. 债券重复兑付（同 issuanceId+holdingId+tick+kind 出现两次 = 幂等失效）。
+  const paymentKeys = new Set<string>();
+  let duplicatePayments = 0;
+  for (const payment of world.bonds?.payments ?? []) {
+    const holdingKey = payment.holdingId ?? `${payment.holder.kind}:${payment.holder.id}`;
+    const key = `${payment.issuanceId}|${holdingKey}|${payment.tick}|${payment.kind}`;
+    if (paymentKeys.has(key)) duplicatePayments += 1;
+    else paymentKeys.add(key);
+  }
+  if (duplicatePayments > 0) {
+    anomalies.push(`债券：发现 ${duplicatePayments} 笔重复兑付（同批次/持有人/月份/类型出现多次），幂等键可能失效。`);
+  }
+  // 19. 期末仍有债券欠付利息（#19：12/24 月资金不足应记欠付，不应长期悬空）。
+  const bondArrearsEnd = round2(
+    (world.bonds?.issuances ?? []).reduce((sum, issuance) => sum + Math.max(0, issuance.arrearsInterest), 0),
+  );
+  if (bondArrearsEnd > 0.005) {
+    anomalies.push(`债券：期末仍有欠付利息 ${fmt(bondArrearsEnd)}（未通过票息或到期/破产兑付结清）。`);
+  }
+  // 20. 破产后债务重新累积到预警档（watch 及以上）。
+  for (const item of probe.bankruptcies) {
+    const lastRow = report.monthly[report.monthly.length - 1]?.cities.find((city) => city.cityId === item.cityId);
+    if (lastRow && lastRow.riskLevel !== 'normal') {
+      anomalies.push(
+        `${item.cityName}：第 ${item.tick} 月破产后债务重新累积，第 ${lastRow.tick} 月负债率 ${(lastRow.debtRatio * 100).toFixed(1)}%（${lastRow.riskLevel}）。`,
+      );
+    }
+  }
   report.anomalies = anomalies;
   report.limitations = [
     '单一固定条件（种子 20261101、36 月、玩家无操作），不是多种子统计；结论不能外推为概率。',
-    '债券账本已由块 1 第一批落地（发行/认购/票息/到期/破产兑付/垫付状态机与不变量），但结算接线（settleGovernmentDebt 实际发售）与 AI 自动发债、居民消费贷、破产判定仍待后续批次；本基线 36 月无发行记录，"无债券"不是结论。',
-    '债务/GDP、预警档位与趋势由契约层 assessCityFiscalRisk 计算；本基线无债券/政府贷款发行记录，总负债 0 表示"尚未发生"，不代表财政健康。',
-    '12 个月 GDP 判定窗口由块0 播种 12 条估计值（estimated=true、tick −12…−1），真实替换由块1 实现；本基线窗口始终为估计值，故负债/GDP 分母是开局估计合计。',
+    '块1 债券（发行/认购/票息/到期/破产兑付/垫付）与块2 破产清算、月结六阶段、12 月真实 GDP 窗口均已合入；居民消费贷（块3）与 #40 四字段填数仍未落地，居民预算列仍为现有 propensity 口径作参考。',
+    '破产清算为一次性事件：勾销后债务重新累计，本报告只记录 36 月内发生的破产次数与当次明细，不评价恢复过程是否合理。#8 幂等由重复兑付判据（18）覆盖。',
+    '财政 M36 未转负是"破产勾销 + 银行垫付 + 赤字转政府借款"的结果，不是财政改善：岚港 36 月经营支出 1,171.9M 远超经营收入 359.8M，靠发债 493.5M、政府贷款 259.8M 补足；旧基线 −422.8M 是"未融资的欠账"。',
+    '破产时银行垫付 788.2M（岚港 504.3M + 铁谷 284.0M）兑付债券本息后全部核销；银行无资本充足/亏损口径，垫付成本不落在任何主体资产负债表上，也不进财政流水——破产成本目前是"隐性"的。',
+    '破产后 AI 发债未恢复：赤字转成的政府贷款每月分期到期，使 AI "禁借新还旧"判定恒真；岚港 M36 负债率回升至 73.0%（第二次逼近 100% 线），铁谷 20.0%。这是当前实现行为，是否合理需块3/验收定。',
+    '债务/GDP、预警档位与趋势由契约层 assessCityFiscalRisk 计算。本探针 24 期发行全部成交、发生 2 次破产兑付；M36 总负债 岚港 256.2M（73.0%，watch）/ 铁谷 70.4M（20.0%）/ 青原 0。青原总负债 0 表示无未偿债务，不代表长期财政健康。',
+    '12 个月 GDP 判定窗口：块2 已实现真实替换——开局 12 条估计（estimated=true、tick −12…−1）随结算逐月换出，M12 起全部为真实值（M36 估计 0/12 月，判定分母岚港 350.5M、铁谷 344.0M）。因此本探针的负债率是"真实口径"，与旧基线（估计窗口 2.5B 级）不可直接比。',
     '居民消费预算公式为现有代码的 propensity 口径；任务书新公式 80%/5% 尚未落地，仅作参考列展示。',
     '经营现金流为月结字段近似（收入 − 投入 − 实发工资 − 税 − 利息，不含股息/融资），非严格现金流量表；利润与它差额对应应计项（欠薪、存货变动等）。',
     'GDP 为增加值口径（产出 − 中间投入），未含 12 月估计历史；首月结算前无历史。',
@@ -965,6 +1267,87 @@ function printReport(report: Report, elapsedMs: number): void {
       );
     }
   }
+
+  const probePrint = report.probe;
+  console.log('\n[块6] 政府债券 / 破产重选 / 融资拆解 / 既有异常对照');
+  console.log('  AI 自动发债（分城）：');
+  for (const row of probePrint.bondIssuanceByCity) {
+    if (row.issues === 0) {
+      console.log(`    ${row.cityName}：0 期（财政未触发或未接线）`);
+      continue;
+    }
+    console.log(
+      `    ${row.cityName}：${row.issues} 期（第 ${row.firstTick}–${row.lastTick} 月），计划 ${fmt(row.plannedUnits)} 份 / 成交 ${fmt(row.soldUnits)} 份 / 未售 ${fmt(row.unsoldUnits)} 份`,
+    );
+  }
+  console.log('  破产事件：');
+  if (probePrint.bankruptcies.length === 0) console.log('    无');
+  for (const item of probePrint.bankruptcies) {
+    console.log(
+      `    ${item.cityName} 第 ${item.tick} 月：债务/GDP ${(item.debtRatio * 100).toFixed(1)}%` +
+        `（负债 ${fmt(item.totalDebtAtJudgement)} / 判定 GDP ${fmt(item.gdpJudgementValue)}）`,
+    );
+    console.log(
+      `      银行兑付债券本金 ${fmt(item.bondsRedeemedPrincipal)} + 计提未付利息 ${fmt(item.bondsRedeemedInterest)}（${item.bondRedemptionCount} 笔）→ 垫付转贷款 ${fmt(item.bankAdvanceCreated)}；` +
+        `勾销普通贷款 ${fmt(item.bankLoansWrittenOff)} / 垫付 ${fmt(item.advancesWrittenOff)} / 欠息 ${fmt(item.interestWrittenOff)}`,
+    );
+    console.log(
+      `      重选：${item.electionTriggeredTick === null ? '未触发（看守期）' : `同 tick 触发（获胜 ${item.electionWinner ?? '—'}）`}；股份转移：${item.shareNote}`,
+    );
+  }
+  if (probePrint.bondHoldersByCity.length > 0) {
+    console.log(
+      `  债券持有结构（发行城 ← 持有城/主体）：${probePrint.bondHoldersByCity
+        .map((item) => `${item.issuerCityName}←${item.holderCityName} ${fmt(item.units)} 份`)
+        .join('；')}`,
+    );
+  }
+  const bankruptcyElections = probePrint.elections.filter((item) =>
+    probePrint.bankruptcies.some((record) => record.cityId === item.cityId && record.tick === item.tick),
+  );
+  if (bankruptcyElections.length > 0) {
+    for (const item of bankruptcyElections) {
+      console.log(`    重选记录：第 ${item.tick} 月 ${item.cityName} → ${item.winnerName}（${item.note}）`);
+    }
+  }
+  console.log('  融资拆解（36 月累计，按 FiscalEntry.kind；正=流入现金，负=流出现金）：');
+  for (const city of probePrint.financingByCity) {
+    const parts: string[] = [];
+    const k = city.byKind;
+    if (k.bondIssuanceProceeds) parts.push(`发债 +${fmt(k.bondIssuanceProceeds)}`);
+    if (k.bankAdvance) parts.push(`银行垫付 +${fmt(k.bankAdvance)}`);
+    if (k.bondInterest) parts.push(`票息 ${fmt(k.bondInterest)}`);
+    if (k.bondPrincipal) parts.push(`还本 ${fmt(k.bondPrincipal)}`);
+    if (k.governmentLoanProceeds) parts.push(`政府贷款 +${fmt(k.governmentLoanProceeds)}`);
+    if (k.governmentLoanRepayment) parts.push(`还贷 ${fmt(k.governmentLoanRepayment)}`);
+    if (k.governmentLoanInterest) parts.push(`贷款利息 ${fmt(k.governmentLoanInterest)}`);
+    if (k.debtWriteOff) parts.push(`勾销 ${fmt(k.debtWriteOff)}`);
+    console.log(`    ${city.cityName}：融资流入 ${fmt(city.totalIn)} / 债务服务流出 ${fmt(city.totalOut)}；${parts.join('；') || '无'}`);
+    const cum = city.cumulative;
+    console.log(
+      `      累计（36 月）：收入 ${fmt(cum.income)}（其中融资 ${fmt(city.totalIn)} → 经营收入 ${fmt(cum.operatingIncome)}）` +
+        `；支出 ${fmt(cum.expense)}（融资流出 ${fmt(city.totalOut)} → 经营支出 ${fmt(cum.operatingExpense)}）` +
+        `；融资净额 ${fmt(cum.netFinancing)}；期末财政 ${fmt(cum.finalTreasury)} / 期末负债 ${fmt(cum.finalDebt)}`,
+    );
+  }
+  console.log(
+    `  世界 GDP 三点：${probePrint.gdpPoints.map((item) => `M${item.tick} ${fmt(item.worldGdp)}`).join(' / ')}`,
+  );
+  console.log('  既有异常对照：');
+  const kl = probePrint.knownLimitations;
+  console.log(
+    `    清算零回收：${kl.liquidationZeroRecovery.count} 家倒闭，债务 ${fmt(kl.liquidationZeroRecovery.debt)}，` +
+      `银行实收 ${fmt(kl.liquidationZeroRecovery.repaid)}（回收率 ${((probePrint.lifecycle.recoveryRatio ?? 0) * 100).toFixed(3)}%），` +
+      `减免 ${fmt(kl.liquidationZeroRecovery.forgiven)}（占期末未偿 ${(kl.liquidationZeroRecovery.shareOfOutstanding * 100).toFixed(1)}%）`,
+  );
+  console.log(
+    `    银行负利差：${kl.bankNegativeSpreadMonths}/${report.meta.months} 个月利息收入 < 利息支出（期末月 ${fmt(
+      report.monthly[report.monthly.length - 1]?.world.bankInterestIncome,
+    )} vs ${fmt(report.monthly[report.monthly.length - 1]?.world.bankInterestExpense)}）`,
+  );
+  console.log(
+    `    高分红低现金：${kl.highDividendCompanies.length} 家${kl.highDividendCompanies.length > 0 ? '：' + kl.highDividendCompanies.map((company) => `${company.cityName}${company.name}（现金 ${fmt(company.cash)} / 月工资 ${fmt(company.monthlyWage)}）`).join('；') : ''}`,
+  );
 
   console.log('\n[E] 会计利润 vs 经营现金流（利润 > 0 但现金流 < 利润 50% 的企业）');
   if (report.profitVsCash.length === 0) console.log('  无');

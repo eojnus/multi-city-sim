@@ -223,7 +223,8 @@ totalDebt = bankLoanPrincipal          // 普通政府贷款未偿本金
 | 4 | `feature/arch-foundation` | `b24afdd` | 契约追加 `BondPayment.holdingId`（幂等键） | ✓ | 42 文件 / 328 用例 ✓ | ✓ |
 | 5 | `feature/sim-fiscal` | `1d138a6` | 块1 债券状态机 + 块2 破产清算/月结六阶段/12 月 GDP 窗口 + holdingId 幂等补全 | ✓ | 44 文件 / 345 用例 ✓ | ✓ |
 
-- 当前集成分支 HEAD：`acf7656`（报告提交；其后仅文档追加，代码合并点仍为 `1d138a6`）。仅文档变更，用例数不变：44 文件 / 345 用例（typecheck/build/vitest 三绿，核对日 2026-11-02）。
+- 当前集成分支 HEAD：`7000db0`（报告提交；代码合并点仍为 `1d138a6`）。仅文档变更，用例数不变：44 文件 / 345 用例（typecheck/build/vitest 三绿，核对日 2026-11-02）。
+- 在途：sim 批次3 = 债券兑付入账修复（§11 #6，货币守恒）+ `payablesInArrears` 贷款欠付统计（§11 #4），合入后更新本表。
 - 用例数分阶段口径：块0 `1b1459c` 306 → #40–#43 `2983c2c` 315 → 债券第一批 `ee1a949` 328 → 数据/UI 合并 `da2dcaa`/`7c5edf7`/`b24afdd` 328 → 块2 `1d138a6` 345。
 - 数值段合并后核对：`aiGovernment` 保持 #43 新键名（`triggerBelowExpenseMonths`/`maxIssuesPerCityMonth`/`topUpToExpenseMonths`/`maxDebtRatioToIssue`），`maxPlanUnitsPerIssue 100_000`，无结构回退。
 
@@ -239,3 +240,4 @@ totalDebt = bankLoanPrincipal          // 普通政府贷款未偿本金
 | 3 | `tests/economy-stability.test.ts` 120 月用例 30s 超时 | `74629d1` 放宽到 60s 并注明定性依据：2 核多 worktree 并行争用 36–40s，基线单跑 12–16s；单跑 3 用例 13.60s 通过 | 已修 |
 | 4 | 贷款分期欠付未计入 `payablesInArrears`：`payGovernmentPayables` 只统计债券两类（`debt.ts:504` 生成 `loanInstalment`；`debt.ts:864-872` 在 `serviceGovernmentLoans` 内回填状态，但其 `inArrears` 未并入 `GovernmentSettlementResult`），月报少计政府贷款欠付 | 归 sim 批次3 修：贷款欠付并入 `payablesInArrears`。注：复核确认 payable 状态有回填，不会“永远 pending” | 待修 |
 | 5 | `scripts/economy-balance-report.ts:68` 使用不存在的 `world.investorGroups`（应为 `world.investors`，见 `types.ts:1852`）；脚本不在 tsconfig 内故 typecheck 未拦住，交付分支上直接运行崩溃 | 数值岗工作区已修，待提交并合入交付分支 | 待修（待合入） |
+| 6 | **债券兑付未给持有人入账**：`payBondCoupon`/`settleBondMaturity`/`settleBondBankruptcyRedemption` 只写 `BondPayment`、扣财政、建 `bondAdvance` 贷款，未把兑付额记入持有人现金，货币净额凭空减少；QA AC-B12/B14 实测：财政充足到期净额 −11,200、垫付分支 −11,200、破产兑付 20 个月 −10,666.67。违反 Brief §4.1.3 与货币守恒 | sim 批次3 修：在三个兑付点用 `banking/credit.ts:85 creditOwnerCash` 各记一次、幂等命中不记、避免与 `debt.ts` 阶段③双记，并补三条货币守恒测试 | 修复中 |
