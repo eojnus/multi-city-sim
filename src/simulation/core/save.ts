@@ -2807,6 +2807,9 @@ function validateBonds(
     if (!['coupon', 'principal', 'bankruptcyRedemption'].includes(String(payment.kind))) {
       return `债券兑付流水 ${payment.id}.kind 无效`;
     }
+    if (payment.holdingId !== undefined && typeof payment.holdingId !== 'string') {
+      return `债券兑付流水 ${payment.id}.holdingId 无效`;
+    }
     if (!isFiniteNumber(payment.principalPaid) || !isFiniteNumber(payment.interestPaid)) {
       return `债券兑付流水 ${payment.id} 金额无效`;
     }

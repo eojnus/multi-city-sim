@@ -2,7 +2,7 @@
 
 日期：2026-11-02 ｜ 分支：`feature/economy-fiscal-balance`（交付分支）｜ 契约冻结提交：`18e2617c1e1b143146b08fa90de7e7d146a36dbf`（`feature/arch-foundation`）
 
-> 状态：**技术章节骨架（架构师起草）**。证据章节（第 9 节）由验收员补齐；实现落地数据（第 10 节集成记录）在四条线合并后填入。
+> 状态：**技术章节（架构师起草，随集成更新）**。证据章节（第 9 节）由验收员补齐；集成记录（第 10 节）随合并更新。
 > 文中【暂定】的数值、公式与流程均为可替换原型，**不是用户已确认的最终规则**；用户已确认的规则单独标注。
 
 ## 1. 本轮范围
@@ -17,6 +17,17 @@
 - 存档格式 v7（v1–v6 可迁移）与契约空实现签名（供验收先写测试）。
 
 不在本轮范围：银行倒闭（银行无限资金）、按比例清算表、AI 自动发债的完整策略（仅留键位）。
+
+### 1.1 块0 契约冻结交付摘要
+
+| 项 | 实际数据 |
+|---|---|
+| 契约分支 | `feature/arch-foundation`，起于 `9cef5b5` |
+| 契约冻结 commit | `18e2617`（types/config/initializer/metrics/save/simulation/invariants + IMPLEMENTATION_v0.7.md） |
+| 契约追加 commits | `19e394c`（#40 字段确认）、`74629d1`（120 月用例超时）、`5fec771`（#42/#43）、`73b8ce5`（#42 校验）、`9011ad9`（数值岗首版值）、`2129b04`（交付报告骨架）及 docs 若干 |
+| 文件规模 | 块0 16 个文件、+3186/−23 行；IMPLEMENTATION_v0.7.md 16 节 |
+| 验证 | typecheck ✓；vitest 40 文件/306 用例 ✓；build ✓（arch worktree 与交付分支各一次） |
+| 空实现签名 | 5 个骨架文件，业务体 TODO（`bonds/debt/gdp-window/household-finance/fiscal-view`）；`metrics.ts` 为实实现 |
 
 ## 2. 契约变更（`src/simulation/contracts/types.ts`，版本 7 / 游戏 0.7.0）
 
@@ -43,6 +54,15 @@
 ### 2.3 统计字段（v1.4 #37，可选字段，未填充时报告标“近似”）
 
 `CompanyMonthlyStats.operatingCashFlow`；`HouseholdMonthlyStats.budget/loanDrawn/loanFinancedConsumption/unmetFunding`（DECISIONS v1.5 #40 确认追加：只加不改、既有字段语义不变、存档 v7 校验接受缺省、块3 填充）；`CityMonthlyReport.consumerLoanDrawn/consumerLoanRepaid/consumerLoanOutstanding/bondInterestPaid/bondPrincipalPaid/bankAdvanceThisMonth/totalDebtAtMonthEnd/debtRatioAtMonthEnd/gdpJudgementValue`。
+
+### 2.4 契约追加清单（DECISIONS v1.5 #40–#43，追加式、不改既有语义）
+
+| 编号 | 内容 | 落点 |
+|---|---|---|
+| #40 | `HouseholdMonthlyStats` 追加四个可选字段 `budget`、`loanDrawn`、`loanFinancedConsumption`、`unmetFunding` | `types.ts`；存档 v7 接受缺省 |
+| #42 | `City` 追加可选 `fiscalExpenseBaseline`（开局首月财政支出基线；缺省时 AI 发债退回上月财政支出） | `types.ts` + `save.ts` 可选数值校验 |
+| #43 | `aiGovernment` 键名去歧义：`triggerBelowExpenseMonths 0.5`、`maxIssuesPerCityMonth 1`、新增 `topUpToExpenseMonths 1.0`；`maxDebtRatioToIssue 1.0` | `config.ts`（结构/键名由架构定） |
+| #43 附带 | 数值岗首版值：`maxPlanUnitsPerIssue 100_000`、`aiGovernment.enabled true`（#29 AI 默认） | `config.ts`（值由数值岗定） |
 
 ## 3. 存档 v7 与迁移矩阵
 
@@ -166,6 +186,8 @@ totalDebt = bankLoanPrincipal          // 普通政府贷款未偿本金
 - `aiGovernment` 自动发债策略未实现，仅键位占位。
 - 统计字段为可选：未填充时报告使用近似式并标注。
 - 政府债务在银行台账中仅镜像展示，权威在 `city.government`；若某块把政府贷款同时写入 `banking.loans` 并可被 `cityDebt` 统计，会构成双计（不变量已提供 `lastDebt` 对账检查）。
+- **企业清算债务全额减免（既有规则，本轮沿用）**：企业倒闭清算时银行按合同受偿，剩余债务全额减免并留痕。数值岗 36 月基线显示 6 家倒闭企业银行实收 0、减免合计 166,267,450（占期末未偿 40.0%）；本轮不改变该规则，但它会显著压低银行利息收入、放大负利差，属于需要在经济平衡中确认的已知偏差。
+- **银行负利差（既有规则，本轮沿用）**：存款月息 0.10%，而部分贷款（政策性/政府垫付 0.5%/月）与坏账核销叠加后，36 个月基线中 36/36 月利息收入 < 利息支出（M36 0.78M vs 1.88M）。银行不倒闭、资金无限，本轮不建模银行资本充足率与破产。
 - 桌面走查、Xvfb 截图与泄漏回归由验收员按验收矩阵执行，本文不预填结果。
 - `tests/economy-stability.test.ts` 的 120 月用例超时由 30s 放宽到 60s（commit `74629d1`）：2 核本机多 worktree 并行时该用例实测 36–38s，属环境争用，非功能回退。
 
@@ -182,11 +204,16 @@ totalDebt = bankLoanPrincipal          // 普通政府贷款未偿本金
 
 | 步骤 | 分支 | merge SHA | typecheck | vitest | build |
 |---|---|---|---|---|---|
-| 0 | `feature/arch-foundation` | `1b1459c317100fac17d195ca5c875f5e83ac7744`（已合入交付分支） | ✓ | 40 文件 / 306 用例 ✓ | ✓ |
-| 1 | `feature/sim-fiscal` | 待填 | — | — | — |
-| 2 | `feature/data-tuning` | 待填 | — | — | — |
-| 3 | `feature/ui-fiscal` | 待填 | — | — | — |
+| 0 | `feature/arch-foundation`（块0） | `1b1459c`（块0）、`22adfc4`（报告骨架） | ✓ | 40 文件 / 306 用例 ✓ | ✓ |
+| 0b | `feature/arch-foundation`（#40–#43） | `2983c2c`（秘书处合入，含 `19e394c`/`74629d1`/`5fec771`/`73b8ce5`/`9011ad9`） | ✓ | 41 文件 / 315 用例 ✓ | ✓ |
+| 1 | `feature/sim-fiscal`（债券第一批） | `ee1a949`（含 `6bdcea1` 合 arch、`df7dd1d` 状态机） | ✓ | 42 文件 / 328 用例 ✓ | ✓ |
+| 2 | `feature/data-tuning` | `da2dcaa`（数值参数回填、36 月基线报告脚本与基线档案、块6 观察表，含 `391909e`） | ✓ | 42 文件 / 328 用例 ✓ | ✓ |
+| 3 | `feature/ui-fiscal` | `644085a`（秘书处提前合入第一批；独立用例数未单记） | ✓ | 与 sim 合并后合计 42 文件 / 328 用例 ✓ | ✓ |
 | 4 | `qa/acceptance` | 待填 | — | — | — |
+
+- 当前集成分支 HEAD：`da2dcaa`（42 文件 / 328 用例，typecheck/build/vitest 三绿，架构复核日 2026-11-02）。
+- 用例数分阶段口径：块0 `1b1459c` 306 → #40–#43 `2983c2c` 315 → 债券第一批 + UI 第一批 `ee1a949` 328 → 数值参数回填 `da2dcaa` 仍 328（数据/脚本，未增减用例）。
+- 数值段合并后核对：`aiGovernment` 保持 #43 新键名（`triggerBelowExpenseMonths`/`maxIssuesPerCityMonth`/`topUpToExpenseMonths`/`maxDebtRatioToIssue`），`maxPlanUnitsPerIssue 100_000`，无结构回退。
 
 - 交付分支：`feature/economy-fiscal-balance`；禁止推送 main、禁止 force push。
 - 推送状态：本机无推送凭据（`git push --dry-run` 返回 `could not read Username`），交付以本地完整 SHA + bundle/patch 为准。
