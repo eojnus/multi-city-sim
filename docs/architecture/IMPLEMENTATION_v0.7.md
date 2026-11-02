@@ -277,7 +277,7 @@ totalDebt = bankLoanPrincipal          // 普通政府贷款未偿本金（不�
 | `bondMarket.couponRateAnnual` | 年化利率 | 0.04 |
 | `bondMarket.interestPeriodMonths` | 月（付息周期） | 12 |
 | `bondMarket.termMonths` | 月（期限） | 36 |
-| `bondMarket.maxPlanUnitsPerIssue` | 份/城/次 | 10000 |
+| `bondMarket.maxPlanUnitsPerIssue` | 份/城/次 | 100000（数值岗首版值） |
 | `bondMarket.minMonthsBetweenIssues` | 月 | 1 |
 | `bondMarket.maxSoldRatio` | 比例 | 1 |
 | `bondMarket.subscriptionOrder` | 主体顺序 | `['player','investorGroup','company']` |
@@ -301,7 +301,7 @@ totalDebt = bankLoanPrincipal          // 普通政府贷款未偿本金（不�
 | `bankruptcy.triggerElectionSameTick` | 布尔 | true |
 | `bankruptcy.shareDistribution` | 枚举 | `'byHolderCount'` |
 | `bankruptcy.custodyShareKind` | 枚举 | `'nonVoting'` |
-| `aiGovernment.enabled` | 布尔（默认关；块1 实现前无副作用） | false |
+| `aiGovernment.enabled` | 布尔（#29 AI 默认开启；块1 实现前无副作用） | true |
 | `aiGovernment.triggerBelowExpenseMonths` | 月支出倍数（v1.5 #43 改名；财政余额 < 上月支出×该值触发） | 0.5 |
 | `aiGovernment.maxIssuesPerCityMonth` | 期/城/月（v1.5 #43 改名） | 1 |
 | `aiGovernment.topUpToExpenseMonths` | 月支出倍数（v1.5 #43 新增；补足目标） | 1.0 |
