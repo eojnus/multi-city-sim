@@ -597,18 +597,23 @@ export const DEMO_CONFIG = {
       custodyShareKind: 'nonVoting',
     },
     /**
-     * AI 政府的自动发债策略占位（首版默认关闭；数值与阈值由数值岗给）。
-     * 只影响 AI 市长操作，不改变契约；开启前需游戏程序设计稿确认。
+     * AI 政府的自动发债策略（DECISIONS v1.4 #29、v1.5 #43；键名已冻结，块1 实现触发逻辑）。
+     * 口径（团队暂定）：财政余额 < 上月财政支出 × triggerBelowExpenseMonths 时触发，
+     * 补足到上月财政支出 × topUpToExpenseMonths，每城每月最多 maxIssuesPerCityMonth 期；
+     * 债务/GDP ≥ maxDebtRatioToIssue 时不再新发债。分母口依赖 city.fiscalExpenseBaseline
+     * （开局首月结算后写入）；缺省时退回「上月财政支出」。
      */
     aiGovernment: {
-      /** 是否允许 AI 市长自动发债（首版 false；数值岗给 {0.5, 1.0, 1}，含义待确认）。 */
+      /** 是否允许 AI 市长自动发债（首版 false；块1 实现前无副作用）。 */
       enabled: false,
-      /** 触发阈值：财政余额低于该值（信用点）时考虑发债（数值岗给 1.0，暂按信用点理解）。 */
-      autoIssueWhenTreasuryBelow: 1.0,
-      /** 每次自动发行的计划份数（整数份；数值岗给 1）。 */
-      autoIssuePlanUnits: 1,
-      /** 仅当债务/GDP 低于该比例时允许自动发债，防止破产前继续举债（数值岗给 0.5）。 */
-      maxDebtRatioToIssue: 0.5,
+      /** 触发阈值：财政余额 < 上月财政支出 × 该倍数（月支出倍数，非信用点）。 */
+      triggerBelowExpenseMonths: 0.5,
+      /** 每城每月最多自动发行期数（整数期）。 */
+      maxIssuesPerCityMonth: 1,
+      /** 补足目标：财政余额补到上月财政支出 × 该倍数。 */
+      topUpToExpenseMonths: 1.0,
+      /** 债务/GDP 达到该比例后不再新发债（与破产线一致）。 */
+      maxDebtRatioToIssue: 1.0,
     },
     /** 应付项保留月数（同月幂等与审计）。 */
     payableRetentionMonths: 24,

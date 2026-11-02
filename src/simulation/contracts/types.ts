@@ -276,6 +276,12 @@ export interface City {
   householdIncomeLastMonth: number;
   market: Record<GoodId, MarketState>;
   gdp: number;
+  /**
+   * v0.7（DECISIONS v1.5 #42）：开局首月财政支出基线（信用点），供 AI 发债按
+   * 「月支出倍数」计算触发阈值与补足目标；开局首月结算后写入，缺省时退回上月财政支出。
+   * 可选字段，存档 v7 接受缺省。
+   */
+  fiscalExpenseBaseline?: number;
   /** v0.7：gdpHistory 只放真实月度 GDP；估计值带 estimated=true 且不得冒充真实历史。 */
   gdpHistory: { tick: number; value: number; estimated?: boolean }[];
   lastMonth: CityMonthlyReport;
