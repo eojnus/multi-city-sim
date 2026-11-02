@@ -5,9 +5,10 @@
 //   Simulation.create(DEMO_CONFIG)、种子与开局 2026-01 取 config、玩家无操作、默认 AI、36 个月。
 // 输出：控制台文本 + 可选 JSON / CSV；--repeat 会独立重跑一次并比对逐月序列以自检确定性。
 //
-// 说明（首版基线，契约尚未冻结）：
-//   - 债券、居民消费贷、AI 政府发债、债务预警与破产判定、12 月 GDP 估计 尚未实现，
-//     债务/预警/GDP 窗口三个口径一律调用契约层 metrics.ts（v1.4 #36），不自行重算。
+// 说明（v0.7 基线，块 0 契约 + 数值岗首版暂定参数）：
+//   - 债务/预警/GDP 窗口三个口径一律调用契约层 metrics.ts（v1.4 #36），不自行重算。
+//   - 债券、政府贷款/垫付、居民消费贷、破产清算业务由块 1/3 实现；报告已留块6 扩展点
+//     （collectBonds / BondObservation），落地后只改映射函数，不动报告结构与 CSV 列。
 //   - 会计利润 vs 经营现金流使用公司月结字段的近似式，见 E 段说明。
 
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -17,8 +18,56 @@ import { DEMO_CONFIG } from '../src/data/config';
 import { householdGroupsOfCity } from '../src/simulation/population/household-groups';
 import { depositAccountFor } from '../src/simulation/banking/banking';
 import { monthlyWageBill } from '../src/simulation/companies/company';
-import type { City, Company } from '../src/simulation/contracts/types';
+import type { City, Company, WorldState } from '../src/simulation/contracts/types';
 import { cityDebt, recent12MonthGdp, assessCityFiscalRisk } from '../src/simulation/government/metrics';
+
+// ---------------------------------------------------------- 块6 扩展点：债券观察
+// 块6（36 月观察表设计见 docs/development/DESIGN_block6_36m_observation_tables.md）依赖
+// 块 1 的 WorldState.bonds 落地。落地后只需实现 collectBonds() 内的映射（字段名见该设计稿
+// 与 IMPLEMENTATION_v0.7 §12 的 bonds 结构），报告 [D]/JSON/CSV 骨架保持不变。
+// 严禁在未落地时返回空数组伪装"无发行"；返回 null 表示"机制未实现"，报告如实标注。
+
+interface BondIssueRow {
+  issueId: string;
+  cityId: string;
+  cityName: string;
+  tick: number;
+  plannedUnits: number;
+  soldUnits: number;
+  unsoldUnits: number;
+  /** soldUnits / plannedUnits；plannedUnits=0 时为 null。 */
+  coverageRatio: number | null;
+  /** 认购主体结构（含跨城标记）。 */
+  holders: Array<{ holderType: string; units: number; crossCity: boolean }>;
+  couponPaid: number;
+  couponArrears: number;
+  principalRepaid: number;
+  bankAdvance: number;
+}
+
+interface BondObservation {
+  issues: BondIssueRow[];
+  /** 逐月汇总（块6 表 D2）：发行期数/计划份/成交份/未售/垫付/票息/还本/欠息。 */
+  months: Array<{
+    tick: number;
+    issues: number;
+    plannedUnits: number;
+    soldUnits: number;
+    unsoldUnits: number;
+    bankAdvance: number;
+    couponPaid: number;
+    couponArrears: number;
+    principalRepaid: number;
+  }>;
+}
+
+function collectBonds(world: WorldState): BondObservation | null {
+  // 块 1 落地前：world.bonds 为可选字段（v0.7 契约预留）；即便存在也不臆造结构。
+  const bonds = (world as { bonds?: unknown }).bonds;
+  if (!bonds || typeof bonds !== 'object') return null;
+  // TODO(块6)：块 1 落地后按 WorldState.bonds 实际结构映射 issues/months；当前不实现。
+  return null;
+}
 
 // ------------------------------------------------------------------ 参数解析
 
@@ -227,6 +276,8 @@ interface Report {
   companiesTop: CompanyRow[];
   profitVsCash: ProfitCashRow[];
   banking: BankSummary;
+  /** 块6 扩展点：null = 债券机制未落地（不是"无发行"）。 */
+  bonds: BondObservation | null;
   fiscalTop: string[];
   anomalies: string[];
   limitations: string[];
@@ -548,6 +599,7 @@ function run(months: number): { report: Report; elapsedMs: number } {
     companiesTop: companies,
     profitVsCash,
     banking,
+    bonds: collectBonds(world),
   };
 
   // ---------------- 异常判据（设计稿 §E；未实现机制的判据标注跳过） ----------------
@@ -719,7 +771,7 @@ function printReport(report: Report, elapsedMs: number): void {
   );
   console.log(
     `  gdpEstimate: 利用率 ${gov.gdpEstimate.utilizationAssumption} / 窗口 ${gov.gdpEstimate.windowMonths} 月 / 最小年 GDP ${gov.fiscalRisk.minAnnualGdp}；` +
-      `aiGovernment: ${gov.aiGovernment.enabled ? '开' : '关'}（阈值 ${gov.aiGovernment.autoIssueWhenTreasuryBelow} / 每城每月 ${gov.aiGovernment.autoIssuePlanUnits} 期 / 债务率上限 ${gov.aiGovernment.maxDebtRatioToIssue}）`,
+      `aiGovernment: ${gov.aiGovernment.enabled ? '开' : '关'}（触发 ${gov.aiGovernment.triggerBelowExpenseMonths}×月支出 / 补足 ${gov.aiGovernment.topUpToExpenseMonths}× / 每城每月 ${gov.aiGovernment.maxIssuesPerCityMonth} 期 / 债务率上限 ${gov.aiGovernment.maxDebtRatioToIssue}）`,
   );
   console.log(
     `  households.consumerBudget: 收入 ${DEMO_CONFIG.households.consumerBudget.lastIncomeShare} + 现金 ${DEMO_CONFIG.households.consumerBudget.cashShare}；` +
@@ -796,6 +848,28 @@ function printReport(report: Report, elapsedMs: number): void {
       )} / 债券 ${fmt(row?.debtBreakdown.bondPrincipalOutstanding)} / 应计未付利息 ${fmt(
         (row?.debtBreakdown.loanAccruedInterest ?? 0) + (row?.debtBreakdown.bondAccruedInterest ?? 0),
       )}）；负债/GDP ${(city.debtRatio * 100).toFixed(1)}%，风险 ${city.riskLevel}（趋势 ${city.riskTrend}）`,
+    );
+  }
+
+  if (report.bonds === null) {
+    console.log('  债券观察（块6 扩展点）：WorldState.bonds 未落地/无发行记录 —— 不按 0 解读，等块 1 后启用。');
+  } else {
+    const totals = report.bonds.months.reduce(
+      (acc, item) => ({
+        issues: acc.issues + item.issues,
+        plannedUnits: acc.plannedUnits + item.plannedUnits,
+        soldUnits: acc.soldUnits + item.soldUnits,
+        unsoldUnits: acc.unsoldUnits + item.unsoldUnits,
+        bankAdvance: acc.bankAdvance + item.bankAdvance,
+        couponPaid: acc.couponPaid + item.couponPaid,
+        couponArrears: acc.couponArrears + item.couponArrears,
+        principalRepaid: acc.principalRepaid + item.principalRepaid,
+      }),
+      { issues: 0, plannedUnits: 0, soldUnits: 0, unsoldUnits: 0, bankAdvance: 0, couponPaid: 0, couponArrears: 0, principalRepaid: 0 },
+    );
+    console.log(
+      `  债券合计：发行 ${totals.issues} 期，计划 ${totals.plannedUnits} 份 / 成交 ${totals.soldUnits} 份 / 未售 ${totals.unsoldUnits} 份；` +
+        `票息 ${fmt(totals.couponPaid)}（欠付 ${fmt(totals.couponArrears)}），还本 ${fmt(totals.principalRepaid)}，银行垫付 ${fmt(totals.bankAdvance)}`,
     );
   }
 

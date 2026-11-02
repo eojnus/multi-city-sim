@@ -223,9 +223,12 @@
 | `government.bondMarket.termMonths` | 36 | 期限（第 36 月付第 3 期票息+本金） | #19 / #36 |
 | `government.bondMarket.interestPeriodMonths` | 12 | 每 12 月付息 | DECISIONS #19 |
 | `government.companyPurchaseReserve` | `{ wageMonths: 1, interestMonths: 1 }` | 企业购债流动性保留 | DECISIONS #23 / #37 |
-| `government.aiGovernment.autoIssueWhenTreasuryBelow` | 0.5（按上月支出倍数解释） | 低于该倍数月支出触发发债 | DECISIONS #29 / C 稿 |
-| `government.aiGovernment.autoIssuePlanUnits` | 1 | 每城每月最多 1 期 | DECISIONS #29 |
+| `government.aiGovernment.triggerBelowExpenseMonths` | 0.5 | 低于该倍数月支出触发发债（月支出倍数，非信用点） | DECISIONS #29 / #43 |
+| `government.aiGovernment.topUpToExpenseMonths` | 1.0 | 发债后补足到该倍数月支出 | DECISIONS #29 / #43 |
+| `government.aiGovernment.maxIssuesPerCityMonth` | 1 | 每城每月最多 1 期 | DECISIONS #29 / #43 |
 | `government.aiGovernment.maxDebtRatioToIssue` | 1.0 | 债务/GDP ≥ 破产线后停发 | C 稿 |
+| `government.aiGovernment.enabled` | true | AI 市长默认自动发债（任务书 §五.3） | #29 |
+| `government.fiscalRisk.*`（#42 分母兜底） | `max(上月财政支出, city.fiscalExpenseBaseline)` | 触发分母下限，防抖动 | #42 |
 | `households.householdCredit.rateMonthly` | 0.006 | 群体消费贷月利率 | DECISIONS #24 / #38 |
 | `households.householdCredit.termMonths` | 24 | 期限 | 同上 |
 | `households.householdCredit.creditLimitRate` | 0.5 | 额度 = 财产基准 × 50% | 同上 |

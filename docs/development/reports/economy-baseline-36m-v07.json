@@ -1,6 +1,6 @@
 {
   "meta": {
-    "generatedAt": "2026-11-02T16:33:07.990Z",
+    "generatedAt": "2026-11-02T16:43:57.633Z",
     "seed": 20261101,
     "startYear": 2026,
     "startMonth": 1,
@@ -85,8 +85,9 @@
       },
       "aiGovernment": {
         "enabled": true,
-        "autoIssueWhenTreasuryBelow": 0.5,
-        "autoIssuePlanUnits": 1,
+        "triggerBelowExpenseMonths": 0.5,
+        "maxIssuesPerCityMonth": 1,
+        "topUpToExpenseMonths": 1,
         "maxDebtRatioToIssue": 1
       },
       "householdCredit": {
@@ -6297,6 +6298,7 @@
       }
     ]
   },
+  "bonds": null,
   "anomalies": [
     "岚港：财政连续 3 个月下降超过 10%（第 2–4 月，54621979→41615296）。",
     "岚港：GDP 较 36 月内峰值下跌超过 50%（峰值 218588557 → 第 36 月 27250811）。",

@@ -419,7 +419,13 @@ export const DEMO_CONFIG = {
     tierThresholds: { middle: 15_000, high: 60_000 },
     /** 展示用：保留最近几个月的阶层统计。 */
     maxStatsMonths: 24,
-    /** v0.7：居民消费预算首版公式（暂定；用户未确认具体数值）。 */
+    /**
+     * v0.7：居民消费预算公式（任务书 §5.1；v1.5 #39 复核）。
+     * 【数值岗】原值（旧 propensity 0.96 单口径）→ 新值：收入 80% + 现金 5% 双项；单位：比例。
+     * #39 口径：先扣当月还款再算预算 → min(扣款后现金, 0.8×上月可支配收入 + 0.05×扣款后现金)；
+     *   收入基数不再扣还款（避免双重扣减）。实现归块 3，本岗只定数值。
+     * 影响面：预算上限直接决定居民消费与"资金缺口"判据（B5 判据 9）。
+     */
     consumerBudget: {
       /** 参考消费额中的上月实际可支配收入比例（首版 80%）。 */
       lastIncomeShare: 0.8,
@@ -428,7 +434,11 @@ export const DEMO_CONFIG = {
       /** 是否把银行存款自动计入现金预算（首版 false：只用现金，不偷偷把存款复制到手头）。 */
       depositsIncluded: false,
     },
-    /** v0.7：居民群体消费贷款/授信（与玩家个人贷款配置分开；默认值数值岗定）。 */
+    /**
+     * v0.7：居民群体消费贷款/授信（与玩家个人贷款配置分开；数值岗定值，v1.5 #38 复核）。
+     * 【数值岗】原值（无此机制）→ 新值即下方各项；单位见各行注释；理由/影响面见 DESIGNS §C2/C8。
+     * 资产基准 = 现金 + 存款 + 按人数分摊的 cityInvestorEquity（不重复计价）；额度 = 基准 × creditLimitRate。
+     */
     householdCredit: {
       /** 月利率 0.60%（名义年化 7.2%），与玩家个人贷款同档。 */
       rateMonthly: 0.006,
@@ -511,6 +521,9 @@ export const DEMO_CONFIG = {
   /**
    * v0.7：政府债券、政府银行债务、财政风险与破产。
    * 所有数值均为「首版暂定方案」，不是用户已确认的策划规则；集中在此处便于数值岗整段替换。
+   * 【数值岗】本段每个数值的原值→新值、单位与理由见
+   * docs/development/DESIGN_parameters_bonds_loans_ai_government.md §C8；
+   * 36 月债券观察口径见 docs/development/DESIGN_block6_36m_observation_tables.md。
    */
   government: {
     /** 债券市场参数（面额/票息/期限/付息周期；数值为暂定，数值岗可整段替换）。 */
@@ -525,8 +538,11 @@ export const DEMO_CONFIG = {
       termMonths: 36,
       /**
        * 单次发行计划上限（份/城/次），防止误操作把债务放大到不可解释。
-       * 【首版暂定】数值岗给 100,000 份（= 1 亿信用点，约单城 3–5 个月财政支出）；
-       * 正常补缺口约 16–21 千份，10 千份会压住正常发行。
+       * 【首版暂定·数值岗】原值 10,000 份 → 新值 100,000 份；单位：份（每份 faceValue=1000 信用点）。
+       * 理由：补足 1 个月支出约需 16–21 千份（岚港 21.0M/月、铁谷 16.8M/月，面额 1000），
+       * 10 千份会把正常补缺口发行压到 47–63%，人为制造"未售出/发行不足"；100,000 份=1 亿
+       * ≈ 单城 3–5 个月支出，仍是防误操作的 sanity cap，不是政策上限。
+       * 影响面：仅块 1 `planIssue` 输入校验；不改债券规则（块 6 复核）。
        */
       maxPlanUnitsPerIssue: 100_000,
       /** 同一城市两次发行之间的最小间隔（月）；0 表示可连续发行。 */
@@ -602,10 +618,20 @@ export const DEMO_CONFIG = {
     },
     /**
      * AI 政府的自动发债策略（DECISIONS v1.4 #29、v1.5 #43；键名已冻结，块1 实现触发逻辑）。
-     * 口径（团队暂定）：财政余额 < 上月财政支出 × triggerBelowExpenseMonths 时触发，
-     * 补足到上月财政支出 × topUpToExpenseMonths，每城每月最多 maxIssuesPerCityMonth 期；
-     * 债务/GDP ≥ maxDebtRatioToIssue 时不再新发债。分母口依赖 city.fiscalExpenseBaseline
-     * （开局首月结算后写入）；缺省时退回「上月财政支出」。
+     *
+     * 语义（块1 按此实现）：
+     *   触发：treasury < 上月财政支出 × triggerBelowExpenseMonths（分母见 #42）
+     *   补足：发债后 treasury 补到 上月财政支出 × topUpToExpenseMonths，份数 = ceil(缺口 / faceValue)
+     *   频次：每城每月最多 maxIssuesPerCityMonth 期；不得借新还旧（#29）
+     *   闸门：债务/GDP ≥ maxDebtRatioToIssue 时停止发行
+     *   分母：max(上月财政支出, city.fiscalExpenseBaseline)（#42，baseline 由 initializer 首月结算后写入；
+     *         缺省时退回「上月财政支出」）
+     *
+     * 【首版暂定·数值岗】原值（架构师占位）0.5 / 1 / 1 / 0.5 → 新值：触发 0.5、补足 1.0、频次 1、闸门 1.0。
+     * 单位：触发/补足 = 上月财政支出倍数（非信用点）；频次 = 期/城/月；闸门 = 债务/GDP 比例。
+     * 理由：初始财政可撑 1.84/1.61/1.39 个月支出，0.5 倍触发点约在赤字累计 1.3–1.5 个月后，不会开局举债；
+     *   补到 1.0 倍避免边界抖动；闸门卡破产线（100%）而非 50%，因为 50%–100% 正是最需要补缺口的区间。
+     * 影响面：只影响 AI 市长自动发债频率/规模；不改债券规则与破产判定。详见 DESIGNS §C3/C8。
      */
     aiGovernment: {
       /** 是否允许 AI 市长自动发债（DECISIONS #29：默认开启；块1 实现前无副作用）。 */

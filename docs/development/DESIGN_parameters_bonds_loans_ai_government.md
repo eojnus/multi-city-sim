@@ -173,9 +173,9 @@ householdCredit: {
 ```ts
 aiGovernment: {
   /** 触发：treasury < 上月财政支出 × 该倍数 → 月结内发债补缺口。 */
-  bondTriggerExpenseMonths: 0.5,
+  triggerBelowExpenseMonths: 0.5,
   /** 补足目标：补到 treasury ≥ 上月财政支出 × 该倍数。 */
-  bondTopUpExpenseMonths: 1.0,
+  topUpToExpenseMonths: 1.0,
   /** 每城每月最多期数（#29 冻结为 1）。 */
   maxIssuesPerCityMonth: 1,
   /** 最小发行额 = 1 份（1000），缺口不足 1 份不发。 */
@@ -193,7 +193,7 @@ aiGovernment: {
 2. **补到 1.0 倍**：补满 1 个月支出缓冲，避免"补到刚好过线→下月又触发"的每月边界抖动；每期规模 ≤ 约 0.5 个月支出，有界。
 3. **每城每月 1 期**（#29 已定）：与补足目标配合后，典型节奏 2–4 个月一期，便于追踪单期与缺口对应关系。
 4. 与现有 `aiReserveWageMonths: 1` 的保守方向一致（1 个月工资 → 1 个月总支出，更完整）。
-5. 若秘书处希望 36 月内看到更多发债样本，可改 `bondTriggerExpenseMonths: 1.0`（约每月一期、单期更小）；本岗建议保持 0.5/1.0，把"高频举债"留给后续调参。
+5. 若秘书处希望 36 月内看到更多发债样本，可改 `triggerBelowExpenseMonths: 1.0`（约每月一期、单期更小）；本岗建议保持 0.5/1.0，把"高频举债"留给后续调参。
 
 ### 正反馈/借新还旧螺旋分析（结论：反馈存在但不爆炸，主要风险是结构性赤字）
 
@@ -278,9 +278,10 @@ gdpEstimate: {
 | --- | --- | --- | --- | --- | --- |
 | `government.bondMarket.maxPlanUnitsPerIssue` | 10,000 | **100,000** | 份/城/次 | 补足 1 个月支出约需 16–21 千份（岚港 21.0M/月、铁谷 16.8M/月，面额 1000）；10 千份上限会把正常补缺口的发行压到 47–63%，人为制造"未售出/发行不足"。100,000 份=1 亿≈单城 3–5 个月支出，仍属防误操作的 sanity cap，不是政策上限。 | 只影响块 1 `planIssue` 的输入校验；不改债券规则。 |
 | `government.aiGovernment.enabled` | false（占位） | **true** | 布尔 | 任务书 §五.3"应 AI 默认"：AI 市长缺钱时自动发债是默认行为，不应要求玩家先开开关；块 1 实现前该开关无副作用，基线不受影响。 | 块 1 起，AI 城市在满足触发条件时会自动发债；玩家城市不受影响（由玩家操作）。 |
-| `government.aiGovernment.autoIssueWhenTreasuryBelow` | 1.0（按信用点理解） | **0.5** | 键名写"信用点"，本岗按**上月财政支出倍数**解释 | C3 设计口径：财政余额 < 上月支出 × 0.5 才触发，避免开局就举债（初始财政可撑 1.84/1.61/1.39 个月支出，0.5 倍触发点约在赤字累计 1.3–1.5 个月后）。1.0 信用点会把触发点变成"财政刚转负就发"，且 1 个信用点无经济含义。 | 见 C8.3 待办：键名单位与语义不一致，需块 1 确认按倍数解释，或由架构师改键/加注，本岗不改结构。 |
-| `government.aiGovernment.maxDebtRatioToIssue` | 0.5 | **1.0** | 债务/GDP 比例 | 发债闸门应卡在"破产线之前"而不是 50%：债务率 50%–100% 正是 AI 政府最需要补缺口的区间，卡在 0.5 会让财政在 50% 后直接靠欠付硬着陆。1.0 与 `fiscalRisk.bankruptAt` 一致，语义=破产后不再举债（#25/#31）。 | 块 1 起影响 AI 发债频率；不改变破产判定本身。 |
-| `government.aiGovernment.autoIssuePlanUnits` | 1 | 1 | 期/城/月 | 决策 #29 每城每月最多 1 期；补足到 1.0 倍月支出的份数由块 1 按缺口算，此键只作期数上限。 | 无变化。 |
+| `government.aiGovernment.triggerBelowExpenseMonths` | 1.0（旧键名 `autoIssueWhenTreasuryBelow`，按信用点误读） | **0.5** | 上月财政支出倍数（非信用点） | C3 设计口径：财政余额 < 上月支出 × 0.5 才触发，避免开局就举债（初始财政可撑 1.84/1.61/1.39 个月支出，0.5 倍触发点约在赤字累计 1.3–1.5 个月后）。v1.5 #43 已由架构师改名并冻结（`triggerBelowExpenseMonths`），单位歧义消除。 | 块 1 实现触发逻辑；分母按 #42 取 max(上月支出, fiscalExpenseBaseline)。 |
+| `government.aiGovernment.topUpToExpenseMonths` | 无此键（新增） | **1.0** | 上月财政支出倍数 | 发债后把财政补到 1.0 倍月支出，避免"补一半又立刻低于阈值"的边界抖动；份数 = ceil(缺口/faceValue)。 | 块 1 起影响单期发行规模。 |
+| `government.aiGovernment.maxIssuesPerCityMonth` | 1（旧键名 `autoIssuePlanUnits`，易误读成份数） | **1** | 期/城/月 | 决策 #29 每城每月最多 1 期；改名消除"份数"歧义。 | 无变化。 |
+| `government.aiGovernment.maxDebtRatioToIssue` | 0.5 | **1.0** | 债务/GDP 比例 | 发债闸门应卡在破产线而不是 50%：债务率 50%–100% 正是最需要补缺口的区间，卡 0.5 会让财政在 50% 后靠欠付硬着陆。1.0 与 `fiscalRisk.bankruptAt` 一致（#25/#31）。 | 块 1 起影响 AI 发债频率；不改破产判定。 |
 
 ### C8.2 全表对账（未标注"改"的均为冻结值落地，理由=对应决策/任务书条款）
 
@@ -339,10 +340,11 @@ gdpEstimate: {
 
 ### C8.3 落地后仍需确认（不由本岗改结构）
 
-1. **`autoIssueWhenTreasuryBelow` 键名单位与语义冲突**：键注释写"信用点"，C3 设计口径是"上月财政支出倍数 0.5"。本岗按倍数填 0.5 并加注释；请块 1 触发逻辑按月支出倍数实现，或请架构师改键名/加注。若块 1 按信用点解释，AI 政府会在每个负余额月份只发 1 份（1000 信用点），等于失效。
+1. **（已解决）`autoIssueWhenTreasuryBelow` 键名单位冲突**：v1.5 #43 已由架构师改名为 `triggerBelowExpenseMonths`（月支出倍数），并新增 `topUpToExpenseMonths`、把 `autoIssuePlanUnits` 改为 `maxIssuesPerCityMonth`；本岗数值 0.5 / 1.0 / 1 已在改名后配置中核对一致，歧义消除。
 2. **`maxPlanUnitsPerIssue` 100,000 份是 sanity cap**：若后续城市支出规模或面额改变，需按"3–5 个月支出/面额"重算。
-3. **真实 GDP 替换仍为块 1 TODO**（`pushRealGdpPoint` 空实现）：在块 1 合入前，所有债务率/预警都按开局估计窗口（岚港 2.54B 等）计算，前期显著稀释；UI 必须显示估计月数（#12），报告里我同时给真实口径与判定口径两个数（B10.4）。
-4. `householdCredit.minLoanAmount=100` 是按"群体最小可贷单位"估的 sanity 值；若 UI 出现个位数群体的碎片合同，再下调到 1。
+3. **#42 分母兜底**：`city.fiscalExpenseBaseline` 由 initializer 首月结算后写入（架构师已加可选字段），块 1 触发逻辑按 max(上月财政支出, baseline) 取分母；本岗不改逻辑。
+4. **真实 GDP 替换仍为块 1 TODO**（`pushRealGdpPoint` 空实现）：在块 1 合入前，所有债务率/预警都按开局估计窗口（岚港 2.54B 等）计算，前期显著稀释；UI 必须显示估计月数（#12），报告里我同时给真实口径与判定口径两个数（B10.4）。
+5. `householdCredit.minLoanAmount=100` 是按"群体最小可贷单位"估的 sanity 值；若 UI 出现个位数群体的碎片合同，再下调到 1。
 
 ## C9. DECISIONS v1.5（#37–#41）确认记录（2026-11-02，秘书处评审通过）
 
