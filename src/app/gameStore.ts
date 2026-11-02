@@ -159,6 +159,24 @@ const SAVE_SLOTS: { slot: string; label: string }[] = [
   { slot: 'manual-3', label: '手动存档 3' },
 ];
 
+/** 公开破产事件摘要（渲染用；不含市长专属财政口径）。 */
+export interface PublicBankruptcyNotice {
+  cityId: string;
+  status: 'solvent' | 'bankrupt';
+  tick: number | null;
+  caretakerUntilElection: boolean;
+  electionTriggeredTick: number | null;
+  bondsRedeemedPrincipal: number;
+  bondsRedeemedInterest: number;
+  bondRedemptionCount: number;
+  bankAdvanceCreated: number;
+  bankLoansWrittenOff: number;
+  advancesWrittenOff: number;
+  interestWrittenOff: number;
+  note: string;
+  trustHoldings: { companyId: string; companyName: string; shares: number }[];
+}
+
 export class GameStore {
   simulation: Simulation;
   bridge: SaveBridge;
@@ -610,6 +628,44 @@ export class GameStore {
     const city = this.world.cities.find((entry) => entry.id === cityId);
     if (!city) return null;
     return buildMayorFiscalView(this.world, city, DEMO_CONFIG, this.viewer);
+  }
+
+  /**
+   * 公开破产事件摘要（§7：破产事件公开）。
+   * 只暴露破产事实与处置结果（兑付/垫付/勾销/看守期/托管持股），
+   * 不含财政余额、实时债务率等市长专属字段，非市长也可渲染。
+   */
+  publicBankruptcy(cityId: string): PublicBankruptcyNotice | null {
+    const city = this.world.cities.find((entry) => entry.id === cityId);
+    if (!city) return null;
+    const government = city.government;
+    const records = government?.records ?? [];
+    const record = [...records].sort((a, b) => b.tick - a.tick)[0] ?? null;
+    const status = government?.bankruptcy?.status ?? city.bankruptcy?.status ?? 'solvent';
+    if (!record && status === 'solvent') return null;
+    const trustHoldings = this.world.securities.holdings
+      .filter((holding) => holding.holder.type === 'trust' && holding.holder.id === `trust-${holding.companyId}`)
+      .map((holding) => ({
+        companyId: holding.companyId,
+        companyName: this.world.companies.find((company) => company.id === holding.companyId)?.name ?? holding.companyId,
+        shares: holding.shares,
+      }));
+    return {
+      cityId,
+      status,
+      tick: record?.tick ?? government?.bankruptcy?.tick ?? null,
+      caretakerUntilElection: record?.caretakerUntilElection ?? false,
+      electionTriggeredTick: record?.electionTriggeredTick ?? null,
+      bondsRedeemedPrincipal: record?.bondsRedeemedPrincipal ?? 0,
+      bondsRedeemedInterest: record?.bondsRedeemedInterest ?? 0,
+      bondRedemptionCount: record?.bondRedemptionCount ?? 0,
+      bankAdvanceCreated: record?.bankAdvanceCreated ?? 0,
+      bankLoansWrittenOff: record?.bankLoansWrittenOff ?? 0,
+      advancesWrittenOff: record?.advancesWrittenOff ?? 0,
+      interestWrittenOff: record?.interestWrittenOff ?? 0,
+      note: record?.note ?? '',
+      trustHoldings,
+    };
   }
 
   /** 单批发债的公开投资信息（白名单形状；批次不存在返回 null）。 */

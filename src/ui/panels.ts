@@ -1244,9 +1244,78 @@ export function renderMayorFiscalPanel(store: GameStore, city: City): string {
  * 债券市场（所有玩家可见的公开区）。
  * 只展示 PublicBondOfferView 白名单字段：不含计划总额、总售额与政府总债务。
  */
+/**
+ * 公开破产事件（§7：破产事件公开，非市长可见）。
+ * 仅展示破产事实与处置结果：看守期、银行垫付兑付、已勾销单列、无股东股份托管。
+ */
+export function renderPublicBankruptcyNotice(store: GameStore, city: City): string {
+  const notice = store.publicBankruptcy(city.id);
+  if (!notice) return '';
+  const bankrupt = notice.status === 'bankrupt';
+  const tickLabel = notice.tick === null ? '—' : tickDate(notice.tick);
+  const election = notice.electionTriggeredTick === null ? '—' : tickDate(notice.electionTriggeredTick);
+  const trusts =
+    notice.trustHoldings.length === 0
+      ? '本次无无股东企业股份需要处置。'
+      : `${notice.trustHoldings
+          .map((holding) => `${esc(holding.companyName)}（${num(holding.shares)} 股）`)
+          .join('、')} 的股份转为无表决权托管持股：不销毁、不转给公司，待后续处置。`;
+  return `
+    <section class="panel-section bankruptcy-notice${bankrupt ? ' is-active' : ''}" data-testid="public-bankruptcy-notice">
+      <div class="section-head">
+        <div>
+          <span class="kicker">BANKRUPTCY</span>
+          <h2>${bankrupt ? '破产清算 · 看守期' : '曾破产清算'}</h2>
+        </div>
+        <span class="section-tag">${
+          bankrupt
+            ? notice.caretakerUntilElection
+              ? '现任市长仅维持性操作'
+              : '重选已触发 · 等待新任市长'
+            : '已进入重建'
+        }</span>
+      </div>
+      <p class="bankruptcy-lead" data-testid="bankruptcy-lead">
+        ${esc(city.name)} 于 <b>${esc(tickLabel)}</b> 触发破产判定并完成清算${
+          notice.electionTriggeredTick === null
+            ? ''
+            : `，并于 <b>${esc(election)}</b> 触发重选${notice.caretakerUntilElection ? '（现任市长进入看守期）' : '（重选当月完成，无看守期）'}`
+        }；破产事件公开，财政余额、实时债务率与风险档仍仅该城市市长可见。
+      </p>
+      <div class="bankruptcy-grid">
+        <span>判定月<b>${esc(tickLabel)}</b></span>
+        <span>重选触发<b>${esc(election)}</b></span>
+        <span>看守期<b>${
+          notice.caretakerUntilElection
+            ? '是（仅维持性操作）'
+            : bankrupt
+              ? '本月已即时重选'
+              : '否'
+        }</b></span>
+        <span>破产兑付<b data-testid="bankruptcy-bond-redemptions">${num(notice.bondRedemptionCount)} 笔 · 本金 ${money(notice.bondsRedeemedPrincipal)} · 利息 ${money(notice.bondsRedeemedInterest)}</b></span>
+        <span>银行垫付<b data-testid="bankruptcy-advance">${money(notice.bankAdvanceCreated)}</b></span>
+        <span>已勾销<b data-testid="bankruptcy-written-off">银行贷款本金 ${money(notice.bankLoansWrittenOff)} · 垫付贷款本金 ${money(notice.advancesWrittenOff)} · 未清偿利息 ${money(notice.interestWrittenOff)}</b></span>
+      </div>
+      <p class="bankruptcy-note" data-testid="bankruptcy-settlement-note">
+        未到期债券的本金与已计提利息由银行垫付兑付（财政不参与兑付）；垫付形成的政府贷款与原有政府银行贷款在清算中勾销。按 #44 口径，“已勾销”单列，不计入“已还本金”。
+      </p>
+      <p class="bankruptcy-note" data-testid="bankruptcy-share-disposal"><b>股份处置：</b>${trusts}</p>
+    </section>`;
+}
+
 export function renderBondMarketSection(store: GameStore): string {
   const offers = store.bondMarketOffers;
   const holdings = store.ownBondHoldings;
+  const currentTick = store.world.time.tick;
+  // 破产兑付只能发生在到期日之前（到期兑付 redeemedTick >= maturityTick），
+  // 因此用「已兑付且尚未到期」即可从公开投影判定破产清算，无需新增契约字段。
+  const bankruptCities = [
+    ...new Set(
+      offers
+        .filter((offer) => offer.status === 'redeemed' && currentTick < offer.maturityTick)
+        .map((offer) => cityName(store.world, offer.cityId)),
+    ),
+  ];
   const offerRows =
     offers.length === 0
       ? `<p class="bond-empty" data-testid="bond-market-empty">暂无已发行债券；市长发起发行后会出现在这里。</p>`
@@ -1254,6 +1323,12 @@ export function renderBondMarketSection(store: GameStore): string {
           .map((offer) => {
             const cityLabel = cityName(store.world, offer.cityId);
             const isOffering = offer.status === 'offering' && offer.unitsAvailable > 0;
+            const settledEarly = offer.status === 'redeemed' && currentTick < offer.maturityTick;
+            const statusLabel = settledEarly
+              ? '已兑付 · 破产清算（银行垫付）'
+              : offer.status === 'redeemed'
+                ? '已兑付 · 到期'
+                : BOND_STATUS_LABELS[offer.status];
             const action = isOffering
               ? `<span class="bond-buy">
                   <input
@@ -1276,12 +1351,14 @@ export function renderBondMarketSection(store: GameStore): string {
                     title="用可用资金认购；不可贷款购债"
                   >认购</button>
                 </span>`
-              : `<span class="bond-closed" data-testid="bond-closed-${esc(offer.issuanceId)}">${esc(BOND_STATUS_LABELS[offer.status])}${offer.status === 'offering' ? '（已售罄）' : ''}</span>`;
+              : `<span class="bond-closed${offer.status === 'redeemed' ? (settledEarly ? ' is-bad' : ' is-good') : ''}" data-testid="bond-closed-${esc(offer.issuanceId)}">${esc(
+                  offer.status === 'redeemed' ? statusLabel : `${BOND_STATUS_LABELS[offer.status]}${offer.status === 'offering' ? '（已售罄）' : ''}`,
+                )}</span>`;
             return `
               <div class="bond-offer" data-issuance-id="${esc(offer.issuanceId)}">
                 <div class="bond-offer-head">
                   <b>${esc(cityLabel)} · 政府债券</b>
-                  <span class="bond-status">${esc(BOND_STATUS_LABELS[offer.status])}</span>
+                  <span class="bond-status${offer.status === 'redeemed' ? (settledEarly ? ' is-bad' : ' is-good') : ''}">${esc(statusLabel)}</span>
                 </div>
                 <div class="bond-offer-grid">
                   <span>面额<b>${money(offer.faceValue)}</b></span>
@@ -1291,6 +1368,11 @@ export function renderBondMarketSection(store: GameStore): string {
                   <span>到期<b>${esc(tickDate(offer.maturityTick))}</b></span>
                   <span>可认购<b>${num(offer.unitsAvailable)} 份</b></span>
                 </div>
+                ${
+                  settledEarly
+                    ? `<p class="bond-bankruptcy-note">该市已破产清算：未到期本金与已计提利息由银行垫付兑付，财政不参与兑付；垫付形成的银行债权已在清算中勾销。</p>`
+                    : ''
+                }
                 <div class="bond-offer-foot">${action}</div>
               </div>`;
           })
@@ -1306,7 +1388,11 @@ export function renderBondMarketSection(store: GameStore): string {
               <span class="bond-holding-city">${esc(cityName(store.world, holding.cityId))}</span>
               <span>${num(holding.units)} 份 · 本金 <b>${money(holding.principal)}</b></span>
               <span>应计利息 <b>${money(holding.accruedInterest)}</b></span>
-              <span>到期 ${esc(tickDate(holding.maturityTick))}${holding.redeemedTick === null ? '' : `（${esc(tickDate(holding.redeemedTick))} 已兑付）`}</span>
+              <span>到期 ${esc(tickDate(holding.maturityTick))}${
+                holding.redeemedTick === null
+                  ? ''
+                  : `（${esc(tickDate(holding.redeemedTick))} ${holding.redeemedTick < holding.maturityTick ? '破产兑付' : '到期兑付'}）`
+              }</span>
             </li>`,
           )
           .join('')}</ul>`;
@@ -1321,6 +1407,14 @@ export function renderBondMarketSection(store: GameStore): string {
         <span class="section-tag">${num(offers.filter((offer) => offer.status === 'offering').length)} 批次认购中</span>
       </div>
       <p class="fiscal-note">公开信息只含发行城市、面额、票面年利率、期限与到期日；发行计划总额、总售额与政府总债务不公开。认购只使用可用资金，不可贷款购债。</p>
+      ${
+        bankruptCities.length > 0
+          ? `<div class="bond-bankruptcy-banner" data-testid="bond-bankruptcy-banner">
+              <b>${esc(bankruptCities.join('、'))} 曾进入破产清算</b>
+              <span>未到期债券由银行垫付兑付（本金 + 已计提利息），财政不参与兑付；垫付形成的银行债权已在清算中勾销，破产批次不再付息。</span>
+            </div>`
+          : ''
+      }
       ${offerRows}
       <div class="bond-holdings">
         <div class="gov-sub-head"><span>我的持债</span><em>${num(holdings.length)} 条记录</em></div>
@@ -3344,6 +3438,7 @@ export function renderRightCity(store: GameStore, state: PanelState): string {
       ${renderPulse(city)}
     </section>
     ${renderCompanies(store, city, state.focusCompanyId)}
+    ${renderPublicBankruptcyNotice(store, city)}
     ${renderGovernmentSection(store, city)}
     ${renderBondMarketSection(store)}
     ${renderTransportSection(store, city)}
