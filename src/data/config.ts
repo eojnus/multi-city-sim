@@ -523,8 +523,12 @@ export const DEMO_CONFIG = {
       interestPeriodMonths: 12,
       /** 期限：36 个游戏月。 */
       termMonths: 36,
-      /** 单次发行计划上限（份/城/次），防止误操作把债务放大到不可解释。 */
-      maxPlanUnitsPerIssue: 10_000,
+      /**
+       * 单次发行计划上限（份/城/次），防止误操作把债务放大到不可解释。
+       * 【首版暂定】数值岗给 100,000 份（= 1 亿信用点，约单城 3–5 个月财政支出）；
+       * 正常补缺口约 16–21 千份，10 千份会压住正常发行。
+       */
+      maxPlanUnitsPerIssue: 100_000,
       /** 同一城市两次发行之间的最小间隔（月）；0 表示可连续发行。 */
       minMonthsBetweenIssues: 1,
       /** 单次实际售出占计划份数的上限（1 = 允许全部售出）。 */
@@ -604,8 +608,8 @@ export const DEMO_CONFIG = {
      * （开局首月结算后写入）；缺省时退回「上月财政支出」。
      */
     aiGovernment: {
-      /** 是否允许 AI 市长自动发债（首版 false；块1 实现前无副作用）。 */
-      enabled: false,
+      /** 是否允许 AI 市长自动发债（DECISIONS #29：默认开启；块1 实现前无副作用）。 */
+      enabled: true,
       /** 触发阈值：财政余额 < 上月财政支出 × 该倍数（月支出倍数，非信用点）。 */
       triggerBelowExpenseMonths: 0.5,
       /** 每城每月最多自动发行期数（整数期）。 */
