@@ -108,7 +108,7 @@ npm run package        # 生成 Windows NSIS 安装包（需联网）
 ## 验证状态（2026-11-02，v0.6）
 
 - `npm run typecheck`：通过（渲染层 + Electron 主进程，0 错误）。
-- `npx vitest run`：**40 个测试文件 / 305 项全部通过**（含贷款权限、授权、批次期限、职业工资、按群体消费、人才保留、迁移账户、存档终态记录、零预算采购融资，以及需求记账与 v5→v6 迁移等用例）。
+- `npx vitest run`：**40 个测试文件 / 306 项全部通过**（含贷款权限、授权、批次期限、职业工资、按群体消费、人才保留、迁移账户、存档终态记录、零预算采购融资，需求记账与 v5→v6 迁移、同一笔采购预算不重复计入多个商品等用例）。
 - `npm run build`：通过。
 - 桌面逐项验收 `node scripts/acceptance-desktop.cjs`（Xvfb + Electron，隔离 userData）：**18/18 项通过、0 条控制台错误**；截图与 JSON 结果在 `artifacts/`。
 - 详细运行记录、贷款压力复核与 Windows 复验步骤见交付报告第 12 节。
