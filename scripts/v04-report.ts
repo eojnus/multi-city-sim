@@ -109,6 +109,55 @@ for (const row of rows) {
   );
 }
 
+// ---- 贷款结构与偿债压力（验收第 9 节）----
+console.log('\n[贷款结构与偿债压力]');
+const autoBatches = loans.filter((loan) => loan.note.includes('自动流动性批次'));
+const playerCommands = loans.filter((loan) => loan.note.includes('来源：玩家指令'));
+const playerApproved = loans.filter((loan) => loan.note.includes('来源：玩家批准提案'));
+const planAuto = loans.filter((loan) => loan.note.includes('来源：托管授权内自动'));
+const migratedDebt = loans.filter((loan) => loan.purpose === 'migratedDebt');
+const everLate = loans.filter(
+  (loan) => loan.missedPayments > 0 || loan.payments.some((payment) => payment.arrears > 0),
+);
+const activeNow = loans.filter((loan) => loan.status === 'active');
+const defaultedNow = loans.filter((loan) => loan.status === 'defaulted');
+const termSum = loans.reduce((total, loan) => total + loan.termMonths, 0);
+console.log(
+  `  合同 ${loans.length} 笔（平均期限 ${(termSum / Math.max(1, loans.length)).toFixed(1)} 个月）：` +
+    `自动流动性批次 ${autoBatches.length}、托管授权内自动 ${planAuto.length}、` +
+    `玩家指令 ${playerCommands.length}、玩家批准提案 ${playerApproved.length}、旧债迁移 ${migratedDebt.length}。`,
+);
+console.log(
+  `  未偿 ${activeLoans.reduce((total, loan) => total + loan.outstanding, 0).toFixed(0)}，` +
+    `未结清 ${activeNow.length}，当前违约 ${defaultedNow.length}，曾逾期/欠款 ${everLate.length}。`,
+);
+// 合同计数会放大压力观感（每笔自动补缺都是独立合同），这里补充借款人层面的口径。
+const borrowersWithDefault = new Set(
+  defaultedNow
+    .filter((loan) => loan.borrower.kind === 'company')
+    .map((loan) => loan.borrower.id),
+);
+const defaultedOutstanding = defaultedNow.reduce((total, loan) => total + loan.outstanding, 0);
+console.log(
+  `  借款人层面：出现违约合同的企业 ${borrowersWithDefault.size} 家；` +
+    `违约合同未偿 ${defaultedOutstanding.toFixed(0)}（占全部未偿 ${((defaultedOutstanding / Math.max(1, totalOutstanding)) * 100).toFixed(1)}%）。`,
+);
+const liquidations = world.lifecycle.liquidations;
+const liquidationRepaid = liquidations.reduce((total, item) => total + item.debtRepaid, 0);
+const liquidationForgiven = liquidations.reduce((total, item) => total + item.debtForgiven, 0);
+console.log(
+  `  企业清算 ${liquidations.length} 次：银行实收 ${liquidationRepaid.toFixed(0)}，减免（未计入实收还款）${liquidationForgiven.toFixed(0)}。`,
+);
+// 下月到期本金 + 当期利息（用于判断“可借额度能否覆盖月供”）。
+let nextDueTotal = 0;
+for (const loan of activeLoans) {
+  if (loan.nextDueTick > tick + 1) continue;
+  const finalPeriod = loan.nextDueTick - loan.startTick >= loan.termMonths;
+  const principal = finalPeriod ? loan.outstanding : Math.min(loan.monthlyPrincipal, loan.outstanding);
+  nextDueTotal += principal + loan.outstanding * loan.rateMonthly;
+}
+console.log(`  全部未结清合同下月应还本息约 ${nextDueTotal.toFixed(0)}（含利息）。`);
+
 // ---- 玩家 ----
 const playerCredit = creditEvaluation(world, { kind: 'player', id: 'player' }, DEMO_CONFIG);
 console.log(

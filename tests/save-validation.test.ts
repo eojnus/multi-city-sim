@@ -128,3 +128,100 @@ describe('损坏/不兼容存档防护', () => {
     expect(writes).toBe(1);
   });
 });
+
+describe('企业退出后的协议审计记录', () => {
+  function withTerminalAgreement(mutator: (agreement: Record<string, any>) => void): string {
+    return mutateSave((world) => {
+      const template = JSON.parse(JSON.stringify(world.agreements[0] ?? {}));
+      const agreement: Record<string, any> = {
+        ...template,
+        id: 'agreement-terminal-test',
+        title: '验收测试协议',
+        sponsorCityId: world.cities[0].id,
+        partnerCityId: world.cities[1].id,
+        createdTick: 0,
+        createdBy: 'demo',
+        status: 'completed',
+        participants: [
+          {
+            companyId: 'gone-company',
+            cityId: world.cities[0].id,
+            side: 'seller',
+            decision: 'declined',
+            decidedTick: 1,
+            note: '企业已倒闭，不再履约。',
+          },
+        ],
+        items: [
+          {
+            id: 'agreement-terminal-item-failed',
+            good: 'food',
+            buyerCompanyId: 'gone-company',
+            sellerCompanyId: 'gone-company',
+            qtyPerMonth: 1,
+            unitPrice: 1,
+            months: 1,
+            deliveredQty: 0,
+            paidValue: 0,
+            monthsExecuted: 0,
+            status: 'failed',
+            lastNote: '相关企业已倒闭。',
+          },
+          {
+            id: 'agreement-terminal-item-fulfilled',
+            good: 'food',
+            buyerCompanyId: 'gone-company',
+            sellerCompanyId: 'gone-company',
+            qtyPerMonth: 1,
+            unitPrice: 1,
+            months: 3,
+            deliveredQty: 3,
+            paidValue: 3,
+            monthsExecuted: 3,
+            status: 'fulfilled',
+            lastNote: '已履约完毕。',
+          },
+        ],
+        note: '协议因参与企业倒闭而结束。',
+      };
+      mutator(agreement);
+      world.agreements.push(agreement);
+    });
+  }
+
+  it('终态参与者/条目允许引用已退出的企业（审计留痕）', () => {
+    const text = withTerminalAgreement((agreement) => {
+      agreement.participants[0].decision = 'declined';
+      agreement.items[0].status = 'failed';
+      agreement.items[1].status = 'fulfilled';
+    });
+    const result = parseSave(text);
+    expect(result.error).toBeUndefined();
+    expect(result.ok).toBe(true);
+    // 往返后记录仍在，便于审计。
+    expect(result.world?.agreements.some((entry) => entry.id === 'agreement-terminal-test')).toBe(true);
+  });
+
+  it('未终结的参与者/条目引用不存在的企业仍被拒绝', () => {
+    const pendingParticipant = withTerminalAgreement((agreement) => {
+      agreement.status = 'active';
+      agreement.participants[0].decision = 'pending';
+      agreement.participants[0].decidedTick = null;
+    });
+    const participantResult = parseSave(pendingParticipant);
+    expect(participantResult.ok).toBe(false);
+    expect(participantResult.error).toContain('参与企业无效');
+
+    const pendingItem = withTerminalAgreement((agreement) => {
+      // 让参与方指向真实企业，单独验证“未终结条目”仍要求企业存在。
+      const save = JSON.parse(baseSaveText()) as { world: { companies: Array<{ id: string }> } };
+      agreement.status = 'active';
+      agreement.participants[0].companyId = save.world.companies[0]?.id ?? 'lp-food';
+      agreement.participants[0].decision = 'accepted';
+      agreement.items[0].status = 'active';
+    });
+    const itemResult = parseSave(pendingItem);
+    expect(itemResult.ok).toBe(false);
+    expect(itemResult.error).toContain('买方无效');
+  });
+});

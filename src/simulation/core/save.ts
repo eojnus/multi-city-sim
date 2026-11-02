@@ -1462,7 +1462,11 @@ function validateAgreements(
     for (let p = 0; p < agreement.participants.length; p++) {
       const participant = agreement.participants[p];
       if (!isRecord(participant)) return `协议 ${agreement.id}.participants[${p}] 不是对象`;
-      if (typeof participant.companyId !== 'string' || !companyIds.has(participant.companyId)) {
+      // 企业倒闭后协议会被标记为 declined/failed 留作审计；终态记录允许指向已退出的企业。
+      if (
+        typeof participant.companyId !== 'string' ||
+        (!companyIds.has(participant.companyId) && participant.decision !== 'declined')
+      ) {
         return `协议 ${agreement.id} 的参与企业无效`;
       }
       if (typeof participant.cityId !== 'string' || !cityIds.has(participant.cityId)) {
@@ -1492,10 +1496,18 @@ function validateAgreements(
       if (typeof item.good !== 'string' || !(GOOD_IDS as readonly string[]).includes(item.good)) {
         return `协议条目 ${item.id}.good 无效`;
       }
-      if (typeof item.buyerCompanyId !== 'string' || !companyIds.has(item.buyerCompanyId)) {
+      const itemTerminal =
+        item.status === 'fulfilled' || item.status === 'failed' || item.status === 'declined';
+      if (
+        typeof item.buyerCompanyId !== 'string' ||
+        (!companyIds.has(item.buyerCompanyId) && !itemTerminal)
+      ) {
         return `协议条目 ${item.id} 的买方无效`;
       }
-      if (typeof item.sellerCompanyId !== 'string' || !companyIds.has(item.sellerCompanyId)) {
+      if (
+        typeof item.sellerCompanyId !== 'string' ||
+        (!companyIds.has(item.sellerCompanyId) && !itemTerminal)
+      ) {
         return `协议条目 ${item.id} 的卖方无效`;
       }
       for (const key of ['qtyPerMonth', 'unitPrice', 'months', 'deliveredQty', 'paidValue', 'monthsExecuted']) {
@@ -1857,6 +1869,7 @@ function validateBankOwner(
   path: string,
   companyIds: Set<string>,
   investorIds: Set<string>,
+  allowMissing = false,
 ): string | null {
   if (!isRecord(value)) return `${path} 不是对象`;
   if (typeof value.kind !== 'string' || !BANK_OWNER_KINDS.has(value.kind)) {
@@ -1864,10 +1877,12 @@ function validateBankOwner(
   }
   if (typeof value.id !== 'string' || value.id.length === 0) return `${path}.id 无效`;
   if (value.kind === 'player' && value.id !== 'player') return `${path}.id 对玩家无效`;
-  if (value.kind === 'company' && !companyIds.has(value.id)) {
+  // 历史记录（清零的旧账户、已结清的贷款、授信快照）允许保留已注销企业的引用；
+  // 未结清的债权/余额则必须指向存在的企业或居民投资实体。
+  if (value.kind === 'company' && !companyIds.has(value.id) && !allowMissing) {
     return `${path} 引用了不存在的企业 ${value.id}`;
   }
-  if (value.kind === 'investorGroup' && !investorIds.has(value.id)) {
+  if (value.kind === 'investorGroup' && !investorIds.has(value.id) && !allowMissing) {
     return `${path} 引用了不存在的居民投资实体 ${value.id}`;
   }
   return null;
@@ -2069,7 +2084,15 @@ function validateBanking(
       return `存款账户 ${index} ID 无效或重复`;
     }
     accountIds.add(account.id);
-    const ownerError = validateBankOwner(account.owner, `banking.deposits[${index}].owner`, companyIds, investorIds);
+    const zeroBalance =
+      isFiniteNumber(account.balance) && Math.abs(account.balance) <= 0.01;
+    const ownerError = validateBankOwner(
+      account.owner,
+      `banking.deposits[${index}].owner`,
+      companyIds,
+      investorIds,
+      zeroBalance,
+    );
     if (ownerError) return ownerError;
     for (const key of ['balance', 'rateMonthly', 'accruedInterest']) {
       if (!isFiniteNumber(account[key]) || account[key] < -0.01) {
@@ -2090,7 +2113,19 @@ function validateBanking(
       return `贷款合同 ${index} ID 无效或重复`;
     }
     loanIds.add(loan.id);
-    const ownerError = validateBankOwner(loan.borrower, `banking.loans[${index}].borrower`, companyIds, investorIds);
+    // 企业清算后合同保留为历史记录（defaulted/repaid、未偿为 0），此时允许借款人已注销。
+    const historicalLoan =
+      typeof loan.status === 'string' &&
+      loan.status !== 'active' &&
+      isFiniteNumber(loan.outstanding) &&
+      Math.abs(loan.outstanding) <= 0.01;
+    const ownerError = validateBankOwner(
+      loan.borrower,
+      `banking.loans[${index}].borrower`,
+      companyIds,
+      investorIds,
+      historicalLoan,
+    );
     if (ownerError) return ownerError;
     if (typeof loan.purpose !== 'string' || !LOAN_PURPOSES.has(loan.purpose)) {
       return `贷款合同 ${loan.id}.purpose 无效`;
@@ -2133,7 +2168,14 @@ function validateBanking(
   for (let index = 0; index < value.snapshots.length; index++) {
     const snapshot = value.snapshots[index];
     if (!isRecord(snapshot)) return `banking.snapshots[${index}] 不是对象`;
-    const ownerError = validateBankOwner(snapshot.borrower, `banking.snapshots[${index}].borrower`, companyIds, investorIds);
+    // 授信快照是历史评估记录，允许保留已注销企业的引用。
+    const ownerError = validateBankOwner(
+      snapshot.borrower,
+      `banking.snapshots[${index}].borrower`,
+      companyIds,
+      investorIds,
+      true,
+    );
     if (ownerError) return ownerError;
     for (const key of ['baseValue', 'limitRate', 'limit', 'outstanding', 'available']) {
       if (!isFiniteNumber(snapshot[key])) return `授信快照 ${index}.${key} 无效`;
