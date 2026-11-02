@@ -251,14 +251,16 @@ describe('I07a/c/d/e 旧界面泄漏回归（块4 前预期红）', () => {
     expect(html).not.toMatch(/财政\s*<b>/);
   });
 
-  it('I07a 城市卡片对所有人不显示财政；但市长仍能在城市面板看到财政（对照，避免误删市长视角）', () => {
+  it('I07a 城市卡片不显示财政；市长仍能通过市长财政面板看到可用资金（对照，避免误删市长视角）', () => {
     const store = createStore();
     store.setMayorDemo('lanport');
     store.selectCity('lanport');
     // 卡片是否对市长也隐藏属实现选择（需求只要求非市长不可见），不作为缺陷；
     // 真正必须守住的是：市长视角仍能获取财政数据（否则权限白名单被修成“谁都看不到”）。
     expect(renderLeftRegion(store)).not.toMatch(/财政\s*<b>/);
-    expect(renderRightCity(store, panelState)).toContain('<span>财政</span>');
+    const mayorHtml = renderRightCity(store, panelState);
+    expect(mayorHtml).toContain('data-testid="mayor-fiscal-panel"');
+    expect(mayorHtml).toContain('data-testid="fiscal-treasury"');
   });
 
   it('I07c/d 非市长概况 KPI 与政府面板不显示财政数据；市长可见', () => {
@@ -268,15 +270,18 @@ describe('I07a/c/d/e 旧界面泄漏回归（块4 前预期红）', () => {
     city.treasury = 60_000_000;
 
     const nonMayorHtml = renderRightCity(store, panelState);
-    // 概况 KPI：不得出现财政金额块（I07c，当前仍红）。
+    // 概况 KPI：不得出现财政金额块（I07c）。
     expect(nonMayorHtml).not.toContain('<span>财政</span>');
-    // 政府面板：允许“仅市长可见”占位，但不得渲染财政流水明细（I07d）。
+    // 政府面板：不得渲染市长财政面板/财政流水明细，只允许“仅市长可见”占位（I07d）。
+    expect(nonMayorHtml).not.toContain('data-testid="mayor-fiscal-panel"');
     expect(nonMayorHtml).not.toContain('data-testid="fiscal-ledger"');
+    expect(nonMayorHtml).not.toContain('data-testid="fiscal-treasury"');
     expect(nonMayorHtml).toContain('data-testid="fiscal-restricted"');
 
     store.setMayorDemo('lanport');
     const mayorHtml = renderRightCity(store, panelState);
-    expect(mayorHtml).toContain('<span>财政</span>');
+    expect(mayorHtml).toContain('data-testid="mayor-fiscal-panel"');
+    expect(mayorHtml).toContain('data-testid="fiscal-treasury"');
     expect(mayorHtml).toContain('data-testid="fiscal-ledger"');
     expect(mayorHtml).toContain('财政流水');
   });

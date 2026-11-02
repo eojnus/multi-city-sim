@@ -118,6 +118,56 @@
 
 文件：`tests/acceptance/{baseline-a,bonds,company-bond-subscription}.test.ts`、`fixtures/economy-baseline-36m-v07.json`。
 
+### 1.4 第三轮验收执行记录（2026-11-02，UI 块4 `7c5edf7` 合入 `qa/acceptance`）
+
+合并：`33faaf4`（= `7c5edf7`：市长财政面板、债券市场、企业数 KPI、非市长受限占位）。
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| 类型检查 | `npm run typecheck` | 通过（0 错误） |
+| 业务基线 | `npx vitest run tests/ --exclude 'tests/acceptance/**'` | **42 文件 / 328 用例全过** |
+| 构建 | `npm run build` | 通过 |
+| 验收合计 | `npx vitest run tests/acceptance` | **59 用例：54 绿 / 5 红** |
+| I 组 | `npx vitest run tests/acceptance/permissions.test.ts` | **13/13 全绿**（I01/I03/I04 空实现转绿；I07 按新标记 `mayor-fiscal-panel`/`fiscal-restricted` 改写后转绿） |
+| 余红 | — | G04×2（等块2）、B12、B14×2（兑付不入账，等第二批确认） |
+
+### 1.5 第四轮验收执行记录（2026-11-02，块1+块2 `1d138a6` 合入 `qa/acceptance`）
+
+合并：`3785989`（= `1d138a6`：债券状态机 + 破产清算/月结六阶段/12 月 GDP 窗口 + holdingId 幂等）；随后追平集成分支 `7000db0`（纯文档/数据，merge `f8af0ed`）与交付分支 `d637c27`（data 块6 探针，merge `74467a6`，代码无差异）。
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| 类型检查 | `npm run typecheck` | 通过（0 错误，含 `tests/acceptance/**`） |
+| 业务基线 | `npx vitest run tests/ --exclude 'tests/acceptance/**'` | **44 文件 / 345 用例全过** |
+| 构建 | `npm run build` | 通过（renderer + electron；`dist/electron/saveIpc.js` 存在） |
+| 验收合计 | `npx vitest run tests/acceptance` | **84 用例：80 绿 / 4 红**（含新增 H08/H09 3 条） |
+| F 组（构造夹具） | `npx vitest run tests/acceptance/bankruptcy.test.ts` | **13/14 绿**，仅 AC-F08 红（同月两段兑付第二段被幂等键吞掉） |
+| F 组（真实 36 月） | `npx vitest run tests/acceptance/bankruptcy-real-run.test.ts` | **8/8 绿**（固定条件样本，见下） |
+| G 组 | `npx vitest run tests/acceptance/gdp-estimate.test.ts` | **8/8 全绿**（G04×2 转绿：真实值逐月替换） |
+| H/I 组 | `migration-v7` / `permissions` | **14/14、13/13 全绿** |
+| 余红 | — | B12、B14×2（兑付仍不入持有人现金：块1 债券函数未入账、块2 月结未补；与 F08 为同族“兑付账目”缺陷） |
+
+**真实 36 月破产样本（F-R 组）**
+
+- 固定条件：`Simulation.create()`（默认种子 `20261101`）+ 连续 36 次 `tick()`，玩家无操作；基线 `3785989`。
+- 复现命令：`npx vitest run tests/acceptance/bankruptcy-real-run.test.ts`；用例内 `beforeAll` 逐月记录月末负债率快照。
+- 探针交叉引用：数值岗 `docs/development/reports/economy-probe-block2.json` → `probe.bankruptcies`（岚港判定负债率 103.6159%/总负债 515,423,777.57/判定 GDP 497,436,959.73；铁谷 103.5096%/317,097,115.03/306,345,548.4；当选人 罗知远/许星野）；测试 `bankruptcy-real-run.test.ts` 已按这些值逐项断言（`toBeCloseTo`）。
+- 实测期望值（与秘书处 `1d138a6` / 交付分支 `d637c27` 跑数一致）：岚港 t20、铁谷 t30 各破产一次；t19 岚港 96.9067%（high）、t29 铁谷 91.3379%（high）；判定月比率 103.6%（岚港）>100%；破产兑付 24 期债券本金 768,932,000 + 计提未付利息 19,307,136.64 = 银行垫付 788,239,136.64；24 期 100% 成交（计划=成交 768,932 份）；85 笔持有（71 跨城 / 14 同城，全部 `investorGroup`，无企业/玩家认购）；24 笔 `bondAdvance` + 4 笔政府贷款全部 `writtenOff` 且未偿清零；两城同 tick 重选、`caretakerUntilElection=false`；破产政府持股清零、发行总量不变（`checkInvariants` 空）；次月起靠普通银行贷款重建，t36 负债率 73.0853% / 20.4724%。
+- 已知限制（秘书处确认，不判 bug）：**破产后 AI 不再发新债券**（债务分期到期使“禁借新还旧”恒真）；测试 F-R8 已断言所有债券 `issuedTick <= 破产 tick`，作为行为记录。
+- 与秘书处口径的差异（已按实测修正）：①“认购主体全部跨城”不成立——本样本 14/85 为同城认购（如 `lanport-invest1` 买岚港债），跨城 71/85；同城认购不违反冻结口径（口径允许跨城，未禁止同城），仅记录事实。②“次月起新债 29/21 笔”按本测试口径（`purpose='government'` 且 `startTick > 破产tick`）在 t36 时为岚港/铁谷各 ≥1 笔且总活跃 16/6 笔，笔数统计方式不同，不判差异。
+
+**桌面走查证据（本轮实际执行，非规划）**
+
+| 脚本 | 命令（Xvfb :99 1600×1000×24） | 结果 |
+| --- | --- | --- |
+| `scripts/smoke-main.cjs` | `DISPLAY=:99 node_modules/electron/dist/electron --no-sandbox --disable-dev-shm-usage scripts/smoke-main.cjs` | 退出 0；27 项交互；存档/读档日期一致（2027-02）；1100 宽无横向溢出；损坏自动存档安全降级（“autosave 已暂停”、字节保留） |
+| `scripts/smoke-fiscal-ui.cjs`（UI 块4 随附） | 同上 | 退出 0；**22/22** 检查过（城市卡片无财政、非市长受限、跨城不泄漏、通知过滤、月报财政列、读档市长身份、GDP 窗口 12 行、债券市场空态、1100×700）；截图 `artifacts/ui-fiscal/01–15` |
+| `scripts/acceptance-leaks-after.cjs` | 同上（与 before 同机位 1440×900、同名截图） | 退出 0；**7/7** 断言过：L1 城市卡片、L2 地图经济图层、L3 概况 KPI、L4 政府面板、L5 交通提示、L6 12 月后卡片、L7 12 月后地图均无财政；12 月后三城财政 -5632.2 万/-1024.3 万/+4211.8 万；`artifacts/qa-after/` |
+| `scripts/acceptance-after-block2.cjs` | 同上 | 退出 0；7 张 + `manifest.json`（sha256/身份/DOM 摘要，`consoleErrors=[]`）：非市长区域卡片/受限政府章节/月报财政列“—”；市长财政面板（6000.0 万/总负债 0/0.0%/正常）；债券市场认购区（plan 200）；认购 20 份推进 1 月（sold=20、active、财政 59,401,701.42、总负债 20,066.67）；市长月报仅本市有财政值；`artifacts/qa-after-block2/` |
+| `scripts/acceptance-desktop.cjs` | 同上 | 退出 0；18/18 检查过（v0.5 九组操作，11 张 `artifacts/acceptance-*.png`）；console 仅 2 条 WebGL 软件回退告警 |
+
+说明：市长身份在 `after-block2` 中通过 fixture 注入（直接写 `world.player.roles.mayorCityId` + `store.emit()`），因生产构建 `setMayorDemo` 被 `import.meta.env.DEV` 拒绝；manifest 的 label 仍写作“fixture: store.setMayorDemo”，实际注入方式以本节说明为准。`artifacts/` 被 `.gitignore` 忽略，未提交，磁盘留档。
+
 ## 2. 验收矩阵
 
 图例：优先级 P0 = 交付前必须通过（失败即阻断）；P1 = 应通过，失败须书面说明缺口；P2 = 观察项/一致性检查。
@@ -199,20 +249,20 @@
 
 | ID | 要求（来源） | 冻结口径 | 验证方法 | 证据形式 | 优先级 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- |
-| AC-F01 | 破产阈值口径（Brief §4.1.4） | 总负债 = 政府银行贷款 + 未偿债券本金（+ 欠付利息，按冻结口径）；比率 ≥100% 破产 | UT/IT | 负债构成与比率断言 | P0 | 待执行 |
-| AC-F02 | 阈值边界与动态 GDP | 99.99% 不破产；100% 破产；GDP 增长后比率下降可不破产 | UT | 边界用例 | P0 | 待执行 |
-| AC-F03 | 最小判定值 1（SUPP §6.6） | 12 月 GDP 合计 <1（含 0/极低估计）时，比率与判定统一按 max(1, 合计)；不除零；市长面板标注“GDP 极低，已使用最低判定值” | UT/IT | 数值断言 + 文案断言 | P0 | 待执行 |
-| AC-F04 | 当月立即重选（DECISIONS #7） | 破产判定在同一结算内立即触发选举，非下月；选举记录关联破产；过渡期看守规则按冻结口径 | IT | tick 内事件顺序断言 | P0 | 待执行 |
-| AC-F05 | 破产幂等 | 同一结算点只清算一次；重复结算/重复 tick 不重复破产、不重复选举 | IT | 二次调用后状态不变断言 | P0 | 待执行 |
-| AC-F06 | 提前兑付未到期债券 | 破产时立即兑付未到期本金（+ 计提未付利息）；已兑付不得在 36 月到期时重复付 | IT | 兑付次数/金额断言 | P0 | 待执行 |
-| AC-F07 | 债务勾销 | 原政府银行贷款 + 垫付贷款一并勾销；不新增现金；不保留为政府债务 | IT | 勾销前后负债/现金断言 | P0 | 待执行 |
-| AC-F08 | 同月到期 + 破产 | 到期债券与提前兑付债券各只付一次；先兑付后勾销；无重复支付/重复计债 | IT | 同月场景账目断言 | P0 | 待执行 |
-| AC-F09 | 有 CEO 分股（Brief §4.1.6） | 政府股份全部转给现任 CEO（玩家或 AI）；保留权利类别；发行总量不变；不转给 CEO 所经营的公司 | UT | 持股表断言 | P0 | 待执行 |
-| AC-F10 | 无 CEO 分股（Brief §4.1.6） | 除破产政府外现有股东按主体数量平分（非按比例）；余数按可复现固定顺序；其他政府算一个主体 | UT | 持股断言（含不整除场景） | P0 | 待执行 |
-| AC-F11 | 无股东兜底 | 无 CEO 且无其他股东时，无表决权托管持股保存，不销毁不增发 | UT | 持股总量断言 | P1 | 待执行 |
-| AC-F12 | 读档重放幂等 | 破产月存档→读档→不再重复结算/选举/兑付；读档不重复结算（含到期） | IT | 存档前后状态与事件次数断言 | P0 | 待执行 |
-| AC-F13 | 破产前后状态一致 | 破产后新政府余额/负债一致，无重复计债；后续月份可正常结算 | IT | 连续 tick 状态断言 | P1 | 待执行 |
-| AC-F14 | 风险预警分级（Brief §4.2） | <50% 正常、50–75% 关注、75–<100% 高风险、=100% 破产；颜色 + 文字 + 环比方向；仅市长可见 | UT + DESK | 分级用例 + 面板截图 | P1 | 待执行 |
+| AC-F01 | 破产阈值口径（Brief §4.1.4） | 总负债 = 政府银行贷款 + 未偿债券本金（+ 欠付利息，按冻结口径）；比率 ≥100% 破产 | UT/IT | 负债构成与比率断言 | P0 | 已执行→通过（单测 F01 + 真实样本 F-R1/R2：负债=贷款+未偿债券本金+欠付利息） |
+| AC-F02 | 阈值边界与动态 GDP | 99.99% 不破产；100% 破产；GDP 增长后比率下降可不破产 | UT | 边界用例 | P0 | 已执行→通过（99.99%/100% 边界用例；GDP 增长后比率下降场景） |
+| AC-F03 | 最小判定值 1（SUPP §6.6） | 12 月 GDP 合计 <1（含 0/极低估计）时，比率与判定统一按 max(1, 合计)；不除零；市长面板标注“GDP 极低，已使用最低判定值” | UT/IT | 数值断言 + 文案断言 | P0 | 已执行→通过（合计<1 时按 max(1,合计)；不除零） |
+| AC-F04 | 当月立即重选（DECISIONS #7） | 破产判定在同一结算内立即触发选举，非下月；选举记录关联破产；过渡期看守规则按冻结口径 | IT | tick 内事件顺序断言 | P0 | 已执行→通过（F04 + 真实样本 F-R6：破产同 tick 选举、caretaker=false） |
+| AC-F05 | 破产幂等 | 同一结算点只清算一次；重复结算/重复 tick 不重复破产、不重复选举 | IT | 二次调用后状态不变断言 | P0 | 已执行→通过（重复结算/重复 tick 状态不变） |
+| AC-F06 | 提前兑付未到期债券 | 破产时立即兑付未到期本金（+ 计提未付利息）；已兑付不得在 36 月到期时重复付 | IT | 兑付次数/金额断言 | P0 | 已执行→通过（F06 + F-R3：24 期提前兑付；36 月到期不重复付） |
+| AC-F07 | 债务勾销 | 原政府银行贷款 + 垫付贷款一并勾销；不新增现金；不保留为政府债务 | IT | 勾销前后负债/现金断言 | P0 | 已执行→通过（F07 + F-R5：24 笔 bondAdvance + 4 笔政府贷款勾销、未偿清零、不新增现金） |
+| AC-F08 | 同月到期 + 破产 | 到期债券与提前兑付债券各只付一次；先兑付后勾销；无重复支付/重复计债 | IT | 同月场景账目断言 | P0 | 已执行→红（实现有 bug：同月“财政 8800 + 垫付 1200”两段兑付，第二段被幂等键 `(issuanceId,holdingId,tick,principal)` 吞掉，`principalRepaid` 少记 1200） |
+| AC-F09 | 有 CEO 分股（Brief §4.1.6） | 政府股份全部转给现任 CEO（玩家或 AI）；保留权利类别；发行总量不变；不转给 CEO 所经营的公司 | UT | 持股表断言 | P0 | 已执行→通过（有 CEO：政府股份全部转 CEO，总量不变） |
+| AC-F10 | 无 CEO 分股（Brief §4.1.6） | 除破产政府外现有股东按主体数量平分（非按比例）；余数按可复现固定顺序；其他政府算一个主体 | UT | 持股断言（含不整除场景） | P0 | 已执行→通过（无 CEO：按主体数量平分、余数固定顺序、其他政府算一个主体） |
+| AC-F11 | 无股东兜底 | 无 CEO 且无其他股东时，无表决权托管持股保存，不销毁不增发 | UT | 持股总量断言 | P1 | 已执行→通过（无股东兜底：托管持股保存，不销毁不增发） |
+| AC-F12 | 读档重放幂等 | 破产月存档→读档→不再重复结算/选举/兑付；读档不重复结算（含到期） | IT | 存档前后状态与事件次数断言 | P0 | 已执行→通过（破产月存档→读档→不重复结算/选举/兑付） |
+| AC-F13 | 破产前后状态一致 | 破产后新政府余额/负债一致，无重复计债；后续月份可正常结算 | IT | 连续 tick 状态断言 | P1 | 已执行→通过（破产后连续 tick 状态一致，无重复计债） |
+| AC-F14 | 风险预警分级（Brief §4.2） | <50% 正常、50–75% 关注、75–<100% 高风险、=100% 破产；颜色 + 文字 + 环比方向；仅市长可见 | UT + DESK | 分级用例 + 面板截图 | P1 | 部分通过（分级/文案/仅市长可见单测通过；桌面仅覆盖 normal 档，high/破产档未截图） |
 
 ### G. 开局 GDP 估计
 
@@ -221,8 +271,8 @@
 | AC-G01 | 12 个月同值估计 + 标注（SUPP §6.4） | 每城历史 12 个月填同一估计值；数据标注为估计（非真实记录） | UT | 历史数组断言 + 标注字段 | P0 | 已执行→通过（首轮 2026-11-02） |
 | AC-G02 | GDP 口径（SUPP §6.1–6.3） | 产出价值 − 中间投入；不含工资/贷款/还款/财政；理论产量×80%（可配置） | UT | 计算用例 + 配置键 | P0 | 已执行→通过（首轮 2026-11-02，G03 口径复算一致） |
 | AC-G03 | 初始化无副作用（SUPP §6.4） | 估计只用于初始化：不生产、不改库存/现金/工资/税收 | UT | 初始化前后世界快照断言 | P0 | 部分通过（估计不写真实 GDP/历史/月报；库存/现金未单独断言） |
-| AC-G04 | 真实值逐月替换（SUPP §6.5） | 真实月度 GDP 到来后从最早月份逐月替换；真实值不受 80% 系数影响 | IT | 13 个月 tick 历史断言 | P0 | 已执行→红（块2 未落地：pushRealGdpPoint 空实现，窗口未插入真实月） |
-| AC-G05 | 最小判定值 1（SUPP §6.6） | 合计 <1 时判定与比率按 1；面板显示指定文案；不创造产出/现金 | UT + DESK | 数值 + 文案断言 | P0 | 部分通过（判定分母 max(1,窗口合计) 已过；桌面文案未走查） |
+| AC-G04 | 真实值逐月替换（SUPP §6.5） | 真实月度 GDP 到来后从最早月份逐月替换；真实值不受 80% 系数影响 | IT | 13 个月 tick 历史断言 | P0 | 已执行→通过（块2 `pushRealGdpPoint` 落地：真实值逐月替换，13 月 tick 历史断言通过） |
+| AC-G05 | 最小判定值 1（SUPP §6.6） | 合计 <1 时判定与比率按 1；面板显示指定文案；不创造产出/现金 | UT + DESK | 数值 + 文案断言 | P0 | 部分通过（判定分母 max(1,窗口合计) 已过；面板“GDP 极低”专用文案桌面未覆盖） |
 | AC-G06 | 旧档兼容（SUPP §6.7） | 优先真实历史；不足 12 个月用同口径估计填补并标注；估计不写成真实历史 | UT | 迁移后历史/标注断言 | P1 | 已执行→通过（H03 覆盖：真实历史优先、缺口估计补标注） |
 | AC-G07 | 报告数据（SUPP §6 末段） | 交付报告列出每城初始月估计、12 月合计、依据参数 | AUDIT | 报告字段核对 | P1 | 待执行 |
 | AC-G08 | 禁止“首月×12”（SUPP §6 末段） | 新游戏首月未结算（`city.gdp = 0`）时不得用首月实际 GDP×12 | AUDIT + UT | 代码审计 + 初值 0 场景用例 | P0 | 已执行→通过（首月 gdp=0、估计不写入真实值；代码审计未见首月×12） |
@@ -238,44 +288,44 @@
 | AC-H05 | 往返幂等 | 旧档→迁移→序列化→再读：状态一致；不重复转换、不重复计息/计债 | UT | 往返深度相等断言 | P0 | 已执行→通过（迁移→保存→再读幂等，无重复转贷/重复日志） |
 | AC-H06 | 不覆盖用户存档（TEAM_RULES §6） | 迁移只读：读取/迁移不写回原文件，原文件字节不变；失败不写入 | FILE | 文件字节比对（sha256 前后一致） | P0 | 已执行→通过（临时目录文件字节不变、目录无新增） |
 | AC-H07 | 安全失败 | 损坏 JSON、未来版本、缺关键字段返回可读错误，不抛异常、不臆造资产 | UT | 错误文案 + 文件未变 | P0 | 已执行→通过（损坏 JSON/未来版本/缺城市均返回可读错误） |
-| AC-H08 | 新档到期/破产结算一致 | v7 保存后在到期月/破产月读档，结算结果与不读档一致 | IT | 双路径结果对比 | P0 | 待执行 |
-| AC-H09 | 迁移后读档不重复结算 | 迁移后保存再读档，不重复结算债券到期/破产 | IT | 事件次数断言 | P0 | 待执行 |
+| AC-H08 | 新档到期/破产结算一致 | v7 保存后在到期月/破产月读档，结算结果与不读档一致 | IT | 双路径结果对比 | P0 | 已执行→通过（`settlement-resume.test.ts`：到期前 1 月存档→读档/连续推进逐字段一致；本金流水 1 条；破产前存档同法） |
+| AC-H09 | 迁移后读档不重复结算 | 迁移后保存再读档，不重复结算债券到期/破产 | IT | 事件次数断言 | P0 | 已执行→通过（同文件：同档读两次推进结果一致；破产后读档不重放 t20 兑付、不重复建垫付贷款） |
 
 ### I. 权限白名单
 
 | ID | 要求（来源） | 冻结口径 | 验证方法 | 证据形式 | 优先级 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- |
-| AC-I01 | 非市长可见 5 类（SUPP §7） | 城市公开信息；当月 GDP 与普通 GDP 历史；已发行债券必要投资信息（发行城市/期限/票面利率/面额/可认购数量/自己持有到期与应得）；自持债券与收款记录；公开选举与破产事件 | UT + DESK | 渲染 HTML 包含断言 + 截图 | P0 | 部分绿（日志/通知渲染期过滤通过；buildPublicBondOffer/buildOwnBondHoldingViews 空实现→红） |
+| AC-I01 | 非市长可见 5 类（SUPP §7） | 城市公开信息；当月 GDP 与普通 GDP 历史；已发行债券必要投资信息（发行城市/期限/票面利率/面额/可认购数量/自己持有到期与应得）；自持债券与收款记录；公开选举与破产事件 | UT + DESK | 渲染 HTML 包含断言 + 截图 | P0 | 已执行→通过（fiscal-view 落地后：日志/通知/公开债券投影/自持视图均按白名单过滤） |
 | AC-I02 | 非市长不可见 6 类（SUPP §7） | 财政资金/余额及变化；收入/支出/赤字/流水明细；银行贷款余额/全部未偿债券本金/总负债；12 月 GDP 合计/债务率/风险等级/预警/趋势；兑付计划/应还款/垫付/预算明细；发债与借款操作 | UT + DESK | HTML 不包含断言 + DOM 文本断言 + 截图 | P0 | 已执行→通过（canViewMayorFiscal/isVisibleTo/非市长视图为 null） |
-| AC-I03 | **间接泄漏**：公开投资信息不附带敏感汇总（SUPP §7 末段） | 公开债券投资信息（发行城市/期限/票面利率/面额/可认购数量/自持到期与应得）之外，不得出现**发行计划总额、全部已售额、政府总债务**，也不得以可推算字段间接给出；非市长页面/接口/文案均无这些值 | UT + DESK | 渲染 HTML 与 DOM 文本断言（正向白名单字段存在、敏感汇总字符串不存在）+ 截图 | P0 | 已执行→红（块4 未落地：buildPublicBondOffer 空实现） |
-| AC-I04 | A 城 / B 城切换 | 玩家任 A 城市长时只见 A 城专属财政；B 城按普通玩家权限 | UT + DESK | 两城渲染对比 + 截图 | P0 | 已执行→红（块4 未落地：buildMayorFiscalView 空实现） |
+| AC-I03 | **间接泄漏**：公开投资信息不附带敏感汇总（SUPP §7 末段） | 公开债券投资信息（发行城市/期限/票面利率/面额/可认购数量/自持到期与应得）之外，不得出现**发行计划总额、全部已售额、政府总债务**，也不得以可推算字段间接给出；非市长页面/接口/文案均无这些值 | UT + DESK | 渲染 HTML 与 DOM 文本断言（正向白名单字段存在、敏感汇总字符串不存在）+ 截图 | P0 | 已执行→通过（公开投影含城市/面额/利率/期限，不含计划总额、总售额、政府总债务） |
+| AC-I04 | A 城 / B 城切换 | 玩家任 A 城市长时只见 A 城专属财政；B 城按普通玩家权限 | UT + DESK | 两城渲染对比 + 截图 | P0 | 已执行→通过（buildMayorFiscalView：A 城市长仅见 A 城；B 城为受限占位） |
 | AC-I05 | 换任后立即重校验 | 换任/离职/破产重选后同一会话内立即生效，无需重启 | UT + DESK | 状态切换用例 + 截图 | P0 | 已执行→通过（任命/退任后同会话立即生效，日志过滤随身份变化） |
 | AC-I06 | 操作入口与执行校验 | 非市长不能通过正常 UI 路径发债/借款；执行函数本身也校验，不只隐藏按钮 | UT + DESK | 操作被拒 + 无状态变化 | P0 | 待执行 |
-| AC-I07a | 旧泄漏·城市卡片财政余额（DECISIONS #9） | 非市长时城市卡片不得出现 `财政 <金额>`；仅保留公开指标（人口/就业/失业/公开 GDP） | UT + DESK | `renderLeftRegion` HTML 断言 + 修复前后截图对照 | P0 | 已执行→红（界面未修：城市卡片仍含“财政 <金额>”；证据 L1/L6） |
-| AC-I07b | 旧泄漏·区域地图节点财政（DECISIONS #9） | 非市长时经济图层节点文字不得含 `财政`/余额；只显示公开 GDP 或中性信息 | AUDIT + DESK | 画布 text 对象断言 + 修复前后截图对照 | P0 | 待执行（画布需桌面走查；证据 L2/L7） |
-| AC-I07c | 旧泄漏·城市概况 KPI 财政（DECISIONS #9） | 非市长时城市概况 KPI 不得显示财政余额（`src/ui/panels.ts:539`） | UT + DESK | 渲染断言 + 截图对照 | P0 | 已执行→红（界面未修：概况 KPI 仍含财政；证据 L3） |
-| AC-I07d | 旧泄漏·政府面板财政流水与政策预算（DECISIONS #9） | 非市长时政府与政策面板不得显示财政流水明细、政策预算/已支出等（`src/ui/panels.ts:761`、`945–1003`）；可保留公开选举信息与参选入口 | UT + DESK | 渲染断言 + 截图对照 | P0 | 已执行→红（界面未修：政府面板仍含财政流水/政策预算；证据 L4） |
-| AC-I07e | 旧泄漏·交通/政策“财政资金不足”提示（DECISIONS #9） | 非市长时不得通过“财政资金不足”等状态文案反推政府资金（`src/ui/panels.ts:1030/1075/1082/1131/1144`）；市长视角仍应有该提示 | UT + DESK | `transport-why` 文本断言（非市长 0 处、市长存在）+ 截图对照 | P0 | 已执行→红（界面未修：非市长仍见“财政资金不足”；证据 L5） |
-| AC-I07f | 旧泄漏·通知/图表/存档模态/HUD 复核（DECISIONS #9） | 逐项审计通知、图表、存档模态、HUD 是否含财政余额/负债/流水/风险字段；HUD 仅允许玩家现金/净值与世界公开 GDP | AUDIT + DESK | 审计表（文件:行 → 结论）+ 截图 | P0 | 待修复→待核销 |
-| AC-I07g | 泄漏核销记录 | 每个修复点必须有“修复前证据 + 修复后同机位证据 + 断言通过”三件套，逐条核销，缺一不算完成 | AUDIT | 本文件 §2.5 核销表更新 | P0 | 待执行 |
+| AC-I07a | 旧泄漏·城市卡片财政余额（DECISIONS #9） | 非市长时城市卡片不得出现 `财政 <金额>`；仅保留公开指标（人口/就业/失业/公开 GDP） | UT + DESK | `renderLeftRegion` HTML 断言 + 修复前后截图对照 | P0 | 已执行→通过（城市卡片对所有身份均不显示财政；`renderLeftRegion` 断言 + 证据 L1/L6） |
+| AC-I07b | 旧泄漏·区域地图节点财政（DECISIONS #9） | 非市长时经济图层节点文字不得含 `财政`/余额；只显示公开 GDP 或中性信息 | AUDIT + DESK | 画布 text 对象断言 + 修复前后截图对照 | P0 | 已执行→通过（地图经济图层仅公开 GDP；画布 text 断言 + 证据 L2/L7） |
+| AC-I07c | 旧泄漏·城市概况 KPI 财政（DECISIONS #9） | 非市长时城市概况 KPI 不得显示财政余额（`src/ui/panels.ts:539`） | UT + DESK | 渲染断言 + 截图对照 | P0 | 已执行→通过（概况 KPI 财政块改为“企业数量”；证据 L3 + 走查 01） |
+| AC-I07d | 旧泄漏·政府面板财政流水与政策预算（DECISIONS #9） | 非市长时政府与政策面板不得显示财政流水明细、政策预算/已支出等（`src/ui/panels.ts:761`、`945–1003`）；可保留公开选举信息与参选入口 | UT + DESK | 渲染断言 + 截图对照 | P0 | 已执行→通过（非市长仅 `fiscal-restricted` 占位；证据 L4 + 走查 02） |
+| AC-I07e | 旧泄漏·交通/政策“财政资金不足”提示（DECISIONS #9） | 非市长时不得通过“财政资金不足”等状态文案反推政府资金（`src/ui/panels.ts:1030/1075/1082/1131/1144`）；市长视角仍应有该提示 | UT + DESK | `transport-why` 文本断言（非市长 0 处、市长存在）+ 截图对照 | P0 | 已执行→通过（非市长 0 处“财政资金不足”；市长仍有提示；证据 L5） |
+| AC-I07f | 旧泄漏·通知/图表/存档模态/HUD 复核（DECISIONS #9） | 逐项审计通知、图表、存档模态、HUD 是否含财政余额/负债/流水/风险字段；HUD 仅允许玩家现金/净值与世界公开 GDP | AUDIT + DESK | 审计表（文件:行 → 结论）+ 截图 | P0 | 部分通过（通知已核销；图表/存档模态/HUD 本轮未逐项审计） |
+| AC-I07g | 泄漏核销记录 | 每个修复点必须有“修复前证据 + 修复后同机位证据 + 断言通过”三件套，逐条核销，缺一不算完成 | AUDIT | 本文件 §2.5 核销表更新 | P0 | 已执行→通过（LK-1–5 三件套齐全；LK-6 通知已核销、其余部分） |
 | AC-I08 | 模拟层不受限 | 权限只在 UI 展示与操作层；模拟逻辑正常读取财政数据 | AUDIT | 代码审计记录 | P1 | 已执行→通过（审计：模拟层仍正常读写财政/收入） |
-| AC-I09 | 默认开局非市长 | 开局玩家非任何城市市长，城市卡片/地图提示不得显示该城财政余额（当前基线泄漏） | UT + DESK | 断言 + 截图 | P0 | 已执行→红（界面未修：默认非市长仍见财政） |
+| AC-I09 | 默认开局非市长 | 开局玩家非任何城市市长，城市卡片/地图提示不得显示该城财政余额（当前基线泄漏） | UT + DESK | 断言 + 截图 | P0 | 已执行→通过（默认非市长；区域卡片/地图/概况均无城财政） |
 
 ### J. 桌面走查（Xvfb + Electron）
 
 | ID | 要求（来源） | 冻结口径 | 验证方法 | 证据形式 | 优先级 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- |
-| AC-J01 | 启动与稳定性（Brief §六、§八.2） | `Xvfb :99 -screen 0 1600x1000x24` + `electron --no-sandbox --disable-dev-shm-usage scripts/acceptance-fiscal.cjs` 启动成功；无 renderer gone、无应用级 console error（WebGL 软件回退/ReadPixels 性能提示按无头环境噪声记录，不计为应用错误） | DESK | 启动日志 + 错误分类清单 + 截图 | P0 | 待执行 |
-| AC-J02 | 导航与基础操作 | 区域 → 城市 → 返回；HUD 日期/GDP/现金更新；时间推进 | DESK | 截图 + DOM 读数 JSON | P1 | 待执行 |
-| AC-J03 | 发债操作 | 市长面板显示发债入口；认购 → 部分成交 → 未售出金额 → 政府资金到账；非市长无入口 | DESK | 截图 + 前后数值 JSON | P0 | 待执行 |
-| AC-J04 | 债券到期 | 推进 36 个月，持有人收到本息；到期状态与账目一致 | DESK | 截图 + tick 序列数据 | P0 | 待执行 |
-| AC-J05 | 银行垫付 | 政府余额不足场景仍足额兑付；面板说明垫付 | DESK | 截图 + 贷款/负债读数 | P0 | 待执行 |
-| AC-J06 | 风险预警 | 分级颜色 + 文字 + 环比方向；仅市长可见 | DESK | 截图（市长/非市长对比） | P1 | 待执行 |
-| AC-J07 | 破产与重选 | 触发破产 → 立即重选事件 → 新政府状态；事件通知可读 | DESK | 截图 + 事件日志 | P0 | 待执行 |
-| AC-J08 | 权限视图 | 同城非市长逐页面 DOM 断言无敏感字段；A/B 城切换；换任后立即变化 | DESK | DOM 断言 JSON + 截图 | P0 | 待执行 |
-| AC-J09 | 存读档 | 保存 → 推进 → 读取日期/数据一致；重启恢复自动存档；不覆盖用户存档 | DESK | 截图 + 读数 JSON + 文件字节 | P0 | 待执行 |
-| AC-J10 | 窗口尺寸 | 1100×700 无横向溢出、文字不裁切 | DESK | `scrollWidth ≤ innerWidth + 2` + 截图 | P2 | 待执行 |
-| AC-J11 | 截图清单 | 归档 `artifacts/`，命名与步骤对应；注明无头环境与分辨率局限 | DESK | 截图路径清单 | P1 | 待执行 |
+| AC-J01 | 启动与稳定性（Brief §六、§八.2） | `Xvfb :99 -screen 0 1600x1000x24` + `electron --no-sandbox --disable-dev-shm-usage scripts/acceptance-fiscal.cjs` 启动成功；无 renderer gone、无应用级 console error（WebGL 软件回退/ReadPixels 性能提示按无头环境噪声记录，不计为应用错误） | DESK | 启动日志 + 错误分类清单 + 截图 | P0 | 已执行→通过（smoke-main 27 项、fiscal-ui 22/22、acceptance-desktop 18/18 退出 0；console 仅 2 条 WebGL 软件回退告警，按无头噪声记录） |
+| AC-J02 | 导航与基础操作 | 区域 → 城市 → 返回；HUD 日期/GDP/现金更新；时间推进 | DESK | 截图 + DOM 读数 JSON | P1 | 已执行→通过（smoke-main：区域→城市→返回、HUD 日期/GDP/现金、时间推进） |
+| AC-J03 | 发债操作 | 市长面板显示发债入口；认购 → 部分成交 → 未售出金额 → 政府资金到账；非市长无入口 | DESK | 截图 + 前后数值 JSON | P0 | 部分通过（走查 05/06：发债 200 份→认购 20→次月 active、财政到账；部分成交/未售未在桌面覆盖） |
+| AC-J04 | 债券到期 | 推进 36 个月，持有人收到本息；到期状态与账目一致 | DESK | 截图 + tick 序列数据 | P0 | 未完成（36 月桌面推进未执行；到期单测 B10 已通过） |
+| AC-J05 | 银行垫付 | 政府余额不足场景仍足额兑付；面板说明垫付 | DESK | 截图 + 贷款/负债读数 | P0 | 未完成（桌面垫付场景未造；B12 实现缺口未修，桌面复验待修复后） |
+| AC-J06 | 风险预警 | 分级颜色 + 文字 + 环比方向；仅市长可见 | DESK | 截图（市长/非市长对比） | P1 | 部分通过（走查 04：normal 档 + 环比占位；high/破产档未桌面覆盖） |
+| AC-J07 | 破产与重选 | 触发破产 → 立即重选事件 → 新政府状态；事件通知可读 | DESK | 截图 + 事件日志 | P0 | 未完成（桌面破产重选未造；真实 36 月为脚本层复现，非桌面） |
+| AC-J08 | 权限视图 | 同城非市长逐页面 DOM 断言无敏感字段；A/B 城切换；换任后立即变化 | DESK | DOM 断言 JSON + 截图 | P0 | 已执行→通过（fiscal-ui 22/22 + leaks-after 7/7 + after-block2 7 张 DOM 断言） |
+| AC-J09 | 存读档 | 保存 → 推进 → 读取日期/数据一致；重启恢复自动存档；不覆盖用户存档 | DESK | 截图 + 读数 JSON + 文件字节 | P0 | 已执行→通过（smoke-main：存档→推进→读档日期一致；损坏自动存档安全降级） |
+| AC-J10 | 窗口尺寸 | 1100×700 无横向溢出、文字不裁切 | DESK | `scrollWidth ≤ innerWidth + 2` + 截图 | P2 | 已执行→通过（fiscal-ui 1100×700：`scrollWidth ≤ innerWidth`） |
+| AC-J11 | 截图清单 | 归档 `artifacts/`，命名与步骤对应；注明无头环境与分辨率局限 | DESK | 截图路径清单 | P1 | 已执行→通过（`artifacts/{qa-before,qa-after,qa-after-block2,ui-fiscal,acceptance-*}` 清单见 §4） |
 | AC-J12 | 缺口如实报告 | 无法完成项写明原因、已尝试方式、替代证据；不用单测冒充 UI 验收 | AUDIT | 报告缺口章节 | P0 | 待执行 |
 
 ### K. 交付报告（Brief §八.3–8.5 + SUPP §8）
@@ -297,12 +347,12 @@
 
 | 编号 | 位置 | 泄漏字段 | 修复前证据 | 修复后核销证据 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| LK-1 | `src/ui/panels.ts:346` 城市卡片 | 财政余额 | `artifacts/qa-before/02-city-card-lanport-treasury.png`、`07-city-card-after-12m.png` | 同机位截图 + `renderLeftRegion` 断言 | 待修复 |
-| LK-2 | `src/presentation/scenes/RegionalScene.ts:266` 经济图层 | GDP + 财政余额 | `artifacts/qa-before/03-region-map-economy-hint.png`、`08-region-map-economy-after-12m.png`（画布 text 证据） | 同机位截图 + 画布 text 断言 | 待修复 |
-| LK-3 | `src/ui/panels.ts:539` 城市概况 KPI | 财政余额 | `artifacts/qa-before/04-city-overview-fiscal-kpi.png` | 同机位截图 + 渲染断言 | 待修复 |
-| LK-4 | `src/ui/panels.ts:761`、`945–1003` 政府面板 | 财政流水、政策预算/已支出 | `artifacts/qa-before/05-government-fiscal-ledger.png`、`05b-government-section-clip.png` | 同机位截图 + 渲染断言 | 待修复 |
-| LK-5 | `src/ui/panels.ts:1030/1075/1082/1131/1144` 交通/政策提示 | “财政资金不足”状态 | `artifacts/qa-before/06-transport-fiscal-insufficient.png`、`06b-transport-section-clip.png`（4 处） | 非市长 0 处 + 市长仍有提示的截图/断言 | 待修复 |
-| LK-6 | 通知 / 图表 / 存档模态 / HUD | 财政/负债/风险字段 | 审计后补（当前基线未见，需逐项确认） | 审计表 + 截图 | 待审计 |
+| LK-1 | `src/ui/panels.ts:346` 城市卡片 | 财政余额 | `artifacts/qa-before/02-city-card-lanport-treasury.png`、`07-city-card-after-12m.png` | `artifacts/qa-after/02-city-card-lanport-treasury.png`、`07-city-card-after-12m.png`（同机位无财政）+ `renderLeftRegion` 断言 + 走查 `qa-after-block2/01` | 已核销 |
+| LK-2 | `src/presentation/scenes/RegionalScene.ts:266` 经济图层 | GDP + 财政余额 | `artifacts/qa-before/03-region-map-economy-hint.png`、`08-region-map-economy-after-12m.png`（画布 text 证据） | `artifacts/qa-after/03-…`、`08-…`（同机位仅“GDP <值>”，无财政）+ 画布 text 断言（leaks-after L2/L7） | 已核销 |
+| LK-3 | `src/ui/panels.ts:539` 城市概况 KPI | 财政余额 | `artifacts/qa-before/04-city-overview-fiscal-kpi.png` | `artifacts/qa-after/04-city-overview-fiscal-kpi.png`（KPI 为“企业数量”）+ 渲染断言 + 走查 `qa-after-block2/01` | 已核销 |
+| LK-4 | `src/ui/panels.ts:761`、`945–1003` 政府面板 | 财政流水、政策预算/已支出 | `artifacts/qa-before/05-government-fiscal-ledger.png`、`05b-government-section-clip.png` | `artifacts/qa-after/05-…`、`05b-…`（非市长仅“仅市长可见”占位）+ `qa-after-block2/02`（hasRestricted=true、无 panel/ledger）+ `ui-fiscal/02` | 已核销 |
+| LK-5 | `src/ui/panels.ts:1030/1075/1082/1131/1144` 交通/政策提示 | “财政资金不足”状态 | `artifacts/qa-before/06-transport-fiscal-insufficient.png`、`06b-transport-section-clip.png`（4 处） | `artifacts/qa-after/06-…`、`06b-…`（非市长 0 处）+ `ui-fiscal/04` 市长仍有该提示 + `transport-why` 断言 | 已核销 |
+| LK-6 | 通知 / 图表 / 存档模态 / HUD | 财政/负债/风险字段 | 首轮审计未见（需确认） | `ui-fiscal` 通知重过滤用例通过；图表/存档模态/HUD 尚未逐项审计 | 部分核销（通知已核销，其余待审计） |
 
 核销标准：修复后在同一环境（Xvfb 1600×1000、窗口 1440×900、同身份、同城市、同月份）重拍同机位截图，并附 DOM/画布断言；两者都通过才在交付报告标“已核销”。
 
@@ -314,58 +364,49 @@
 
 | 文件 | 覆盖条目 | 说明 |
 | --- | --- | --- |
-| `helpers.ts` | — | 测试公共设施：`newWorld()`（固定种子）、`advance(months)`、世界资金守恒快照/断言、财政/银行/持股快照、配置覆盖工具、旧档降级构造器。只做测试侧数据，不改产品代码。 |
-| `invariants.test.ts` | AC-A03、AC-A04 | 月结/认购/兑付/破产/读档后的不变量与资金守恒总账。 |
-| `bonds.test.ts` | AC-B01–B14 | 面额整数份、计划/成交分账、多主体、跨城、资金不足、重复扣款、超额发行、36 月到期、利息、无条件垫付、总账守恒。 |
-| `company-bond-subscription.test.ts` | AC-C01–C05 | 企业购债不触发贷款、无“先贷款再认购”、只用自有资金、已有贷款可买、拒绝无副作用。 |
-| `household-consumption.test.ts` | AC-D01–D09 | 80%/5% 公式、时点、无收入有积蓄、四层分账、群体隔离、供给不足、存款不纳入、确定性、守恒。 |
-| `household-loans.test.ts` | AC-E01–E08 | 额度、无资产开关、真实债务、供给不足不借、逾期违约、迁移守恒、读档幂等、需求分层。 |
-| `bankruptcy-threshold.test.ts` | AC-F01–F04、F14 | 阈值口径、边界、最小判定值 1、当月重选、预警分级。 |
-| `bankruptcy-settlement.test.ts` | AC-F05–F08、F12–F13 | 幂等、提前兑付、勾销、同月到期+破产、读档重放、破产前后状态。 |
-| `bankruptcy-equity.test.ts` | AC-F09–F11 | 有 CEO/无 CEO 分股、主体数量平分与余数、托管兜底。 |
-| `gdp-estimate.test.ts` | AC-G01–G08 | 12 月同值、口径与 80%、初始化无副作用、逐月替换、下限 1、旧档标注、报告数据、禁止首月×12。 |
-| `migration-v7.test.ts` | AC-H01–H09 | v6→v7、负余额转贷款、估计标注、v1–v5 链、往返幂等、不覆盖文件、安全失败、到期/破产一致、读档不重复结算。 |
-| `permissions.test.ts` | AC-I01–I09、AC-I07a–g | 用现有渲染函数（`renderLeftRegion` / `renderRightCity` / `renderRightRegion` 等）做字符串级可见/不可见断言，逐点覆盖 §2.5 泄漏核销表；真实 DOM/画布走查由桌面脚本补充。 |
-| `scripts/acceptance-fiscal.cjs` | AC-J01–J12 | 新增无头 Electron 走查脚本（见 §4），沿用 `scripts/smoke-main.cjs` 的 `waitFor/capture/read` 模式；泄漏修复后用同机位重拍做前后对照。 |
-| `scripts/acceptance-leaks-before.cjs` | AC-I07、LK-1–5 | 修复前证据采集脚本（已执行），输出 `artifacts/qa-before/`；只读世界 + 截图，不改产品代码。 |
-| `docs/development/ACCEPTANCE_MATRIX_v1.md` | — | 本文件（规划）。 |
-| `docs/development/ACCEPTANCE_REPORT_v1.md` | AC-K01–K10 | 最终证据报告（执行后填写，逐条“要求 → 命令 → 实际结果”）。 |
+| 文件 | 覆盖条目 | 状态 |
+| --- | --- | --- |
+| `helpers.ts` | — | 已落地：`newWorld()`（默认种子 20261101）、旧档降级构造器（v1–v6）、世界资金守恒口径 `totalMoney`、面板渲染辅助。 |
+| `baseline-a.test.ts` | AC-A05–A07 | 4 条，已执行→通过（归档 JSON 自洽与阈值；不重跑 36 月）。 |
+| `bonds.test.ts` | AC-B01–B14 | 15 条，12 绿 / 3 红（B12、B14×2 兑付不入账）。 |
+| `company-bond-subscription.test.ts` | AC-C01–C05 | 5 条，全绿。 |
+| `bankruptcy.test.ts` | AC-F01–F14 | 14 条，13 绿 / 1 红（F08 同月两段兑付被幂等键吞掉）。 |
+| `bankruptcy-real-run.test.ts` | AC-F01/F04/F06/F07/F09–F13 的真实样本交叉验证 | 8 条，全绿（固定 36 月样本，见 §1.5）。 |
+| `gdp-estimate.test.ts` | AC-G01–G08 | 8 条，全绿。 |
+| `migration-v7.test.ts` | AC-H01–H07 | 14 条，全绿。 |
+| `settlement-resume.test.ts` | AC-H08–H09 | 3 条，全绿（到期月/破产月双路径一致性 + 重复读档幂等）。 |
+| `permissions.test.ts` | AC-I01–I09、AC-I07a–g | 13 条，全绿（含泄漏回归 7 条）。 |
+| `scripts/acceptance-leaks-before.cjs` | AC-I07、LK-1–6 | 修复前证据采集（已执行），产物 `artifacts/qa-before/`。 |
+| `scripts/acceptance-leaks-after.cjs` | LK-1–5、AC-I07a–e | 修复后同机位复拍 + 7/7 断言（已执行），产物 `artifacts/qa-after/`。 |
+| `scripts/acceptance-after-block2.cjs` | AC-I01–I04、J03、J06、J08 | 块2 桌面证据 7 张 + manifest（已执行），产物 `artifacts/qa-after-block2/`。 |
+| `scripts/smoke-main.cjs`（代码组已有） | AC-J01/J02/J09/J10 | 27 项交互通过（已执行）。 |
+| `scripts/smoke-fiscal-ui.cjs`（UI 块4 随附） | AC-J08/J10、AC-I07 | 22/22 通过（已执行），产物 `artifacts/ui-fiscal/`。 |
+| `scripts/acceptance-desktop.cjs` | AC-J01/J02 | 18/18 通过（已执行），产物 `artifacts/acceptance-*.png`。 |
+| `docs/development/ACCEPTANCE_MATRIX_v1.md` | — | 本文件。 |
+| `docs/development/ACCEPTANCE_REPORT_v1.md` | AC-K01–K10 | 交付前填写。 |
+| 待补：`household-consumption.test.ts`、`household-loans.test.ts` | AC-D01–D09、AC-E01–E08 | D/E 组等消费/居民贷款实现落地。 |
+
+当前验收用例总数 **84**（业务基线 345 之外）；P0 余红 4 条（B12、B14×2、F08），均为已定位的实现缺陷，已报秘书处。
 
 预计新增用例约 90–110 个；加上现有 306 个，集成后全量目标约 400+ 用例。
 
 ---
 
-## 4. 桌面走查脚本规划（`scripts/acceptance-fiscal.cjs`）
+## 4. 桌面走查执行记录（实际脚本与产物）
 
-环境（照抄 TEAM_RULES §3）：
+环境：Linux 无头，`Xvfb :99 -screen 0 1600x1000x24`，Electron 窗口 1440×900（小窗口用例 1100×700），`--no-sandbox --disable-dev-shm-usage`，`userData` 隔离到 `artifacts/electron-user-data*/`。
 
-```bash
-Xvfb :99 -screen 0 1600x1000x24 >/tmp/xvfb.log 2>&1 &
-DISPLAY=:99 node_modules/electron/dist/electron --no-sandbox --disable-dev-shm-usage scripts/acceptance-fiscal.cjs
-```
+**环境修复记录**：`/var/lib/xkb` 原为指向沙箱外不可写路径的符号链接，Xvfb 启动报 `Cannot open "/var/lib/xkb/server-99.xkm"` 后段错误；用一次 `danger-full-access` 执行 `rm -f /var/lib/xkb && mkdir -p /var/lib/xkb && chmod 1777 /var/lib/xkb` 后恢复。另注意：清理 Xvfb 不能用 `pkill -f "Xvfb :99"`（会匹配到执行该命令的 shell 自身，SIGTERM 掉整条作业），改用 `pgrep -x Xvfb | xargs -r kill`。
 
-脚本沿用 `smoke-main.cjs` 的 `waitFor / capture / click / read` 工具，隔离 `userData` 到 `artifacts/electron-user-data-fiscal/`，输出 JSON 结果与截图。
-
-步骤与截图清单（`artifacts/acceptance-fiscal/`）：
-
-| 步骤 | 操作 | 截图 | 断言/数据 |
+| 产物目录 | 脚本 | 张数/断言 | 内容 |
 | --- | --- | --- | --- |
-| 1 | 启动，等待 `window.__lanwan` 与 HUD | `01-region-nonmayor.png` | 无 console error；默认非市长 |
-| 2 | 非市长打开城市卡片/城市面板/财政入口 | `02-nonmayor-city.png` | 无财政余额/流水/负债/债务率文本；无发债按钮 |
-| 3 | 切换市长演示/当选 A 城市长 | `03-mayor-fiscal-panel.png` | 财政面板含可用资金、收入支出、银行贷款、在外债券本金、总负债、12 月 GDP、债务/GDP、风险等级、方向、估计占比 |
-| 4 | 发债：设置份数，部分成交 | `04-bond-issue.png`、`05-bond-partial.png` | 计划/成交/未售出分列；本金 = 成交份数×1000；资金到账 |
-| 5 | 认购（玩家/投资实体/企业，含跨城） | `06-bond-subscribe.png` | 各主体扣款与持仓正确；企业认购前后无新增贷款 |
-| 6 | 推进到第 36 月 | `07-bond-maturity.png` | 到期兑付本息；余额不足场景出现银行垫付说明 |
-| 7 | 制造高负债触发预警 | `08-risk-warning.png` | 分级颜色 + 文字 + 环比方向 |
-| 8 | 触发破产 | `09-bankruptcy.png`、`10-reelection.png` | 破产事件、立即重选、股份转移结果 |
-| 9 | 换任后回到非市长视角 | `11-after-term.png` | 权限立即失效，敏感字段消失 |
-| 10 | A/B 城切换 | `12-city-b.png` | A 城市长只见 A 城；B 城按普通权限 |
-| 11 | 保存 → 推进 → 读取 → 重启恢复 | `13-save-load.png`、`14-reload.png` | 日期/账目一致；自动存档恢复 |
-| 12 | 1100×700 小窗口 | `15-small-window.png` | 无横向溢出、文字不裁切 |
+| `artifacts/qa-before/` | `acceptance-leaks-before.cjs` | 10 张（8 张 + 2 裁切）+ manifest | 修复前泄漏：城市卡片财政、地图节点“GDP 0 · 财政 6000.0 万”、概况 KPI、政府面板流水、交通 4 处“财政资金不足”、12 月后负财政 |
+| `artifacts/qa-after/` | `acceptance-leaks-after.cjs` | 10 张（同名同机位）+ manifest；7/7 断言 | 修复后对照：以上位置均无财政；12 月后三城财政 -5632.2 万/-1024.3 万/+4211.8 万 |
+| `artifacts/qa-after-block2/` | `acceptance-after-block2.cjs` | 7 张 + manifest（sha256/身份/DOM）；7/7 断言 | 非市长：区域卡片无财政、政府章节受限、月报财政列“—”；市长：财政面板、债券市场、认购 20 份后推进 1 月、月报仅本市有财政 |
+| `artifacts/ui-fiscal/` | `smoke-fiscal-ui.cjs` | 15 张；22/22 检查 | 城市卡片、非市长/市长政府面板、跨城不泄漏、通知过滤、月报财政列、读档市长身份、GDP 窗口 12 行、债券市场空态、1100×700 |
+| `artifacts/acceptance-*.png` | `acceptance-desktop.cjs` | 11 张；18/18 检查 | v0.5 九组操作（区域/城市/阶层/操作模式/贷款/选举/银行/存读档） |
 
-无法完成的项（如真实 Windows 安装包、真机截图）在报告中列为缺口，注明原因与已尝试方式。
-
----
+**缺口（如实记录）**：J04（36 月桌面到期）、J05（桌面垫付）、J07（桌面破产重选）、F14 high/破产档面板截图未完成；原因：需长时桌面推进或注入高负债，本轮以单测/真实 36 月脚本替代，交付报告将在缺口章节注明。
 
 ## 5. 证据与判定规范
 
