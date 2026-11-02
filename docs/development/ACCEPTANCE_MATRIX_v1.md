@@ -1,7 +1,7 @@
 # 验收矩阵 v1 — 经济与财政系统
 
 - 版本：v1（终稿；交付前最后一轮已执行，结果见 §1.7 与 `ACCEPTANCE_RESULTS_v0.7.md`）
-- 基线：规划时 `9cef5b5`（v0.6.0，`SAVE_FORMAT_VERSION = 6`）；**最终验收基线 `21e699a`**（qa merge `78cfc2c`）
+- 基线：规划时 `9cef5b5`（v0.6.0，`SAVE_FORMAT_VERSION = 6`）；**最终验收基线 `b85cc0f`**（公开破产面板；qa merge `3177f39`）
 - 工作区：`project/wt/qa`，分支 `qa/acceptance`
 - 依据：`briefs/Game3_Combined_Brief.md` §八（验证与交付标准）、`briefs/SUPPLEMENT_ARCHITECT_v1.md`、`briefs/DECISIONS_v1.md`、`TEAM_RULES.md`
 - 口径优先级：补充指令 > 合并版任务书 > `DECISIONS_v1` > 仓库 `docs/design/GAME_DESIGN_DISCUSSIONS.md`（仅背景）
@@ -223,6 +223,23 @@
 - 唯一红条清单：**无**。历史红条（B12/B14、I07、G04、F08）均已在后续分支修复并复验核销。
 - 收敛文档：本轮结果表见 `docs/development/ACCEPTANCE_RESULTS_v0.7.md`（交付报告 §9 引用）。
 
+### 1.8 第七轮（最终 HEAD）验收执行记录（2026-11-02，交付分支 `b85cc0f` 合入 `qa/acceptance` = `3177f39`）
+
+- `git merge b85cc0f` → qa **`3177f39`**（界面 `e49079d`：公开破产面板 + 长周期债券走查取证，+903 行；不动 sim 逻辑）。
+- 基线：`npm run typecheck` ✓；`npm run build` ✓；**全量 `npx vitest run --no-file-parallelism` → 57 文件 / 472 用例全过**（业务 45/366 + 验收 12/106）。
+- 新增 I 组权限回归 `tests/acceptance/public-bankruptcy-panel.test.ts`（AC-I10a–I10e，5 条，全绿）：
+  - 非市长破产城市视图出现 `public-bankruptcy-notice`、垫付/兑付/勾销/股份托管字段；
+  - 非市长不出现 `mayor-fiscal-panel`/`fiscal-treasury`/`fiscal-total-debt`/`fiscal-debt-ratio`/`fiscal-risk-badge`/`fiscal-ledger`，受限占位仍在；
+  - 市长视角公开面板与财政面板并存；
+  - `publicBankruptcy()` 公开投影不含 `treasury/debtRatio/riskLevel/gdpJudgementValue`，且垫付/兑付金额 > 0；
+  - 未破产城市投影为 null、面板不渲染。
+- 验收合计 **106 条，106 通过 / 0 红**。
+- 桌面走查（最终构建重跑）：
+  - `scripts/acceptance-final.cjs` → `artifacts/qa-final/` 8 张 + manifest（consoleErrors=[]，逐张 sha256/身份/tick）。
+  - `scripts/smoke-main.cjs` 退出 0：27 项交互、存读档 formatVersion=7、损坏档安全降级。
+  - `scripts/smoke-fiscal-ui.cjs` 退出 0：**42/42 检查通过**，新增长周期 10 段与破产取证——tick 22 冻结破产前档（负债率 0.94）→ tick 23 岚港真实破产、公开破产面板（看守期/银行垫付/已勾销/股份托管）、债券市场 12 期破产兑付 + 勾销说明；截图 `artifacts/ui-fiscal/`（20 张）+ `artifacts/ui-fiscal-bonds/`（9 张 + NOTES.md）。
+- 红条清单：**无**。
+
 ## 2. 验收矩阵
 
 图例：优先级 P0 = 交付前必须通过（失败即阻断）；P1 = 应通过，失败须书面说明缺口；P2 = 观察项/一致性检查。
@@ -434,6 +451,7 @@
 | `migration-v7.test.ts` | AC-H01–H07 | 14 条，全绿。 |
 | `settlement-resume.test.ts` | AC-H08–H09 | 3 条，全绿（到期月/破产月双路径一致性 + 重复读档幂等）。 |
 | `permissions.test.ts` | AC-I01–I09、AC-I07a–g | 13 条，全绿（含泄漏回归 7 条）。 |
+| `public-bankruptcy-panel.test.ts` | AC-I10a–I10e | 5 条，全绿（公开破产面板：市民见破产事实、不见财政细节；市长双面板并存）。 |
 | `scripts/acceptance-leaks-before.cjs` | AC-I07、LK-1–6 | 修复前证据采集（已执行），产物 `artifacts/qa-before/`。 |
 | `scripts/acceptance-leaks-after.cjs` | LK-1–5、AC-I07a–e | 修复后同机位复拍 + 7/7 断言（已执行），产物 `artifacts/qa-after/`。 |
 | `scripts/acceptance-after-block2.cjs` | AC-I01–I04、J03、J06、J08 | 块2 桌面证据 7 张 + manifest（已执行），产物 `artifacts/qa-after-block2/`。 |
@@ -444,9 +462,9 @@
 | `docs/development/ACCEPTANCE_MATRIX_v1.md` | — | 本文件。 |
 | `docs/development/ACCEPTANCE_RESULTS_v0.7.md` | AC-K01–K10 | 最终结果表（组别/用例数/通过/失败/证据路径），交付报告 §9 引用。 |
 
-当前验收用例总数 **101**（业务基线 366 之外）；**P0 余红 0 条**（AC-F08 于 `21e699a` 修复并复验通过，§1.7）。
+当前验收用例总数 **106**（业务基线 366 之外）；**P0 余红 0 条**（AC-F08 于 `21e699a` 修复并复验通过，§1.7；公开破产面板于 `b85cc0f` 合入并新增 I10，§1.8）。
 
-规划值约 90–110 个，实际落地 101 个；最终构建全量 = 业务 366 + 验收 101 = 467 用例。
+规划值约 90–110 个，实际落地 106 个；最终构建全量 = 业务 366 + 验收 106 = **472 用例**（全绿）。
 
 ---
 
@@ -456,7 +474,7 @@
 
 **环境修复记录**：`/var/lib/xkb` 原为指向沙箱外不可写路径的符号链接，Xvfb 启动报 `Cannot open "/var/lib/xkb/server-99.xkm"` 后段错误；用一次 `danger-full-access` 执行 `rm -f /var/lib/xkb && mkdir -p /var/lib/xkb && chmod 1777 /var/lib/xkb` 后恢复。另注意：清理 Xvfb 不能用 `pkill -f "Xvfb :99"`（会匹配到执行该命令的 shell 自身，SIGTERM 掉整条作业），改用 `pgrep -x Xvfb | xargs -r kill`。
 
-> **第六轮（最终）状态（`21e699a` = qa `78cfc2c`）**：已重跑桌面走查，修后证据在 `artifacts/qa-final/`（8 张 + manifest，含市民/市长同城同 tick 对照、债券市场发行与认购）与 `artifacts/smoke-main.json`（27 项交互、存读档、损坏档降级，退出 0）。下表 `qa-before`/`qa-after`/`qa-after-block2` 产物为历史轮次留档，非现行构建。`artifacts/` 被 `.gitignore` 忽略，仅磁盘留档。
+> **第七轮（最终 HEAD `b85cc0f` = qa `3177f39`）状态**：三套桌面脚本已在最终构建重跑并全部退出 0；修后证据在 `artifacts/qa-final/`（8 张 + manifest）、`artifacts/ui-fiscal/`（20 张，42/42 检查）、`artifacts/ui-fiscal-bonds/`（9 张 + NOTES.md，含 tick 23 公开破产面板与 12 期破产兑付）。下表 `qa-before`/`qa-after`/`qa-after-block2` 产物为历史轮次留档，非现行构建。`artifacts/` 被 `.gitignore` 忽略，仅磁盘留档。
 
 
 | 产物目录 | 脚本 | 张数/断言 | 内容 |
@@ -467,6 +485,8 @@
 | `artifacts/ui-fiscal/` | `smoke-fiscal-ui.cjs` | 15 张；22/22 检查 | 城市卡片、非市长/市长政府面板、跨城不泄漏、通知过滤、月报财政列、读档市长身份、GDP 窗口 12 行、债券市场空态、1100×700 |
 | `artifacts/acceptance-*.png` | `acceptance-desktop.cjs` | 11 张；18/18 检查 | v0.5 九组操作（区域/城市/阶层/操作模式/贷款/选举/银行/存读档） |
 | `artifacts/qa-final/` | `acceptance-final.cjs` | 8 张 + manifest（sha256/身份/tick/DOM）；consoleErrors=0 | 市民受限态 vs 市长财政面板（同城同 tick）、债券发行 200 份/认购 20 份后结算、月报财政列、区域卡片无财政 |
+| `artifacts/ui-fiscal/` | `smoke-fiscal-ui.cjs` | 20 张；42/42 检查 | 权限/财政面板/债券市场/通知/报告/小窗口（最终构建重跑） |
+| `artifacts/ui-fiscal-bonds/` | `smoke-fiscal-ui.cjs`（长周期段） | 9 张 + NOTES.md | tick 22 破产前档（0.94）→ tick 23 岚港破产：公开破产面板（看守期/垫付/勾销/托管）、债券市场 12 期破产兑付 |
 
 **缺口（如实记录）**：J04 仅覆盖“发行/认购”桌面路径，**36 月桌面到期**未走；J05（桌面垫付）、J07（桌面破产重选）仍未做桌面截图；F14 high/破产档面板截图未完成。原因：需桌面连续推进 36 月或注入高负债，本轮以单测 + 真实 36 月脚本（`bankruptcy-real-run.test.ts`）+ 债券市场桌面路径替代，交付报告需在缺口章节注明。
 
