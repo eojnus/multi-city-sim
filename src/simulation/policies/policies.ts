@@ -138,7 +138,8 @@ export function canStartPolicy(
       return { ok: false, error: `预算低于最低额 ${config.policies.minBudget.toLocaleString('zh-CN')}`, budget: 0 };
     }
     if (city.treasury + 1e-6 < requested) {
-      return { ok: false, error: `财政资金不足：可用 ${city.treasury.toFixed(0)}，需要预算 ${requested.toFixed(0)}`, budget: requested };
+      // v0.7 泄漏审计 #9：非市长不得看到精确财政余额与预算，只给定性提示。
+      return { ok: false, error: '该政策当前无法执行：城市财政资金不足', budget: requested };
     }
   }
   return { ok: true, budget: requested };
