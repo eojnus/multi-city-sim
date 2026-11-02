@@ -243,6 +243,10 @@ function collectGovernmentProbe(world: WorldState, monthly: MonthRow[], months: 
     const totalOut = round2(
       -Object.values(byKind).filter((value) => value < 0).reduce((sum, value) => sum + value, 0),
     );
+    const loanTicks = world.fiscal.ledger
+      .filter((entry) => entry.cityId === city.id && entry.kind === 'governmentLoanProceeds')
+      .map((entry) => entry.tick);
+    const governmentLoanFirstTick = loanTicks.length > 0 ? Math.min(...loanTicks) : null;
     const cityRows = monthly.map((row) => row.cities.find((item) => item.cityId === city.id)).filter(Boolean);
     const income = round2(cityRows.reduce((sum, row) => sum + (row?.income ?? 0), 0));
     const expense = round2(cityRows.reduce((sum, row) => sum + (row?.expense ?? 0), 0));
@@ -253,6 +257,7 @@ function collectGovernmentProbe(world: WorldState, monthly: MonthRow[], months: 
       byKind,
       totalIn,
       totalOut,
+      governmentLoanFirstTick,
       cumulative: {
         income,
         expense,
@@ -264,6 +269,16 @@ function collectGovernmentProbe(world: WorldState, monthly: MonthRow[], months: 
       },
     };
   });
+
+  const writeOffsByCity: GovernmentProbe['writeOffsByCity'] = world.cities
+    .map((city) => {
+      const records = bankruptcies.filter((item) => item.cityId === city.id);
+      const bankLoans = round2(records.reduce((sum, item) => sum + item.bankLoansWrittenOff, 0));
+      const advances = round2(records.reduce((sum, item) => sum + item.advancesWrittenOff, 0));
+      const interest = round2(records.reduce((sum, item) => sum + item.interestWrittenOff, 0));
+      return { cityId: city.id, cityName: city.name, bankLoans, advances, interest, total: round2(bankLoans + advances + interest) };
+    })
+    .filter((item) => item.total > 0.005);
 
   const liquidations = world.lifecycle.liquidations;
   const debtAtLiquidation = round2(liquidations.reduce((sum, item) => sum + item.debt, 0));
@@ -305,6 +320,7 @@ function collectGovernmentProbe(world: WorldState, monthly: MonthRow[], months: 
     bondIssuanceByCity,
     bondHoldersByCity,
     bankruptcies,
+    writeOffsByCity,
     elections,
     financingByCity,
     lifecycle: {
@@ -523,6 +539,8 @@ interface GovernmentProbe {
     byKind: Record<string, number>;
     totalIn: number;
     totalOut: number;
+    /** 首笔政府银行贷款月份（null=从未借政府贷款）。 */
+    governmentLoanFirstTick: number | null;
     /** 36 月累计财政收支（含融资项）与剔除融资后的经营口径。 */
     cumulative: {
       income: number;
@@ -534,6 +552,8 @@ interface GovernmentProbe {
       finalDebt: number;
     };
   }>;
+  /** 破产勾销分城汇总（#44：单列，不计入"已还本金"）。 */
+  writeOffsByCity: Array<{ cityId: string; cityName: string; bankLoans: number; advances: number; interest: number; total: number }>;
   lifecycle: { foundings: number; liquidations: number; debtAtLiquidation: number; repaidAtLiquidation: number; forgivenAtLiquidation: number; recoveryRatio: number | null };
   knownLimitations: {
     liquidationZeroRecovery: { count: number; debt: number; repaid: number; forgiven: number; shareOfOutstanding: number };
@@ -878,7 +898,7 @@ function run(months: number): { report: Report; elapsedMs: number } {
       configSignature: `DEMO_CONFIG seed=${DEMO_CONFIG.simulation.seed} tick0=${DEMO_CONFIG.simulation.startYear}-${DEMO_CONFIG.simulation.startMonth}`,
       note:
         '固定条件探针：玩家无操作、默认 AI；config 为 v0.7 冻结键名 + 数值岗首版暂定值。' +
-        '块1 债券/政府贷款/垫付与块2 破产清算、月结六阶段、12 月真实 GDP 窗口已合入（交付分支 1d138a6）。' +
+        '块1 债券/政府贷款/垫付、块2 破产清算/月结六阶段/12 月真实 GDP 窗口、块3/4 居民消费预算与群体消费贷、债券兑付入账修复均已合入（交付分支 316eff4）。' +
         '债务指标由契约函数 cityDebt/assessCityFiscalRisk/recent12MonthGdp 计算；probe 段为块6 观察（破产/重选/融资拆解/既有异常对照）。',
     },
     params: {
@@ -1113,19 +1133,61 @@ function run(months: number): { report: Report; elapsedMs: number } {
     }
   }
   report.anomalies = anomalies;
+  const lastMonthRow = report.monthly[report.monthly.length - 1];
+  const debtText = report.banking.governmentDebtByCity
+    .map(
+      (item) =>
+        `${item.cityName} ${(item.totalDebt / 1e6).toFixed(2)}M（${(item.debtRatio * 100).toFixed(1)}%，${item.riskLevel}）`,
+    )
+    .join(' / ');
+  const bankruptcyText =
+    probe.bankruptcies.length === 0
+      ? '无破产'
+      : probe.bankruptcies
+          .map((item) => `${item.cityName}第 ${item.tick} 月（判定 ${(item.debtRatio * 100).toFixed(1)}%）`)
+          .join('、');
+  const advanceTotal = round2(probe.bankruptcies.reduce((sum, item) => sum + item.bankAdvanceCreated, 0));
+  const writeOffTotal = round2(probe.writeOffsByCity.reduce((sum, item) => sum + item.total, 0));
+  const bondIssueRows = report.bonds?.issues ?? [];
+  const bondPrincipalPaid = round2(bondIssueRows.reduce((sum, item) => sum + item.principalRepaid, 0));
+  const bondArrearsTotal = round2(bondIssueRows.reduce((sum, item) => sum + (item.couponArrears ?? 0), 0));
+  const financingText =
+    probe.financingByCity
+      .filter((item) => item.totalIn > 0.005 || item.totalOut > 0.005)
+      .map(
+        (item) =>
+          `${item.cityName} 融资净额 ${fmt(item.cumulative.netFinancing)}（发债 ${fmt(item.byKind.bondIssuanceProceeds ?? 0)} / 政府贷款 ${fmt(item.byKind.governmentLoanProceeds ?? 0)} / 票息流出 ${fmt(item.byKind.bondInterest ?? 0)}）`,
+      )
+      .join('；') || '三城均无融资项';
+  const windowText =
+    lastMonthRow?.cities
+      .map(
+        (city) =>
+          `${city.cityName} 真实 ${city.gdpWindowMonths - city.gdpWindowEstimatedMonths} 个月、估计 ${city.gdpWindowEstimatedMonths} 个月`,
+      )
+      .join('；') ?? '—';
+  const issueStopText = probe.bondIssuanceByCity
+    .filter((item) => item.issues > 0)
+    .map((item) => {
+      const firstLoan = probe.financingByCity.find((city) => city.cityId === item.cityId)?.governmentLoanFirstTick;
+      return `${item.cityName} 最后一次发债 M${item.lastTick}、首笔政府贷款 ${firstLoan === null || firstLoan === undefined ? '无' : `M${firstLoan}`}`;
+    })
+    .join('；');
   report.limitations = [
     '单一固定条件（种子 20261101、36 月、玩家无操作），不是多种子统计；结论不能外推为概率。',
-    '块1 债券（发行/认购/票息/到期/破产兑付/垫付）与块2 破产清算、月结六阶段、12 月真实 GDP 窗口均已合入；居民消费贷（块3）与 #40 四字段填数仍未落地，居民预算列仍为现有 propensity 口径作参考。',
+    '版本：块1 债券（发行/认购/票息/到期/破产兑付/垫付）+ 块2 破产清算/月结六阶段/12 月真实 GDP 窗口 + 块3/4 居民消费预算（#39 80%/5%）与群体消费贷、债券兑付入账修复（316eff4）均已合入。',
     '破产清算为一次性事件：勾销后债务重新累计，本报告只记录 36 月内发生的破产次数与当次明细，不评价恢复过程是否合理。#8 幂等由重复兑付判据（18）覆盖。',
-    '财政 M36 未转负是"破产勾销 + 银行垫付 + 赤字转政府借款"的结果，不是财政改善：岚港 36 月经营支出 1,171.9M 远超经营收入 359.8M，靠发债 493.5M、政府贷款 259.8M 补足；旧基线 −422.8M 是"未融资的欠账"。',
-    '破产时银行垫付 788.2M（岚港 504.3M + 铁谷 284.0M）兑付债券本息后全部核销；银行无资本充足/亏损口径，垫付成本不落在任何主体资产负债表上，也不进财政流水——破产成本目前是"隐性"的。',
-    '【正式已知限制，v0.7 不改】破产后 AI 发债未恢复：赤字转成的政府贷款每月分期到期，使 AI "禁借新还旧"判定恒真，债券被银行贷款替代；岚港 M36 负债率回升至 73.0%（二次逼近 100% 线），铁谷 20.0%。详见 B 稿 B11 / 块6 D11e-D11f。',
-    '债务/GDP、预警档位与趋势由契约层 assessCityFiscalRisk 计算。本探针 24 期发行全部成交、发生 2 次破产兑付；M36 总负债 岚港 256.2M（73.0%，watch）/ 铁谷 70.4M（20.0%）/ 青原 0。青原总负债 0 表示无未偿债务，不代表长期财政健康。',
-    '12 个月 GDP 判定窗口：块2 已实现真实替换——开局 12 条估计（estimated=true、tick −12…−1）随结算逐月换出，M12 起全部为真实值（M36 估计 0/12 月，判定分母岚港 350.5M、铁谷 344.0M）。因此本探针的负债率是"真实口径"，与旧基线（估计窗口 2.5B 级）不可直接比。',
-    '居民消费预算公式为现有代码的 propensity 口径；任务书新公式 80%/5% 尚未落地，仅作参考列展示。',
+    `财政 M36 未转负是"破产勾销 + 银行垫付 + 赤字转政府贷款"的结果，不是财政改善：${financingText}；剔除融资后的经营缺口仍很大（见 [块6] 累计拆解）。旧基线 −422.8M 是"没有融资渠道的欠账"。`,
+    `破产事件：${bankruptcyText}；银行垫付合计 ${fmt(advanceTotal)} 兑付债券本息后全部核销。银行无资本充足/亏损口径，垫付成本不落在任何主体资产负债表上、也不进财政流水——破产成本目前是"隐性"的。`,
+    `【正式已知限制，v0.7 不改】政府贷款月供出现后 AI 发债永久停摆：赤字转成的政府贷款每月等额本金到期，使 AI "禁借新还旧"判定（hasDebtServiceDueThisTick）恒真，债券被银行贷款替代；实测 ${issueStopText}——铁谷未破产也未再发债，说明停摆不限于破产后。M36 负债率 ${debtText}。详见 B 稿 B11 / 块6 D11e-D11f。`,
+    `债务/GDP、预警档位与趋势由契约层 assessCityFiscalRisk 计算。本探针债券发行 ${bondIssueRows.length} 期、破产 ${probe.bankruptcies.length} 次；M36 总负债 ${debtText}。总负债 0 表示无未偿债务，不代表长期财政健康。`,
+    `按 DECISIONS #44：政府贷款/银行垫付核销时账面 paidPrincipal=principal 仅是记账口径。本报告所有"已还/还本"列均为实际现金支付——债券还本 ${fmt(bondPrincipalPaid)} 是银行垫付实际付给持有人的现金；勾销合计 ${fmt(writeOffTotal)} 单列（${probe.writeOffsByCity.map((item) => `${item.cityName} ${fmt(item.total)}`).join(' / ') || '无'}），不计入已还本金或还款能力。期末债券欠付利息 ${fmt(bondArrearsTotal)}（#19：12/24 月票息不足不垫付、记欠付）。`,
+    `12 个月 GDP 判定窗口：块2 已真实替换——开局 12 条估计（estimated=true）随结算逐月换出；M36 ${windowText}。负债率为真实口径，与旧基线（估计窗口 2.5B 级）不可直接比。`,
+    '居民消费预算：新公式已生效（#39：预算=min(扣款后现金, 0.8×上月可支配收入+0.05×扣款后现金)）。报告 budgetNewFormula 列为对照估算（收入×0.8+现金×0.05、未扣还款/存款），budgetCurrentCode 为实际城市预算，差异反映还款与资产口径。',
+    '居民消费贷明细（#40 四字段：预算/新贷/贷款融资消费/资金缺口）块3 已写入契约，但本报告尚未逐城列示；本轮以城市贷款未偿/违约笔数（含企业贷）作粗代理，逐群体现金流与消费贷存量待下一步接入报告。',
     '经营现金流为月结字段近似（收入 − 投入 − 实发工资 − 税 − 利息，不含股息/融资），非严格现金流量表；利润与它差额对应应计项（欠薪、存货变动等）。',
     'GDP 为增加值口径（产出 − 中间投入），未含 12 月估计历史；首月结算前无历史。',
-    '不变量仅覆盖系统自检（库存/现金/股份等），不覆盖经济合理性。',
+    '不变量仅覆盖系统自检（库存/现金/股份等），不含货币守恒（由 316eff4 的兑付入账测试覆盖），也不覆盖经济合理性。',
     '企业名单与异常 Top 为期末快照，未覆盖中途已消失企业的全生命周期。',
   ];
 
@@ -1273,11 +1335,16 @@ function printReport(report: Report, elapsedMs: number): void {
   console.log('  AI 自动发债（分城）：');
   for (const row of probePrint.bondIssuanceByCity) {
     if (row.issues === 0) {
-      console.log(`    ${row.cityName}：0 期（财政未触发或未接线）`);
+      console.log(`    ${row.cityName}：0 期（财政未触发）`);
       continue;
     }
     console.log(
-      `    ${row.cityName}：${row.issues} 期（第 ${row.firstTick}–${row.lastTick} 月），计划 ${fmt(row.plannedUnits)} 份 / 成交 ${fmt(row.soldUnits)} 份 / 未售 ${fmt(row.unsoldUnits)} 份`,
+      `    ${row.cityName}：${row.issues} 期（第 ${row.firstTick}–${row.lastTick} 月），计划 ${fmt(row.plannedUnits)} 份 / 成交 ${fmt(row.soldUnits)} 份 / 未售 ${fmt(row.unsoldUnits)} 份` +
+        `；首笔政府贷款 ${
+          probePrint.financingByCity.find((city) => city.cityId === row.cityId)?.governmentLoanFirstTick === null
+            ? '—'
+            : `M${probePrint.financingByCity.find((city) => city.cityId === row.cityId)?.governmentLoanFirstTick}`
+        }`,
     );
   }
   console.log('  破产事件：');
@@ -1293,6 +1360,19 @@ function printReport(report: Report, elapsedMs: number): void {
     );
     console.log(
       `      重选：${item.electionTriggeredTick === null ? '未触发（看守期）' : `同 tick 触发（获胜 ${item.electionWinner ?? '—'}）`}；股份转移：${item.shareNote}`,
+    );
+  }
+  if (probePrint.writeOffsByCity.length > 0) {
+    const total = round2(probePrint.writeOffsByCity.reduce((sum, item) => sum + item.total, 0));
+    console.log(
+      `  破产勾销合计 ${fmt(total)}（单列，不计入"已还本金"，#44）：` +
+        probePrint.writeOffsByCity
+          .map(
+            (item) =>
+              `${item.cityName} 普通贷款 ${fmt(item.bankLoans)} / 垫付 ${fmt(item.advances)} / 欠息 ${fmt(item.interest)}`,
+          )
+          .join('；') +
+        '。债券"还本"为银行垫付实际支付给持有人的现金，对应垫付贷款已勾销，不代表政府偿还能力。',
     );
   }
   if (probePrint.bondHoldersByCity.length > 0) {
