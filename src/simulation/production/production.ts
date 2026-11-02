@@ -209,27 +209,51 @@ export function runInputPurchasing(
     // 3) 记录需求：计划需求 / 有效需求 / 资金不足未满足。
     //    有效需求只取决于购买力（采购预算 + 合法可用授信），不取决于可售数量；
     //    部分供应时不会把可售数量当成全部需求，资金不足也不会伪装成缺货。
-    // 购买力在多条投入品之间顺序共享：前一条投入品用掉的预算/授信不会重复计入后一条，
-    // 避免同一笔现金被多个“有效需求”重复计算。
+    //
+    //    购买力是一笔共享预算，分两步分配，避免同一笔现金被多个商品重复计入：
+    //    3a) 先为“本月确实可能成交的数量”预留现金（按真实报价），保证有货的投入品不被缺货挤占；
+    //    3b) 剩余购买力按“尚未被可售供应覆盖的需求金额”比例分配，全部缺货时也不会把
+    //        同一笔预算同时记成多个商品的有效需求。
     const legalCredit = round2(legalWorkingCapitalRoom(world, config, tick, company));
     let demandFunds = round2(budget + (financeable.length > 0 ? creditRoom : legalCredit));
-    const accounted = plans.map((plan) => {
-      const unitPrice = estimatedUnitPrice(
-        world,
-        city,
-        plan.goodId,
-        company.id,
-        plan.price,
-        config,
-      );
+    const unitPrices = plans.map((plan) =>
+      estimatedUnitPrice(world, city, plan.goodId, company.id, plan.price, config),
+    );
+    const fundedExecutable = plans.map(() => 0);
+    plans.forEach((plan, index) => {
+      if (plan.supplyQty <= 0.01) return;
+      const unitPrice = unitPrices[index] ?? 0;
       const affordable =
         unitPrice > 0 ? Math.floor((demandFunds / unitPrice) * 100) / 100 : 0;
-      const effectiveDemand = round2(Math.min(plan.shortage, affordable));
-      // 只为“本月确实可能成交的数量”预留购买力：没有供应时不占用后一条投入品的预算，
-      // 否则前一条缺货会把后面真正有货的投入品需求挤成 0。
-      const reservableQty =
-        plan.supplyQty > 0.01 ? Math.min(effectiveDemand, plan.supplyQty) : 0;
-      demandFunds = round2(Math.max(0, demandFunds - reservableQty * unitPrice));
+      const executable = Math.min(plan.shortage, plan.supplyQty);
+      const funded = round2(Math.min(executable, affordable));
+      fundedExecutable[index] = funded;
+      demandFunds = round2(Math.max(0, demandFunds - funded * unitPrice));
+    });
+
+    const uncoveredCost = round2(
+      plans.reduce(
+        (total, plan, index) =>
+          total +
+          Math.max(0, round2(plan.shortage - (fundedExecutable[index] ?? 0))) *
+            (unitPrices[index] ?? 0),
+        0,
+      ),
+    );
+    const claimedDemand = plans.map(() => 0);
+    if (demandFunds > 0.005 && uncoveredCost > 0.005) {
+      plans.forEach((plan, index) => {
+        const unitPrice = unitPrices[index] ?? 0;
+        const uncovered = Math.max(0, round2(plan.shortage - (fundedExecutable[index] ?? 0)));
+        if (uncovered <= 0.01 || unitPrice <= 0) return;
+        const share = (uncovered * unitPrice) / uncoveredCost;
+        const affordable = Math.floor(((demandFunds * share) / unitPrice) * 100) / 100;
+        claimedDemand[index] = round2(Math.min(uncovered, affordable));
+      });
+    }
+
+    const accounted = plans.map((plan, index) => {
+      const effectiveDemand = round2((fundedExecutable[index] ?? 0) + (claimedDemand[index] ?? 0));
       const ledger = cityLedgers[plan.goodId];
       if (ledger) {
         ledger.producerRequired = round2(ledger.producerRequired + plan.shortage);

@@ -259,4 +259,44 @@ describe('生产采购的需求记账（验收复验）', () => {
       2,
     );
   });
+
+  it('同一笔预算不重复计入多个商品：两种投入品都缺货时有效需求金额之和不超过预算', () => {
+    const world = newWorld();
+    isolateMarket(world);
+    const buyer = prepareBuyer(world, 0);
+    // 采购预算恰好 100：现金 = 工资预留 + 100，手动模式不会自动举债。
+    const wageReserve = round2(monthlyWageBill(buyer, DEMO_CONFIG) * 0.5);
+    buyer.cash = round2(wageReserve + 100);
+    operate(world, buyer.id, 'manual');
+    const budget = round2(buyer.cash - wageReserve);
+
+    const ledgers = createWorldLedgers(world);
+    runInputPurchasing(world, ledgers, DEMO_CONFIG, []);
+
+    const grain = ledgerOf(ledgers, 'lanport', 'grain');
+    const energy = ledgerOf(ledgers, 'lanport', 'energy');
+    const grainPrice = world.cities[0]!.market.grain?.price ?? 0;
+    const energyPrice = world.cities[0]!.market.energy?.price ?? 0;
+    const demandCost = round2(
+      grain.producerDemand * grainPrice +
+        energy.producerDemand * energyPrice,
+    );
+
+    // 两种投入品都有计划需求与缺货记录，但共享同一笔预算：金额之和不能超过预算。
+    expect(grain.producerDemand).toBeGreaterThan(0);
+    expect(energy.producerDemand).toBeGreaterThan(0);
+    expect(demandCost).toBeLessThanOrEqual(round2(budget + 0.01));
+    expect(demandCost).toBeGreaterThan(round2(budget * 0.5));
+    // 没有供应 → 不借款、不成交。
+    expect(buyer.debt).toBe(0);
+    expect(bankLoansOf(world)).toHaveLength(0);
+    expect(buyer.inventory.grain ?? 0).toBe(0);
+    expect(buyer.inventory.energy ?? 0).toBe(0);
+    // 每笔账本仍满足：计划需求 − 成交 = 缺货未满足 + 资金不足未满足。
+    for (const ledger of [grain, energy]) {
+      expect(
+        round2(ledger.producerRequired - ledger.sold - ledger.intercityImported),
+      ).toBeCloseTo(round2(ledger.unmetDemand + ledger.unmetFunding), 2);
+    }
+  });
 });
