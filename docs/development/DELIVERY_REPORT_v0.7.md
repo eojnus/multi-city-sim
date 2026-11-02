@@ -1,0 +1,191 @@
+# 交付报告 v0.7：政府债券 · 政府债务 · 居民消费金融 · 财政可见性
+
+日期：2026-11-02 ｜ 分支：`feature/economy-fiscal-balance`（交付分支）｜ 契约冻结提交：`18e2617c1e1b143146b08fa90de7e7d146a36dbf`（`feature/arch-foundation`）
+
+> 状态：**技术章节骨架（架构师起草）**。证据章节（第 9 节）由验收员补齐；实现落地数据（第 10 节集成记录）在四条线合并后填入。
+> 文中【暂定】的数值、公式与流程均为可替换原型，**不是用户已确认的最终规则**；用户已确认的规则单独标注。
+
+## 1. 本轮范围
+
+按任务书 §三/§四/§八与 `DECISIONS_v1.md`（v1.4）实现：
+
+- 城市政府债券：发行计划与实售分离、部分成交只按实售形成本金、票息与到期兑付、银行垫付。
+- 政府债务口径：银行贷款（含垫付转贷）+ 未偿债券本金 + 已计提未付利息；12 个月 GDP 判定窗口与债务率/风险分级。
+- 破产语义：未到期债券本金 + 截至当月已计提未付利息一次性兑付，随后银行贷款与垫付贷款一并勾销；无按比例清偿；当月触发重选、看守期仅维持性操作【团队暂定】。
+- 居民群体消费预算与消费贷款（预算口径、授信、贷款真实计入债务）。
+- 财政可见性：日志/通知与财政视图按当前市长身份重校验，旧档迁移归类。
+- 存档格式 v7（v1–v6 可迁移）与契约空实现签名（供验收先写测试）。
+
+不在本轮范围：银行倒闭（银行无限资金）、按比例清算表、AI 自动发债的完整策略（仅留键位）。
+
+## 2. 契约变更（`src/simulation/contracts/types.ts`，版本 7 / 游戏 0.7.0）
+
+### 2.1 枚举扩展（冻结）
+
+| 枚举/联合 | 新增 |
+|---|---|
+| `BankOwnerKind` | `'government'` |
+| `HolderType` | `'operator'`、`'trust'` |
+| `LoanPurpose` | `'government'`、`'bondAdvance'`、`'householdConsumption'` |
+| `LoanStatus` | `'writtenOff'` |
+| `FiscalEntry.kind` | `governmentLoanProceeds`、`governmentLoanRepayment`、`governmentLoanInterest`、`bondIssuanceProceeds`、`bondInterest`、`bondPrincipal`、`bankAdvance`、`debtWriteOff` |
+| `NotificationKind` | `'fiscal'`、`'bankruptcy'` |
+
+### 2.2 新结构（权威 vs 派生）
+
+- `world.bonds: BondState`：`BondIssuance`（计划/实售/未售份数、票息、到期、状态、批次统计 `couponsPaid`/`principalRepaid`/`bankAdvancedAmount`）、`BondHolding`（持有人×批次×购买时点）、`BondPayment`（coupon/principal/bankruptcyRedemption，含 `fundedByBankAdvance`/`advanceLoanId`）。
+- `city.government: CityGovernmentState`：`GovernmentLoanContract`（`purpose: government|bondAdvance`，政府银行贷款**唯一权威账本**）、`GovernmentPayable`（应付项，幂等锚 `(cityId,tick,kind,issuance/loan/holder)`）、`GovernmentAdvanceRecord`（**流水，不计入总负债**）、`GovernmentDebtSummary`（月度快照与趋势基准）、`GovernmentBankruptcyRecord`、`CityBankruptcyState`。
+- `world.householdFinance: HouseholdFinanceState`：`HouseholdLoanContract`、`ConsumerBudgetSnapshot`。
+- `city.gdpWindow: CityGdpPoint[]`（≤12 条，估计月 tick −12…−1、`estimated=true`）、`city.gdpEstimate: GdpEstimateInfo|null`；`city.gdpHistory[*].estimated?: boolean`。
+- 权限投影：`ViewerIdentity`、`FiscalVisibility`、`MayorFiscalView`（含 `MayorBondIssuanceView` 计划/实售/未售）、`PublicBondOfferView`（白名单，不含计划总额/总售额/总债务）、`OwnBondHoldingView`。
+- `LogEntry`/`PlayerNotification` 新增 `visibility?: FiscalVisibility`（因 `PlayerNotification.audience` 已被占用而改名，语义等价）。
+
+### 2.3 统计字段（v1.4 #37，可选字段，未填充时报告标“近似”）
+
+`CompanyMonthlyStats.operatingCashFlow`；`HouseholdMonthlyStats.budget/loanDrawn/loanFinancedConsumption/unmetFunding`（DECISIONS v1.5 #40 确认追加：只加不改、既有字段语义不变、存档 v7 校验接受缺省、块3 填充）；`CityMonthlyReport.consumerLoanDrawn/consumerLoanRepaid/consumerLoanOutstanding/bondInterestPaid/bondPrincipalPaid/bankAdvanceThisMonth/totalDebtAtMonthEnd/debtRatioAtMonthEnd/gdpJudgementValue`。
+
+## 3. 存档 v7 与迁移矩阵
+
+格式版本 `SAVE_FORMAT_VERSION = 7`；分派顺序写死（冻结后不改名，见 `docs/architecture/IMPLEMENTATION_v0.7.md` §6.1）：
+
+| 入口版本 | 迁移函数 |
+|---|---|
+| `=== 1` | `migrateWorldV1` |
+| `<= 2` | `migrateWorldV2ToV3` |
+| `<= 3` | `migrateWorldV3ToV4` |
+| `<= 4` | `migrateWorldV4ToV5` |
+| `<= 5` | `migrateWorldV5ToV6` |
+| `<= 6` | `migrateWorldV6ToV7` |
+
+`migrateWorldV6ToV7` 默认值（冻结）：
+
+| 旧状态 | 迁移结果 |
+|---|---|
+| `city.treasury < 0` | 等额转该城 `GovernmentLoanContract{purpose:'government'}`（利率/期限取 `config.government.loan`，不额外发钱），`treasury = 0` |
+| 缺 `world.bonds`/`world.householdFinance`/`city.government` | 建空状态；`city.bankruptcy` 镜像默认 `solvent` |
+| GDP 判定窗口缺失 | 优先真实 `gdpHistory`（最近 12 条，`estimated=false`），缺口用开局估计补（tick `-missing…-1`，`estimated=true`）；已有窗口不覆盖 |
+| 日志/通知缺 `visibility` | 含财政关键词且能定位城市 → `mayor`；其余 `public` |
+| 未知贷款 `status` | 兜底 `'active'`，不猜测结清 |
+| 重复执行 | 幂等：不重复转贷、不覆盖已有窗口/估计/可见性、不抛异常 |
+
+迁移后统一 `validateWorldStructure` → `syncCompanyTotalSharesSafe` → `checkInvariants`；`migratedFrom` 记录入口版本。新增校验器：`validateGdpWindow`、`validateGdpInfo`、`validateCityGovernments`、`validateBonds`、`validateHouseholdFinance`、`validateVisibility`。
+
+## 4. 月结顺序（冻结）
+
+`Simulation.tick()` 保持既有顺序，只在 `computeCityGdp` 之后插入：
+
+```
+… → settlePolicies → generateProposals → 融资/股票撮合 → publishNotices
+  → computeCityGdp                         // 记录本月真实 GDP
+  → pushRealGdpPoint(每城)                  // 真实 GDP 入 12 月判定窗口，替换最早估计月
+  → settleGovernmentDebt(world, config, logs)  // 政府债务月结唯一入口
+  → 历史点 / 不变量校验 / 日志
+```
+
+`settleGovernmentDebt` 内部固定阶段（业务实现不得调换）：
+
+| 阶段 | 内容 | 关键约束 |
+|---|---|---|
+| ① | 归档本月真实 GDP 与财政收支结果 | 估计值不得冒充真实历史 |
+| ② | 计提本月利息 + 生成应付项 | 债券票息固定 3 期 M12/M24/M36；**M36 同时生成第 3 期票息与到期本金两笔应付**；幂等锚防重复计提 |
+| ③ | 票息与到期兑付，先用财政余额 | M12/M24 票息不足**不垫付**，记欠付利息；M36 本金+欠息不足由银行无条件垫付 |
+| ④ | 银行垫付 | 不受授信限制；写 `GovernmentAdvanceRecord` + `bondAdvance` 贷款，逐笔可追溯 |
+| ⑤ | 债务汇总与破产判定 | 用阶段②已计提利息；`debtRatio ≥ bankruptAt(1.0)` 即破产 |
+| ⑥ | 破产清算与重选 | 一次性兑付本金+已计提未付利息；勾销贷款；当月触发重选 |
+
+同一 tick 幂等：`city.government.settledTicks` 内的 tick 不得重复兑付/清算。
+
+## 5. 口径与计算公式
+
+### 5.1 总负债（DECISIONS v1.1 #11 更正版，冻结）
+
+```
+totalDebt = bankLoanPrincipal          // 普通政府贷款未偿本金
+          + bankAdvancePrincipal       // bondAdvance 垫付转贷未偿本金（垫付只在这里计一次）
+          + bondPrincipalOutstanding   // 未偿债券本金
+          + loanAccruedInterest        // 政府贷款已计提未付利息+欠付利息
+          + bondAccruedInterest        // 债券已计提未付利息+欠付票息
+```
+
+`GovernmentAdvanceRecord` 只是流水，**不得**再加总一次。公共口径唯一实现：`src/simulation/government/metrics.ts` 的 `cityDebt` / `recent12MonthGdp` / `assessCityFiscalRisk`（报告脚本、UI、模拟共用）。
+
+### 5.2 债务率与风险分级【暂定】
+
+- 分母 `gdpJudgementValue = max(config.government.fiscalRisk.minAnnualGdp, Σ 最近 12 个月窗口值)`，首版最小年 GDP=1。
+- `debtRatio = totalDebt / gdpJudgementValue`；`<0.5` 正常、`[0.5,0.75)` 关注、`[0.75,1.0)` 高风险、`≥1.0` 破产。
+- 趋势与上一结算月 `lastDebt.debtRatio` 比较，差绝对值 `< trendEpsilon(0.005)` 为持平，无上月数据为 `unknown`。
+
+### 5.3 开局 GDP 估计【暂定】（DECISIONS #6 / v1.4 #32）
+
+`q̂ = min(capacity, laborCapacity) × utilizationAssumption(0.8)`（80% 只乘一次）；月度估计 = Σ 企业 `q̂ × (产出市场价 − Σ配方投入×市场价)`，夹 max(0)；同值填 12 个月，tick −12…−1，`estimated=true`；真实 GDP 逐月从最早估计月替换；`gdpHistory` 不混入估计值。
+
+### 5.4 债券与破产【部分团队暂定】
+
+- 面额 1000/份、整数份；发行当月一次撮合、不跨月续售；未售出关闭不形成债务；银行不得认购国债；禁止贷款购债。
+- 票息年化 4%，M12/M24/M36 各付一次；M36 同时还本。
+- 破产兑付 = 未到期债券本金 + 按实际持有月份计提的未付利息（不付未来利息）；随后政府银行贷款与垫付转贷一并勾销，**无按比例清偿、无优先级清偿表**；同月到期+破产各笔只付一次。
+- 破产重选：判定当月结算内立即触发；过渡期现任市长看守、仅维持性操作【团队暂定】。
+- 破产后政府持股：无 CEO 时在除破产政府外现有股东之间按股东主体数量平均分配；无其他股东转 `trust` 无投票权托管，不销毁、不转给公司、不增发【团队暂定】。
+
+### 5.5 居民消费预算与消费贷【暂定】
+
+- 参考消费额 = 上月实际可支配收入 × 0.8 + 手头现金 × 0.05；现金预算 = `min(现金, max(0, 参考))`；存款首版不自动取出。
+- 消费贷额度 = `max(0, 群体财产基准) × 0.5`，月利率 0.6%、24 月，宽限复用 `banking.graceMonths`；新授信冻结条件：存在未结清违约合同或连续欠付 ≥2 月。
+- 贷款是真实债务，资金由银行付给商品卖方，不进入居民收入口径；资金不足未满足计入 `unmetFunding`。
+
+## 6. config 新增键（键名冻结；默认值见 `src/data/config.ts`，数值岗可整段替换数值）
+
+- `households.consumerBudget`：`lastIncomeShare 0.8`、`cashShare 0.05`、`depositsIncluded false`。
+- `households.householdCredit`：`rateMonthly 0.006`、`termMonths 24`、`creditLimitRate 0.5`、`minLoanAmount 100`、`denyWhenDefaulted true`、`denyWhenArrearsMonthsAtLeast 2`、`maxLoansPerGroupPerMonth 1`、`allowUnsecuredNoAsset false`（额度口径占位）。
+- `households.budgetSnapshotMonths 24`。
+- `government.bondMarket`：面额 1000、年化 0.04、付息周期 12、期限 36、单次计划上限 10000 份、发行间隔 1 月、认购顺序 `player → investorGroup → company`、银行不得认购、发行月单次撮合。
+- `government.companyPurchaseReserve`：`wageMonths 1`、`interestMonths 1`（企业购债流动性保留，#23）。
+- `government.loan`（0.005/24/10000）、`government.advance`（0.005/24/createLoanContract）。
+- `government.fiscalRisk`：0.5 / 0.75 / 1.0 / minAnnualGdp 1 / trendEpsilon 0.005。
+- `government.gdpEstimate`：0.8、12 月、method 文本。
+- `government.bankruptcy`：`triggerElectionSameTick true`、`shareDistribution 'byHolderCount'`、`custodyShareKind 'nonVoting'`。
+- `government.aiGovernment`：占位（enabled false、阈值 1.0、份数 1、债务率上限 0.5，语义待确认）。
+- `government.payableRetentionMonths 24`、`maxBankruptcyRecords 8`。
+- `banking.products` 增加 `government`/`bondAdvance`/`householdConsumption` 三项（仅为枚举闭合与台账展示）。
+
+## 7. 最小编译适配清单（枚举扩展的连带修改，**不改原逻辑**，交付单列）
+
+| 文件 | 改动 |
+|---|---|
+| `src/simulation/banking/banking.ts` | `LOAN_PURPOSE_LABELS` 增加 3 个新用途标签；`ownerExists` 增加 `'government'` 分支（城市存在即有效） |
+| `src/simulation/banking/credit.ts` | `ownerLabel`/`ownerCash`/`creditOwnerCash`/`debitOwnerCash` 增加 `'government'` 分支（镜像财政余额，不复制存款）；`ownerCreditBase` 返回 `{baseValue:0, method:'netWorth'}`（银行不给政府授信） |
+| `src/ui/panels.ts` | `LOAN_PURPOSE_LABELS` / `LOAN_STATUS_LABELS` 各补充新枚举文案（仅展示） |
+| `src/simulation/core/save.ts` | `HolderRef` 改为复用 `types.ts` 的 `HolderRef`（避免联合扩展后窄化失败） |
+
+上述改动不改变既有行为；若后续块1/3 需要扩大 `BankOwnerKind` 的实际业务语义，由架构师追加契约，不在本轮自动扩展。
+
+## 8. 已知限制与未完成项
+
+- 块1（债券/债务/月结业务）、块3（居民消费预算与消费贷）、块4（界面与权限投影）的业务体在块0 为空实现+TODO，由对应岗位按 `IMPLEMENTATION_v0.7.md` §13 完成。
+- `aiGovernment` 自动发债策略未实现，仅键位占位。
+- 统计字段为可选：未填充时报告使用近似式并标注。
+- 政府债务在银行台账中仅镜像展示，权威在 `city.government`；若某块把政府贷款同时写入 `banking.loans` 并可被 `cityDebt` 统计，会构成双计（不变量已提供 `lastDebt` 对账检查）。
+- 桌面走查、Xvfb 截图与泄漏回归由验收员按验收矩阵执行，本文不预填结果。
+- `tests/economy-stability.test.ts` 的 120 月用例超时由 30s 放宽到 60s（commit `74629d1`）：2 核本机多 worktree 并行时该用例实测 36–38s，属环境争用，非功能回退。
+
+## 9. 验收证据（由验收员补齐）
+
+- [ ] 三件套实际输出（typecheck / vitest 文件与用例数 / build）
+- [ ] 存档矩阵：v1–v6 旧档 → v7 往返，不覆盖用户存档
+- [ ] 桌面走查截图：市长/非市长、跨城、发债、到期、垫付、破产、换任、空态
+- [ ] 泄漏回归：`panels.ts:346`、`RegionalScene.ts:266`、`panels.ts:761/945–1003` 修复前后证据
+- [ ] 验收用例清单与红/绿结果（90–110 条目标）
+- [ ] 每城开局 GDP 估计数值表与 36 月观察指标
+
+## 10. 集成记录（秘书处/架构师填）
+
+| 步骤 | 分支 | merge SHA | typecheck | vitest | build |
+|---|---|---|---|---|---|
+| 0 | `feature/arch-foundation` | `1b1459c317100fac17d195ca5c875f5e83ac7744`（已合入交付分支） | ✓ | 40 文件 / 306 用例 ✓ | ✓ |
+| 1 | `feature/sim-fiscal` | 待填 | — | — | — |
+| 2 | `feature/data-tuning` | 待填 | — | — | — |
+| 3 | `feature/ui-fiscal` | 待填 | — | — | — |
+| 4 | `qa/acceptance` | 待填 | — | — | — |
+
+- 交付分支：`feature/economy-fiscal-balance`；禁止推送 main、禁止 force push。
+- 推送状态：本机无推送凭据（`git push --dry-run` 返回 `could not read Username`），交付以本地完整 SHA + bundle/patch 为准。
