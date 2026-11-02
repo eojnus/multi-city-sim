@@ -42,7 +42,7 @@
 
 ### 2.3 统计字段（v1.4 #37，可选字段，未填充时报告标“近似”）
 
-`CompanyMonthlyStats.operatingCashFlow`；`HouseholdMonthlyStats.budget/loanDrawn/loanFinancedConsumption/unmetFunding`；`CityMonthlyReport.consumerLoanDrawn/consumerLoanRepaid/consumerLoanOutstanding/bondInterestPaid/bondPrincipalPaid/bankAdvanceThisMonth/totalDebtAtMonthEnd/debtRatioAtMonthEnd/gdpJudgementValue`。
+`CompanyMonthlyStats.operatingCashFlow`；`HouseholdMonthlyStats.budget/loanDrawn/loanFinancedConsumption/unmetFunding`（DECISIONS v1.5 #40 确认追加：只加不改、既有字段语义不变、存档 v7 校验接受缺省、块3 填充）；`CityMonthlyReport.consumerLoanDrawn/consumerLoanRepaid/consumerLoanOutstanding/bondInterestPaid/bondPrincipalPaid/bankAdvanceThisMonth/totalDebtAtMonthEnd/debtRatioAtMonthEnd/gdpJudgementValue`。
 
 ## 3. 存档 v7 与迁移矩阵
 
@@ -166,6 +166,7 @@ totalDebt = bankLoanPrincipal          // 普通政府贷款未偿本金
 - 统计字段为可选：未填充时报告使用近似式并标注。
 - 政府债务在银行台账中仅镜像展示，权威在 `city.government`；若某块把政府贷款同时写入 `banking.loans` 并可被 `cityDebt` 统计，会构成双计（不变量已提供 `lastDebt` 对账检查）。
 - 桌面走查、Xvfb 截图与泄漏回归由验收员按验收矩阵执行，本文不预填结果。
+- `tests/economy-stability.test.ts` 的 120 月用例超时由 30s 放宽到 60s（commit `74629d1`）：2 核本机多 worktree 并行时该用例实测 36–38s，属环境争用，非功能回退。
 
 ## 9. 验收证据（由验收员补齐）
 

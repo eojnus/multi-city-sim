@@ -408,3 +408,4 @@ typecheck + vitest 全量 + build 三绿才进下一步。
 5. v1.3（#11 更正）：总负债只计一次垫付，`GovernmentAdvanceRecord` 不再作为独立负债项；已按 `bankAdvancePrincipal` 口径实现 `metrics.cityDebt`。
 6. v1.4（#32/#33/#35/#36/#37）：GDP 估计 `q̂=min(capacity,laborCapacity)×0.8`、估计 tick −12…−1；债券票息 3 期（M36 票息+本金同月两笔）；消费贷授信冻结条件与 grace 复用 `banking.graceMonths`；三个公共口径函数落在 `metrics.ts` 并由 `debt.ts` 复用；统计字段以可选字段定稿（未填充时报告标“近似”）。
 7. 数值岗给的 `householdCredit{0.006,24,0.5,false}` 第 4 个值按 `allowUnsecuredNoAsset=false` 落位；新增的 `denyWhenDefaulted/denyWhenArrearsMonthsAtLeast` 为 #35 冻结条件，非数值岗参数。
+8. v1.5（#40）：`HouseholdMonthlyStats` 追加 `budget`、`loanDrawn`、`loanFinancedConsumption`、`unmetFunding` 四个**可选**字段（只加不改，既有字段语义不变，存档 v7 校验接受缺省）；块3 填充，报告在未填充时标“近似”。
