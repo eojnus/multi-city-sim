@@ -246,7 +246,7 @@ export function planInvestorOrders(world: WorldState, config: DemoConfig, tick: 
  */
 export function planCompanyOrders(world: WorldState, config: DemoConfig, tick: number): void {
   const rich = [...world.companies]
-    .filter((company) => company.cash > monthlyWageBill(company) * 3)
+    .filter((company) => company.cash > monthlyWageBill(company, config) * 3)
     .sort((a, b) => b.cash - a.cash || a.id.localeCompare(b.id))
     .slice(0, 3);
   for (const company of rich) {
@@ -290,7 +290,7 @@ export function maybeCreateCompanyFinancing(
   let created = 0;
   for (const company of ordered) {
     if (created >= 2) break;
-    const wage = monthlyWageBill(company);
+    const wage = monthlyWageBill(company, config);
     // 现金低于两个月工资时视为需要融资（演示阈值）。
     if (company.cash >= wage * 2) continue;
     const open = world.securities.offers.some(
@@ -328,7 +328,7 @@ export function maybeCreateCompanyFinancing(
         (candidate) =>
           candidate.id !== company.id &&
           candidate.cityId !== company.cityId &&
-          candidate.cash > monthlyWageBill(candidate) * 3,
+          candidate.cash > monthlyWageBill(candidate, config) * 3,
       )
       .sort((a, b) => b.cash - a.cash || a.id.localeCompare(b.id))[0];
     if (external) {

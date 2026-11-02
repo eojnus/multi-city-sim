@@ -202,17 +202,24 @@ describe('初始经营者与人才市场', () => {
     expect(world.management.operators.length).toBe(countBefore);
   });
 
-  it('人才池超上限时按确定性规则淘汰，并在世界日志留下历史记录', () => {
+  it('人才池超上限时保留全部档案（不删人）并留下提示日志', () => {
     const world = createInitialWorld();
     const cityId = 'lanport';
     for (let index = 0; index < 20; index++) generateOperator(world, cityId, 0);
     const before = availableOperators(world, cityId).length;
     expect(before).toBeGreaterThan(DEMO_CONFIG.management.maxPoolPerCity);
+    const idsBefore = world.management.operators.map((operator) => operator.id).sort();
     pruneOperatorPool(world, DEMO_CONFIG, 3);
-    expect(availableOperators(world, cityId).length).toBe(
-      DEMO_CONFIG.management.maxPoolPerCity,
-    );
+    // 验收问题 6：落选者必须留在人才市场，档案/履历不得被删除。
+    expect(world.management.operators.map((operator) => operator.id).sort()).toEqual(idsBefore);
+    expect(availableOperators(world, cityId).length).toBe(before);
     expect(world.log.some((entry) => entry.message.includes('人才市场调整'))).toBe(true);
+    // 同一城市同一条提示不重复堆叠。
+    pruneOperatorPool(world, DEMO_CONFIG, 4);
+    const adjustmentLogs = world.log.filter((entry) =>
+      entry.message.includes('人才市场调整'),
+    );
+    expect(adjustmentLogs).toHaveLength(1);
   });
 });
 

@@ -14,7 +14,7 @@ import { monthlyWageBill } from './company';
 import { round2 } from '../core/math';
 
 export function companyCreditLimit(company: Company, config: DemoConfig): number {
-  const base = company.baseWageBill > 0 ? company.baseWageBill : monthlyWageBill(company);
+  const base = company.baseWageBill > 0 ? company.baseWageBill : monthlyWageBill(company, config);
   return round2(base * config.company.creditLimitWageMonths);
 }
 
@@ -59,7 +59,7 @@ export function payInterest(company: Company, config: DemoConfig): number {
 
 export function repayDebt(company: Company, config: DemoConfig): number {
   if (company.debt <= 0) return 0;
-  const reserve = monthlyWageBill(company) * 0.5;
+  const reserve = monthlyWageBill(company, config) * 0.5;
   const spare = Math.max(0, company.cash - reserve);
   const repayment = round2(
     Math.min(company.debt, spare * config.company.debtRepaymentRate),

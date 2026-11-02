@@ -20,7 +20,7 @@ import type {
 } from '../contracts/types';
 import type { DemoConfig } from '../../data/config';
 import { clamp, round2 } from '../core/math';
-import { companySharePrice } from '../companies/company';
+import { companySharePrice, occupationWageRate } from '../companies/company';
 import { cityMarketPrices } from '../markets/markets';
 import { depositAccountFor, ensureDepositAccount } from '../banking/banking';
 
@@ -70,7 +70,9 @@ export function occupationMonthlyIncome(
       let total = 0;
       for (const company of world.companies) {
         if (company.cityId !== city.id) continue;
-        total += (company.roles[occupation] ?? 0) * company.wageRate;
+        // 问题 4：岗位月工资率 = 企业基准 wageRate × 职业工资倍数，
+        // 不再按全体统一 wageRate 计算，因此不同职业群体的人均收入不同。
+        total += (company.roles[occupation] ?? 0) * occupationWageRate(company, occupation, config);
       }
       return round2(total);
     }
@@ -187,10 +189,34 @@ function depositBalanceOf(world: WorldState, groupId: string): number {
   return depositAccountFor(world, { kind: 'household', id: groupId })?.balance ?? 0;
 }
 
-function addDepositBalance(world: WorldState, groupId: string, delta: number): void {
+/**
+ * 调整群体存款余额；账户不存在时返回 false，绝不静默吞掉资金。
+ * 调用方必须显式处理 false（先 ensureGroupDepositAccount 或放弃本次转移）。
+ */
+function addDepositBalance(world: WorldState, groupId: string, delta: number): boolean {
   const account = depositAccountFor(world, { kind: 'household', id: groupId });
-  if (!account) return;
+  if (!account) return false;
   account.balance = round2(Math.max(0, account.balance + delta));
+  return true;
+}
+
+/**
+ * 确保群体存款账户存在（旧存档/迁移前可能尚未开户）。
+ * 返回 false 表示无法开户，调用方应放弃这笔存款转移而不是让它消失。
+ */
+function ensureGroupDepositAccount(
+  world: WorldState,
+  groupId: string,
+  config: DemoConfig,
+  tick: number,
+): boolean {
+  if (depositAccountFor(world, { kind: 'household', id: groupId })) return true;
+  try {
+    ensureDepositAccount(world, { kind: 'household', id: groupId }, config, tick);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** 群体可支配现金（手头现金 + 银行存款）。 */
@@ -249,25 +275,58 @@ export function syncHouseholdPeople(world: WorldState, config: DemoConfig): void
     if (totalIncrease > 0) {
       // 只有存在接收方时才从减少的群体按人均转出资产；否则（例如净迁出后只剩减少）
       // 资产保留在剩余人口手中，避免同步人数时销毁资金。
-      let poolCash = 0;
-      let poolDeposit = 0;
+      const cashTransfers: { group: HouseholdGroup; cashOut: number; depositOut: number }[] = [];
       for (const entry of decreases) {
         const group = entry.group;
         const leaving = Math.min(-entry.delta, group.people);
         const perCapCash = group.people > 0 ? group.cash / group.people : 0;
         const perCapDeposit =
           group.people > 0 ? depositBalanceOf(world, group.id) / group.people : 0;
-        const cashOut = round2(Math.min(group.cash, leaving * perCapCash));
-        const depositOut = round2(leaving * perCapDeposit);
-        group.cash = round2(group.cash - cashOut);
-        addDepositBalance(world, group.id, -depositOut);
-        poolCash = round2(poolCash + cashOut);
-        poolDeposit = round2(poolDeposit + depositOut);
+        cashTransfers.push({
+          group,
+          cashOut: round2(Math.min(group.cash, leaving * perCapCash)),
+          // 用余额夹取，避免 round2 后略大于余额导致“多转出”。
+          depositOut: round2(
+            Math.min(depositBalanceOf(world, group.id), leaving * perCapDeposit),
+          ),
+        });
+      }
+      const poolCash = round2(
+        cashTransfers.reduce((total, entry) => total + entry.cashOut, 0),
+      );
+      const poolDeposit = round2(
+        cashTransfers.reduce((total, entry) => total + entry.depositOut, 0),
+      );
+
+      // 存款转移要求双方都有账户（旧存档可能尚未开户）。任一参与方开户失败时，
+      // 本应转移的存款留在原群体，绝不因 addDepositBalance 找不到账户而消失。
+      let depositsMovable = poolDeposit > 0;
+      if (depositsMovable) {
+        const participants = [
+          ...cashTransfers
+            .filter((entry) => entry.depositOut > 0)
+            .map((entry) => entry.group.id),
+          ...increases.map((entry) => entry.group.id),
+        ];
+        for (const groupId of participants) {
+          if (ensureGroupDepositAccount(world, groupId, config, world.time.tick)) continue;
+          depositsMovable = false;
+          break;
+        }
+      }
+
+      for (const entry of cashTransfers) {
+        entry.group.cash = round2(entry.group.cash - entry.cashOut);
+        if (depositsMovable && entry.depositOut > 0) {
+          addDepositBalance(world, entry.group.id, -entry.depositOut);
+        }
       }
       for (const entry of increases) {
         const share = entry.delta / totalIncrease;
         entry.group.cash = round2(entry.group.cash + poolCash * share);
-        addDepositBalance(world, entry.group.id, poolDeposit * share);
+        if (depositsMovable && poolDeposit > 0) {
+          addDepositBalance(world, entry.group.id, poolDeposit * share);
+        }
       }
     }
 
@@ -278,29 +337,98 @@ export function syncHouseholdPeople(world: WorldState, config: DemoConfig): void
   }
 }
 
+export interface MigrationAssetTransfer {
+  /** 随人口迁移的现金（源城扣减 = 目标城增加）。 */
+  cashMoved: number;
+  /** 随人口迁移的存款（源城扣减 = 目标城增加）。 */
+  depositMoved: number;
+  /** 实际发生资产转移的人数（按源群体人数夹取后的合计）。 */
+  transferred: number;
+}
+
 /**
  * 跨城迁移：人口带走其人均现金与存款。由 population.applyMigration 在原子提交后调用。
+ *
+ * v0.4 验收问题 7 修复：
+ * - 迁移人数按 laborForceMoved 拆分：劳动力部分对应 unemployed 群体，其余对应
+ *   nonLabor 群体，分别按各自群体的人均资产转移（此前只处理 unemployed 群体，
+ *   非劳动力那部分人的资产被留在原地）；
+ * - 目标群体账户可能不存在（旧存档），先用 banking.ensureDepositAccount 确保开户；
+ *   开户失败则整体放弃并返回零值，源城市资产分文不动，绝不出现“扣了源、目标没收到”；
+ * - 现金与存款使用同一金额原子提交，返回实际转移额便于测试/审计。
  */
 export function rebalanceHouseholdWealthForMigration(
   world: WorldState,
   fromCityId: string,
   toCityId: string,
   people: number,
-): void {
-  if (people <= 0) return;
-  const source = householdGroupOf(world, fromCityId, 'unemployed');
-  const destination = householdGroupOf(world, toCityId, 'unemployed');
-  if (!source || !destination || source.people <= 0) return;
-  const moving = Math.min(people, source.people);
-  const perCapCash = source.cash / source.people;
-  const perCapDeposit = depositBalanceOf(world, source.id) / source.people;
-  const cashMoved = round2(Math.min(source.cash, moving * perCapCash));
-  const depositMoved = round2(moving * perCapDeposit);
-  source.cash = round2(source.cash - cashMoved);
-  addDepositBalance(world, source.id, -depositMoved);
-  destination.cash = round2(destination.cash + cashMoved);
-  const account = depositAccountFor(world, { kind: 'household', id: destination.id });
-  if (account) account.balance = round2(account.balance + depositMoved);
+  laborForceMoved: number = people,
+  config?: DemoConfig,
+  tick: number = world.time.tick,
+): MigrationAssetTransfer {
+  const result: MigrationAssetTransfer = { cashMoved: 0, depositMoved: 0, transferred: 0 };
+  if (people <= 0) return result;
+
+  const laborMoving = Math.max(0, Math.min(people, Math.round(laborForceMoved)));
+  const nonLaborMoving = Math.max(0, people - laborMoving);
+  const legs: { occupation: OccupationClass; moving: number }[] = [
+    { occupation: 'unemployed', moving: laborMoving },
+    { occupation: 'nonLabor', moving: nonLaborMoving },
+  ];
+
+  const moves: {
+    source: HouseholdGroup;
+    destination: HouseholdGroup;
+    moving: number;
+    cash: number;
+    deposit: number;
+  }[] = [];
+  for (const leg of legs) {
+    if (leg.moving <= 0) continue;
+    const source = householdGroupOf(world, fromCityId, leg.occupation);
+    const destination = householdGroupOf(world, toCityId, leg.occupation);
+    if (!source || !destination || source.people <= 0) continue;
+    const moving = Math.min(leg.moving, source.people);
+    if (moving <= 0) continue;
+    const depositBalance = depositBalanceOf(world, source.id);
+    const perCapCash = source.cash / source.people;
+    const perCapDeposit = depositBalance / source.people;
+    moves.push({
+      source,
+      destination,
+      moving,
+      cash: round2(Math.min(source.cash, moving * perCapCash)),
+      deposit: round2(Math.min(depositBalance, moving * perCapDeposit)),
+    });
+  }
+  if (moves.length === 0) return result;
+
+  // 目标账户必须全部可用：先开户；任何一步失败都整体放弃（源不扣款）。
+  for (const move of moves) {
+    if (move.deposit <= 0) continue;
+    if (depositAccountFor(world, { kind: 'household', id: move.destination.id })) continue;
+    if (!config) return result;
+    if (ensureGroupDepositAccount(world, move.destination.id, config, tick)) continue;
+    return result;
+  }
+
+  // 原子提交：同一金额从源群体扣除并加到目标群体，现金与存款都不复制、不丢失。
+  for (const move of moves) {
+    move.source.cash = round2(move.source.cash - move.cash);
+    move.destination.cash = round2(move.destination.cash + move.cash);
+    let depositMoved = 0;
+    if (move.deposit > 0) {
+      // 源账户一定存在（余额 > 0），但仍以返回值为准：借记失败则本笔存款原地不动。
+      if (addDepositBalance(world, move.source.id, -move.deposit)) {
+        addDepositBalance(world, move.destination.id, move.deposit);
+        depositMoved = move.deposit;
+      }
+    }
+    result.cashMoved = round2(result.cashMoved + move.cash);
+    result.depositMoved = round2(result.depositMoved + depositMoved);
+    result.transferred += move.moving;
+  }
+  return result;
 }
 
 function tierOf(perCapitaWealth: number, config: DemoConfig): WealthTier {

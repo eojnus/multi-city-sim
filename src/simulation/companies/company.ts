@@ -1,8 +1,12 @@
-import type { GoodId, RoleAllocation, Company } from '../contracts/types';
+import type { GoodId, RoleAllocation, Company, RoleKey } from '../contracts/types';
+import type { DemoConfig } from '../../data/config';
 import { allocateProportionally, round2 } from '../core/math';
 import { GOODS } from '../../data/demo-data';
 
 export const GOOD_IDS: GoodId[] = GOODS.map((good) => good.id);
+
+/** 计薪的四个岗位（不含公共部门；顺序固定便于按权重拆分）。 */
+export const WAGE_ROLES: RoleKey[] = ['management', 'production', 'sales', 'research'];
 
 export function createEmptyInventory(): Record<GoodId, number> {
   return {
@@ -47,7 +51,44 @@ export function roleTotal(roles: RoleAllocation): number {
   return roles.management + roles.production + roles.sales + roles.research;
 }
 
-export function monthlyWageBill(company: Company): number {
+/** 某岗位的月工资率：企业基准工资率 × 职业工资倍数（未配置的岗位退回基准）。 */
+export function occupationWageRate(
+  company: Company,
+  occupation: RoleKey,
+  config: DemoConfig,
+): number {
+  const multiplier = config.labor.occupationWageMultipliers[occupation] ?? 1;
+  return round2(company.wageRate * multiplier);
+}
+
+/**
+ * 企业月度工资总额：Σ(岗位人数 × 岗位工资率)。
+ *
+ * 口径：roles 之和可能小于 employees（旧存档/未分配角色），差额按生产岗位计，
+ * 保证工资覆盖 100% 员工；由于生产倍数为 0.95，这部分兜底的总额比旧口径
+ * “employees × wageRate”低 5%（其余岗位按各自倍数），与新口径可比。
+ */
+export function companyWageBill(company: Company, config: DemoConfig): number {
+  let total = 0;
+  let assigned = 0;
+  for (const role of WAGE_ROLES) {
+    const count = Math.max(0, company.roles[role] ?? 0);
+    assigned += count;
+    total += count * occupationWageRate(company, role, config);
+  }
+  const unassigned = Math.max(0, company.employees - assigned);
+  if (unassigned > 0) {
+    total += unassigned * occupationWageRate(company, 'production', config);
+  }
+  return round2(total);
+}
+
+/**
+ * 月度工资总额。传入 config 时按职业工资率计算（问题 4 修复后的新口径）；
+ * 不传时退回旧口径“员工数 × 基准工资率”，保证旧测试与未迁移调用仍可用。
+ */
+export function monthlyWageBill(company: Company, config?: DemoConfig): number {
+  if (config) return companyWageBill(company, config);
   return round2(company.employees * company.wageRate);
 }
 

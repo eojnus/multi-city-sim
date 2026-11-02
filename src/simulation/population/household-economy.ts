@@ -16,8 +16,10 @@ import type {
   WorldState,
 } from '../contracts/types';
 import type { DemoConfig } from '../../data/config';
+import { DEMO_CONFIG } from '../../data/config';
 import { round2 } from '../core/math';
 import type { FinanceResult } from '../finance/finance';
+import { occupationWageRate } from '../companies/company';
 import { householdGroupsOfCity } from './household-groups';
 
 const WAGE_OCCUPATIONS: (keyof RoleAllocation)[] = ['management', 'production', 'sales', 'research'];
@@ -71,6 +73,16 @@ export interface CityHouseholdIncomeSplit {
   benefitsPaid: number;
 }
 
+/** 交通退款总额：既支持旧的全城汇总数字，也支持按群体归属的明细。 */
+export function householdRefundTotal(
+  householdRefund: number | Readonly<Record<string, number>>,
+): number {
+  if (typeof householdRefund === 'number') return round2(Math.max(0, householdRefund));
+  return round2(
+    Object.values(householdRefund).reduce((total, value) => total + Math.max(0, value), 0),
+  );
+}
+
 /**
  * 计算某城居民收入按职业群体的拆分。只读，不修改世界。
  * 拆分结果合计严格等于城市既有口径的收入与税收。
@@ -80,7 +92,8 @@ export function splitCityHouseholdIncome(
   city: City,
   finance: FinanceResult,
   benefitsPaid: number,
-  householdRefund: number,
+  householdRefund: number | Readonly<Record<string, number>>,
+  config: DemoConfig = DEMO_CONFIG,
 ): CityHouseholdIncomeSplit {
   const groups = householdGroupsOfCity(world, city.id);
   const wages = new Map<string, number>();
@@ -96,19 +109,34 @@ export function splitCityHouseholdIncome(
     taxes.set(group.id, 0);
   }
 
-  // 1. 私营工资：按企业本月实际支付的工资与其岗位角色人数拆分。
+  // 1. 私营工资：按企业本月实际支付的工资与岗位工资权重拆分。
+  //    权重 = 岗位人数 × 该岗位月工资率（企业基准工资率 × 职业工资倍数），
+  //    因此同一企业内管理/研发群体的人均工资高于生产/销售群体，不再是等额分摊。
+  //    企业实发额可能低于应付（欠薪），故按权重比例缩放；allocateMoney 保证
+  //    每个企业拆分到各群体的工资合计严格等于其实际支付额（0.01 精度）。
   for (const company of world.companies) {
     if (company.cityId !== city.id) continue;
     const paid = company.lastMonth.wagesPaid;
     if (paid <= 0 || company.employees <= 0) continue;
+    const entries: { group: HouseholdGroup; weight: number }[] = [];
     for (const occupation of WAGE_OCCUPATIONS) {
       const count = company.roles[occupation] ?? 0;
       if (count <= 0) continue;
       const group = groups.find((entry) => entry.occupation === occupation);
       if (!group) continue;
-      const share = round2((paid * count) / company.employees);
-      wages.set(group.id, round2((wages.get(group.id) ?? 0) + share));
+      entries.push({
+        group,
+        weight: count * occupationWageRate(company, occupation, config),
+      });
     }
+    if (entries.length === 0) continue;
+    const shares = allocateMoney(
+      paid,
+      entries.map((entry) => entry.weight),
+    );
+    entries.forEach((entry, index) => {
+      wages.set(entry.group.id, round2((wages.get(entry.group.id) ?? 0) + (shares[index] ?? 0)));
+    });
   }
 
   // 2. 公共部门工资。
@@ -143,13 +171,30 @@ export function splitCityHouseholdIncome(
     groups.forEach((group, index) => dividends.set(group.id, shares[index] ?? 0));
   }
 
-  // 5. 交通退款：按人口比例归属（居民跨城购买产生的退款）。
-  if (householdRefund > 0) {
-    const shares = allocateMoney(
-      householdRefund,
-      groups.map((group) => group.people),
-    );
-    groups.forEach((group, index) => refunds.set(group.id, shares[index] ?? 0));
+  // 5. 交通退款：优先按“实际购买群体”归属（跨城购买产生的退款），
+  //    旧口径（历史存档/无群体归属的汇总调用）按人口比例分摊。
+  const refundTotal = householdRefundTotal(householdRefund);
+  if (refundTotal > 0) {
+    if (typeof householdRefund === 'number') {
+      const shares = allocateMoney(refundTotal, groups.map((group) => group.people));
+      groups.forEach((group, index) => refunds.set(group.id, shares[index] ?? 0));
+    } else {
+      let assigned = 0;
+      for (const group of groups) {
+        const amount = round2(Math.max(0, householdRefund[group.id] ?? 0));
+        refunds.set(group.id, amount);
+        assigned += amount;
+      }
+      // 明细合计与总额不一致时（旧数据兜底），差额按人口补足，保证账目闭合。
+      const diff = round2(refundTotal - assigned);
+      if (Math.abs(diff) >= 0.01) {
+        const shares = allocateMoney(Math.abs(diff), groups.map((group) => group.people));
+        groups.forEach((group, index) => {
+          const delta = diff > 0 ? (shares[index] ?? 0) : -(shares[index] ?? 0);
+          refunds.set(group.id, round2((refunds.get(group.id) ?? 0) + delta));
+        });
+      }
+    }
   }
 
   // 6. 个税：沿用城市既有口径（工资 × 个税率），再按各群体工资比例分摊。
@@ -196,10 +241,19 @@ export function applyHouseholdIncome(
   city: City,
   finance: FinanceResult,
   benefitsPaid: number,
-  householdRefund: number,
+  householdRefund: number | Readonly<Record<string, number>>,
   log: LogEntry[],
+  config?: DemoConfig,
 ): number {
-  const split = splitCityHouseholdIncome(world, city, finance, benefitsPaid, householdRefund);
+  const split = splitCityHouseholdIncome(
+    world,
+    city,
+    finance,
+    benefitsPaid,
+    householdRefund,
+    config,
+  );
+  const refundTotal = householdRefundTotal(householdRefund);
   const groups = householdGroupsOfCity(world, city.id);
   for (const group of groups) {
     const wage = split.wages.get(group.id) ?? 0;
@@ -209,8 +263,9 @@ export function applyHouseholdIncome(
     const tax = split.taxes.get(group.id) ?? 0;
     const income = round2(wage + benefit + dividend - tax);
     group.cash = round2(group.cash + income + refund);
-    // 注意：消费在本月更早的步骤已经记入 lastMonth.consumption 与 netCashChange，
-    // 这里只能累加收入，不能整体重写统计（否则会把当月消费/储蓄清零，现金流不闭合）。
+    // 净现金变化按“收入 + 退款 − 当期消费 − 当期储蓄”重算：
+    // 消费（更早的步骤 13）与储蓄（更晚的步骤 21）都会同步改写 netCashChange，
+    // 这里重算而不是累加，避免测试/迁移等直接结算路径把上月残值带进来。
     group.lastMonth = {
       ...group.lastMonth,
       income: round2(income + refund),
@@ -218,15 +273,20 @@ export function applyHouseholdIncome(
       benefits: benefit,
       dividendIncome: dividend,
       incomeTax: tax,
-      netCashChange: round2(group.lastMonth.netCashChange + income + refund),
+      netCashChange: round2(
+        income +
+          refund -
+          group.lastMonth.consumption -
+          group.lastMonth.savingsContribution,
+      ),
     };
   }
   // 退款不是新增收入，但进入下期可支配资金；与既有口径保持一致。
-  if (householdRefund > 0) {
+  if (refundTotal > 0) {
     log.push({
       tick: world.time.tick,
       kind: 'population',
-      message: `${city.name} 居民收到跨城交易退款 ${householdRefund.toFixed(2)}（按人口比例计入群体现金）。`,
+      message: `${city.name} 居民收到跨城交易退款 ${refundTotal.toFixed(2)}（按实际购买群体计入群体现金）。`,
     });
   }
   return split.householdIncome;
@@ -261,6 +321,46 @@ export function recordHouseholdConsumption(
   groups.forEach((group, index) => {
     group.lastMonth.desiredConsumption = desiredShares[index] ?? 0;
   });
+}
+
+/**
+ * 某群体本月可用于消费的预算：上月收入 × 消费倾向，且不超过群体手头现金。
+ * 逐群体消费必须以此为准，任何群体都不能动用其他群体的现金。
+ */
+export function householdGroupBudget(
+  world: WorldState,
+  city: City,
+  group: HouseholdGroup,
+  config: DemoConfig,
+): number {
+  const propensity = Math.max(0, config.consumer.propensity);
+  const incomeBudget = round2(group.lastMonth.income * propensity);
+  return round2(Math.max(0, Math.min(incomeBudget, group.cash)));
+}
+
+/**
+ * 逐群体消费结算：从该群体现金扣减实际消费，记录消费与未满足的需求。
+ * 返回实际扣款额（不超过该群体现金）。调用方负责把各群体支出汇总到城市口径。
+ */
+export function recordGroupConsumption(
+  world: WorldState,
+  city: City,
+  groupId: string,
+  spend: number,
+  desiredCost: number,
+): number {
+  const group = householdGroupsOfCity(world, city.id).find((entry) => entry.id === groupId);
+  if (!group) return 0;
+  const paid = round2(Math.max(0, Math.min(round2(spend), group.cash)));
+  if (paid > 0) {
+    group.cash = round2(group.cash - paid);
+    group.lastMonth.consumption = round2(group.lastMonth.consumption + paid);
+    group.lastMonth.netCashChange = round2(group.lastMonth.netCashChange - paid);
+  }
+  group.lastMonth.desiredConsumption = round2(
+    group.lastMonth.desiredConsumption + Math.max(0, round2(desiredCost)),
+  );
+  return paid;
 }
 
 /** 储蓄结算：居民可投资资金从群体现金转入居民投资实体。返回实际转出额。 */

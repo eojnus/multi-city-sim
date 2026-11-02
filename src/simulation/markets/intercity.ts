@@ -28,7 +28,7 @@ export function executeIntercityPurchase(
   goodId: GoodId,
   desiredQty: number,
   maxSpend: number,
-  options: { buyerCompanyId?: string; consumer?: boolean },
+  options: { buyerCompanyId?: string; consumer?: boolean; householdGroupId?: string },
   config: DemoConfig,
 ): PurchaseResult {
   if (!config.intercity.enabled || desiredQty <= 0 || maxSpend <= 0) {
@@ -125,6 +125,7 @@ export function executeIntercityPurchase(
       good: goodId,
       qty,
       grossValue: cost,
+      householdGroupId: options.householdGroupId,
     });
 
     ledger.intercityImported = round2(ledger.intercityImported + qty);

@@ -171,8 +171,17 @@ export function applyMigration(
       destination.population.employed,
     );
 
-    // v0.4：迁移者带走其人均现金与存款（跨城资产跟随人口，不复制也不丢失）。
-    rebalanceHouseholdWealthForMigration(world, source.id, destination.id, people);
+    // v0.4：迁移者带走其人均现金与存款（跨城资产跟随人口，不复制也不丢失）；
+    // 按 laborForceMoved 拆成 unemployed / nonLabor 两个群体分别转移，并确保目标账户存在。
+    rebalanceHouseholdWealthForMigration(
+      world,
+      source.id,
+      destination.id,
+      people,
+      laborForceMoved,
+      config,
+      world.time.tick,
+    );
 
     world.lastTick.migration.push({
       fromCityId: source.id,

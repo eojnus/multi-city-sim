@@ -753,7 +753,7 @@ export function checkBankruptcies(
     );
     if (company.ai.ageMonths < grace) continue;
     if (company.ai.lossMonths < config.lifecycle.bankruptcy.lossMonths) continue;
-    const wage = monthlyWageBill(company);
+    const wage = monthlyWageBill(company, config);
     if (wage <= 0) continue;
     if (company.cash >= wage * config.lifecycle.bankruptcy.cashWageMonths) continue;
     // 真正的退出条件是“现金耗尽且已无可用信贷”，而不是会计利润为负：

@@ -25,6 +25,8 @@ import { createInitialPolitics } from '../politics/politics';
 import { freshAiState } from '../companies/lifecycle/lifecycle';
 import {
   createInitialHouseholds,
+  householdGroupsOfCity,
+  occupationMonthlyIncome,
   recordHouseholdWealthStats,
 } from '../population/household-groups';
 import { createInitialBanking } from '../banking/banking';
@@ -49,6 +51,45 @@ function createMarket(): Record<GoodId, MarketState> {
     };
   }
   return market;
+}
+
+/**
+ * 新世界：为各居民群体写入一份“首月可用收入”估算（净工资/福利/转移支付），
+ * 否则首月逐群体消费预算恒为 0（缺少上月收入）。这是演示估算值，
+ * 首次推进后由 applyHouseholdIncome 用实际结算覆盖。
+ */
+function seedInitialHouseholdIncome(world: WorldState, config: DemoConfig): void {
+  for (const city of world.cities) {
+    const publicWages = city.publicSector.employees * city.publicSector.wageRate;
+    for (const group of householdGroupsOfCity(world, city.id)) {
+      let income = 0;
+      switch (group.occupation) {
+        case 'management':
+        case 'production':
+        case 'sales':
+        case 'research':
+          income = round2(
+            occupationMonthlyIncome(world, city, group.occupation, config) *
+              (1 - city.incomeTaxRate),
+          );
+          break;
+        case 'publicSector':
+          income = round2(publicWages * (1 - city.incomeTaxRate));
+          break;
+        case 'unemployed':
+          income = round2(city.population.unemployed * city.unemploymentBenefit);
+          break;
+        case 'nonLabor':
+          income = round2(city.population.nonLabor * city.nonLaborTransfer);
+          break;
+      }
+      group.lastMonth.income = income;
+      // 初始现金是资产负债表上的“既有财富”，不是本月现金流；为了让
+      // “收入 − 消费 − 储蓄 == 净现金变化”的月度口径在首月保存时也成立，
+      // 这里把同额记为当月净现金变化（之后每 tick 由结算覆盖）。
+      group.lastMonth.netCashChange = income;
+    }
+  }
 }
 
 export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState {
@@ -187,7 +228,7 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
       ai: { ...freshAiState(seed.id, seed.sector, companyIndex), ageMonths: 12 },
     };
     setCompanyEmployees(company, seed.employees);
-    const wage = monthlyWageBill(company);
+    const wage = monthlyWageBill(company, config);
     company.baseWageBill = wage;
     company.cash = round2(wage * config.company.initialCashWageMonths);
     return company;
@@ -220,7 +261,7 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
 
     const privateWages = companies
       .filter((company) => company.cityId === city.id)
-      .reduce((totalWage, company) => totalWage + monthlyWageBill(company), 0);
+      .reduce((totalWage, company) => totalWage + monthlyWageBill(company, config), 0);
     const publicWages = city.publicSector.employees * city.publicSector.wageRate;
     const benefits =
       city.population.unemployed * city.unemploymentBenefit +
@@ -293,6 +334,7 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
 
   // v0.4：居民群体（人口/收入/资产承载）、经营者（沿用原企业风格）、银行（空账本）。
   world.households = createInitialHouseholds(world, config);
+  seedInitialHouseholdIncome(world, config);
   world.management = createInitialManagement(world, config, 0);
   recordHouseholdWealthStats(world, config, 0);
 

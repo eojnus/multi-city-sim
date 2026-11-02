@@ -50,7 +50,7 @@ export function planCompanyDecision(
       style: styleOverride ?? company.ai?.style ?? 'steady',
       utilization: company.utilization,
       targetJobs: company.jobDemand,
-      expectedWageCost: monthlyWageBill(company),
+      expectedWageCost: monthlyWageBill(company, config),
       hiringSubsidyPerHire: 0,
       retentionSubsidyPerEmployee: 0,
       investment: 0,

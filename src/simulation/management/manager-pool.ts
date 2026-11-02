@@ -481,63 +481,31 @@ export function ensureOperators(world: WorldState, config: DemoConfig, tick: num
 }
 
 /**
- * 人才池规模控制：每城 available 超过 maxPoolPerCity 时按
- * 声望升序（低者先淘汰）→ 入职/离任时间（更久未任职者先）→ id 升序，
- * 确定性地把多余经营者移出名录，并在世界日志保留一条“退出人才市场”记录。
+ * 人才池规模控制（v0.4 验收问题 6 修复）：不得因为池子超限而删除经营者档案。
  *
- * 契约的 OperatorProfile.status 只有 employed/available，没有 retired；
- * 为了真正控制名录规模，这里从 operators 数组移除，但会先在个人 history 与
- * world.log 留下记录（“转历史，不删”在本模块的实现方式）。
+ * 用户规则：落选者留在人才市场，未来仍可被其他企业聘用；status 只有
+ * employed/available，档案、履历与任职历史是长期记录。规模控制改由 elections
+ * 的“优先复用同城 available + 限制每次新建数量 + 达到 maxPoolPerCity 后不再新建”
+ * 实现，本函数只负责在超限时留下一条提示日志（同一城市只留一条，日志被裁剪后
+ * 可再次提示），不改变任何 operator 的 status/companyId/history，因此也不会把
+ * 在任经营者变成空闲候选，或让进行中的选任议案丢失候选人。
  */
 export function pruneOperatorPool(world: WorldState, config: DemoConfig, tick: number): void {
   const state = ensureManagementState(world);
   const limit = Math.max(0, Math.floor(config.management.maxPoolPerCity));
 
-  // 正在被选任议案提名（status 仍为 available）的经营者必须保留，
-  // 否则计票时当选人档案可能已被淘汰，造成选任结果无法执行。
-  const protectedIds = new Set<string>();
-  for (const motion of world.governance?.motions ?? []) {
-    if (motion.kind !== 'operatorElection' || motion.status !== 'open') continue;
-    for (const candidate of motion.candidates ?? []) {
-      if (candidate.operatorId) protectedIds.add(candidate.operatorId);
-    }
-  }
-
   for (const city of [...world.cities].sort((a, b) => a.id.localeCompare(b.id))) {
     const available = state.operators.filter(
       (operator) => operator.status === 'available' && operatorCityId(operator) === city.id,
     );
-    const excess = available.length - limit;
-    if (excess <= 0) continue;
+    if (available.length <= limit) continue;
 
-    const ordered = available
-      .filter((operator) => !protectedIds.has(operator.id))
-      .sort((a, b) => {
-      if (a.reputation !== b.reputation) return a.reputation - b.reputation;
-      const aTick = a.appointedTick ?? a.history[a.history.length - 1]?.toTick ?? 0;
-      const bTick = b.appointedTick ?? b.history[b.history.length - 1]?.toTick ?? 0;
-      if (aTick !== bTick) return aTick - bTick;
-      return a.id.localeCompare(b.id);
-    });
-    const doomed = ordered.slice(0, excess);
-    const doomedIds = new Set(doomed.map((operator) => operator.id));
-
-    for (const operator of doomed) {
-      operator.history.push({
-        companyId: '',
-        companyName: '人才市场',
-        fromTick: operator.appointedTick ?? 0,
-        toTick: tick,
-        reason: '人才市场调整：退出经营者名录',
-      });
-      world.log.push({
-        tick,
-        kind: 'labor',
-        message: `人才市场调整：${operator.name}（${operatorStyleLabel(operator.style)}，声望 ${operator.reputation.toFixed(2)}）退出 ${city.name} 经营者名录，保留历史记录。`,
-      });
-    }
-
-    state.operators = state.operators.filter((operator) => !doomedIds.has(operator.id));
+    const message =
+      `人才市场调整：${city.name} 待选经营者超出建议规模（${limit} 名），` +
+      '保留全部现有档案并暂停新增；落选者仍可被其他企业聘用。';
+    // 每月都可能超限，同一提示只保留一条，避免世界日志被重复条目淹没。
+    if (world.log.some((entry) => entry.message === message)) continue;
+    world.log.push({ tick, kind: 'labor', message });
   }
 
   const maxLog = config.simulation.maxLogEntries;

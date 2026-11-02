@@ -2,12 +2,14 @@
 //
 // 【演示规则（用户已确认方向，数值见 config.management）】
 // - 通常 3 名候选人：有现任 = 现任 + 2 名其他；无现任 = 3 名；
-//   优先从人才市场选，不足时生成新人（每次最多 maxNewPerElection 名）；
+//   候选人只从同城人才市场 available 档案中复用；仅当 AI 候选不足最低数（2 名）
+//   时才生成新人，且新建数受 maxNewPerElection 与该城 maxPoolPerCity 剩余容量限制；
 // - 候选人在一次投票期间固定；玩家持有该企业有投票权股份即可报名参选；
 // - 有投票权股东按登记日快照持股投票；得票最多者当选；
 //   平票优先现任；无现任时按 candidateId 字典序（确定性排序）；
 // - 任期 termMonths（首版 24 个月）；任期届满 / 职位空缺 / 严重经营问题触发选任；
 // - 落选的原经营者回到人才市场，未来可参与其他企业选任；AI 候选人不得同时任职另一家；
+// - 经营者档案永不因人才池超限被删除（v0.4 验收问题 6：池子规模靠“复用 + 限制新增”控制）；
 // - 选任议案复用 governance 的 Motion，但计票是“多候选人”，
 //   因此 governance.autoCastVotes 跳过选任议案，改由本文件处理。
 //
@@ -47,7 +49,6 @@ import {
   currentOperator,
   employOperator,
   generateOperator,
-  operatorCityId,
   operatorStyleLabel,
   releaseOperator,
 } from './manager-pool';
@@ -126,19 +127,16 @@ export function electionCandidates(
     }
   }
 
+  // 问题 6 修复（v0.4）：只从“同城 available”档案里挑候选；在任经营者不是空闲候选，
+  // 已获其他议案提名的也不重复提名。落选者档案永久保留，因此这里永远能复用历史候选人。
+  const cityId = company.cityId;
   if (candidates.length < target) {
-    const cityId = company.cityId;
-    const pool = availableOperators(world)
+    const pool = availableOperators(world, cityId)
       .filter(
         (operator) =>
           !usedOperatorIds.has(operator.id) && !nominatedElsewhere.has(operator.id),
       )
-      .sort((a, b) => {
-        const aLocal = operatorCityId(a) === cityId ? 0 : 1;
-        const bLocal = operatorCityId(b) === cityId ? 0 : 1;
-        if (aLocal !== bLocal) return aLocal - bLocal;
-        return b.reputation - a.reputation || a.id.localeCompare(b.id);
-      });
+      .sort((a, b) => b.reputation - a.reputation || a.id.localeCompare(b.id));
     for (const operator of pool) {
       if (candidates.length >= target) break;
       if (usedCandidateIds.has(operator.id)) continue;
@@ -155,12 +153,29 @@ export function electionCandidates(
     }
   }
 
-  // 人才市场不足时生成新人，数量不超过 maxNewPerElection（避免无限增长）。
+  // 规模控制（v0.4 验收问题 6）：
+  // - 只有 AI 候选不足最低数（至少 2 名，且不超过目标人数）时才新建档案；
+  // - 新建人数同时受 maxNewPerElection 与该城人才池剩余容量
+  //   （maxPoolPerCity − 该城 available 数）限制，池满后不再新增；
+  // - 容量耗尽时允许候选不足（例如只有 1 名在任 AI + 玩家报名），保持选任可运行，
+  //   不再用“删档”控制规模，也不会无限扩张人才市场。
+  const minAiCandidates = Math.min(2, target);
+  const aiCandidateCount = candidates.filter((candidate) => candidate.kind === 'ai').length;
+  const poolLimit = Math.max(0, Math.floor(config.management.maxPoolPerCity));
+  const cityAvailableCount = availableOperators(world, cityId).length;
+  const generationBudget = Math.min(
+    Math.max(0, Math.floor(config.management.maxNewPerElection)),
+    Math.max(0, poolLimit - cityAvailableCount),
+    Math.max(0, minAiCandidates - aiCandidateCount),
+  );
   let generated = 0;
-  const maxNew = Math.max(0, Math.floor(config.management.maxNewPerElection));
-  while (candidates.length < target && generated < maxNew) {
+  while (
+    candidates.length + generated < target &&
+    aiCandidateCount + generated < minAiCandidates &&
+    generated < generationBudget
+  ) {
     const style = candidateStyle(company, generated);
-    const operator = generateOperator(world, company.cityId, tick, style);
+    const operator = generateOperator(world, cityId, tick, style);
     candidates.push({
       candidateId: operator.id,
       kind: 'ai',
@@ -235,7 +250,7 @@ function severeBusinessProblem(
   if (!ai) return false;
   if (ai.ageMonths < severe.minAgeMonths) return false;
   if (ai.lossMonths < severe.lossMonths) return false;
-  const wageBill = monthlyWageBill(company);
+  const wageBill = monthlyWageBill(company, config);
   if (wageBill > 0 && company.cash >= severe.cashWageMonths * wageBill) return false;
 
   // 冷却：最近一次选任议案的创建时间在冷却期内则不重复触发（避免每月生成议案）。

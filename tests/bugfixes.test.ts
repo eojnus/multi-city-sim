@@ -152,7 +152,9 @@ describe('已复现缺陷修复', () => {
 
     expect(energyBought).toBeGreaterThan(0);
     expect(spend).toBeGreaterThan(0);
-    expect(debtDelta).toBeGreaterThan(0);
+    // 验收问题 2：融资只补“采购现金缺口”，现金足够时不举债（debtDelta 可以为 0）；
+    // 无论是否融资，新增债务都不得超过本次实际采购支出。
+    expect(debtDelta).toBeGreaterThanOrEqual(0);
     expect(debtDelta).toBeLessThanOrEqual(spend + 0.01);
     // 本地成交计入内销，不计出口。
     expect(seller.lastMonth.sold).toBeGreaterThan(0);

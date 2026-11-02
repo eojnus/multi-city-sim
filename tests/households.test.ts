@@ -359,7 +359,10 @@ describe('居民群体：跨城迁移资产跟随', () => {
 describe('居民群体：收入、消费与储蓄入账', () => {
   it('收入入账闭合：Σ group.income ≈ 城市居民收入 + 退款，Σ netCashChange ≈ income − consumption − savings', () => {
     const sim = Simulation.create();
-    for (let month = 1; month <= 3; month += 1) {
+    // 问题 5 起消费按群体预算结算，跨城补货规模比“全城统一预算”时小，
+    // 容量退款出现得更晚（实测第 10 个月），因此用 12 个月窗口覆盖“+退款”分支。
+    let sawRefund = false;
+    for (let month = 1; month <= 12; month += 1) {
       const result = sim.tick();
       expect(result.ok, result.error).toBe(true);
       let refundTotal = 0;
@@ -377,9 +380,10 @@ describe('居民群体：收入、消费与储蓄入账', () => {
         expectAmount(income, city.lastMonth.householdIncome + refund, 0.1);
         expectAmount(netCashChange, income - consumption - savings, 0.1);
       }
-      // 第 3 个月出现居民跨城购买退款，确保上面的“+退款”分支被真实覆盖。
-      if (month === 3) expect(refundTotal).toBeGreaterThan(0);
+      if (refundTotal > 0) sawRefund = true;
     }
+    // 窗口内必须出现居民跨城购买退款，确保上面的“+退款”分支被真实覆盖。
+    expect(sawRefund).toBe(true);
   });
 
   it('消费受现金约束：群体现金清零后推进，本月消费必须为 0（预算 = min(收入×倾向, 现金)）', () => {

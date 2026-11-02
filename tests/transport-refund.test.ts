@@ -9,12 +9,16 @@ import { executeIntercityPurchase } from '../src/simulation/markets/intercity';
 import { executeTradeRoutes } from '../src/simulation/trade/trade';
 import { executeAgreements } from '../src/simulation/agreements/agreements';
 import { settleTransportMonth } from '../src/simulation/transport/settlement';
+import type { HouseholdRefundsByCity } from '../src/simulation/transport/settlement';
 import { advanceTransportConstruction, startCorridorUpgrade } from '../src/simulation/transport/network';
 import { parseSave, serializeSave } from '../src/simulation/core/save';
 import { checkInvariants } from '../src/simulation/core/invariants';
 import { settleGovernment } from '../src/simulation/government/fiscal';
 import { collectInvestableFunds } from '../src/simulation/investors/investors';
 import { runConsumerMarket } from '../src/simulation/markets/consumer';
+import { householdGroupsOfCity } from '../src/simulation/population/household-groups';
+import { householdGroupBudget } from '../src/simulation/population/household-economy';
+import { round2 } from '../src/simulation/core/math';
 import { appointPlayerMayor } from '../src/simulation/politics/politics';
 import { migrateLegacyCompanyDebt } from '../src/simulation/banking/banking';
 
@@ -79,7 +83,10 @@ function contractSetup() {
   return { world, seller, buyer };
 }
 
-function settle(world: WorldState, ledgers = createWorldLedgers(world)): Record<string, number> {
+function settle(
+  world: WorldState,
+  ledgers = createWorldLedgers(world),
+): HouseholdRefundsByCity {
   return settleTransportMonth(world, DEMO_CONFIG, [], ledgers);
 }
 
@@ -317,7 +324,7 @@ describe('修复三：跨城超载结算的买卖双方资金流', () => {
     expect(trade.grossValue).toBeCloseTo(purchase.spend, 2);
     expect(trade.sellerProceeds).toBeCloseTo(purchase.spend * (1 - trade.penaltyRate), 2);
     expect(trade.buyerRefund).toBeCloseTo(purchase.spend - trade.sellerProceeds, 2);
-    expect(refunds.lanport).toBeCloseTo(trade.buyerRefund!, 2);
+    expect(refunds.lanport?.total).toBeCloseTo(trade.buyerRefund!, 2);
     expect(city.lastMonth.consumerSpend).toBeCloseTo(
       Math.max(0, 10_160 - (trade.buyerRefund ?? 0)),
       2,
@@ -367,8 +374,16 @@ describe('修复三：跨城超载结算的买卖双方资金流', () => {
     const restored = parseSave(serializeSave(world));
     expect(restored.ok, restored.error).toBe(true);
     const restoredCity = restored.world!.cities.find((entry) => entry.id === city.id)!;
+    // 问题 5：预算已改为逐群体口径（Σ min(群体收入×倾向, 群体现金)），不再是城市统一预算。
+    // 必须在 runConsumerMarket 之前取预算：运行后群体现金已被消费扣减。
+    const expectedBudget = round2(
+      householdGroupsOfCity(restored.world!, city.id).reduce(
+        (sum, group) => sum + householdGroupBudget(restored.world!, restoredCity, group, config),
+        0,
+      ),
+    );
     const nextBudget = runConsumerMarket(restored.world!, restoredCity, createWorldLedgers(restored.world!)[city.id]!, config).budget;
-    expect(nextBudget).toBeCloseTo(city.householdIncomeLastMonth * config.consumer.propensity, 2);
+    expect(nextBudget).toBeCloseTo(expectedBudget, 2);
   });
 
   it('读档时仍未结算的跨城交易按新规则结算，旧存档不会被静默改写', () => {

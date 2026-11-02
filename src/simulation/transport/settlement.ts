@@ -16,6 +16,8 @@ import {
   intracityCapacity,
 } from './network';
 import { intercityTradeSupportPayment } from '../policies/policies';
+import { householdGroupsOfCity } from '../population/household-groups';
+import { allocateMoney } from '../population/household-economy';
 
 /**
  * 城际容量结算（期末统一核算，避免订单先后造成差别）。
@@ -66,12 +68,21 @@ function refundIntercityBuyer(
   return 0;
 }
 
+/** 某城本月居民跨城交易退款：城市总额 + 按实际购买群体归属的明细。 */
+export interface HouseholdRefundAllocation {
+  total: number;
+  /** key = householdGroupId；金额合计等于 total。 */
+  byGroup: Record<string, number>;
+}
+
+export type HouseholdRefundsByCity = Record<string, HouseholdRefundAllocation>;
+
 export function settleTransportMonth(
   world: WorldState,
   config: DemoConfig,
   log: LogEntry[],
   ledgers: WorldLedgers,
-): Record<string, number> {
+): HouseholdRefundsByCity {
   const pending = [...world.transport.pendingSales].sort(
     (a, b) =>
       a.corridorKey.localeCompare(b.corridorKey) ||
@@ -93,12 +104,28 @@ export function settleTransportMonth(
   let freightSubsidy = 0;
   let totalDemand = 0;
   let totalCapacity = 0;
-  const householdRefunds: Record<string, number> = {};
+  const householdRefunds: HouseholdRefundsByCity = {};
   const refundBuyer = (sale: PendingIntercitySale, amount: number): void => {
     const residentRefund = refundIntercityBuyer(world, sale, amount, ledgers);
-    if (residentRefund > 0) {
-      householdRefunds[sale.toCityId] = round2((householdRefunds[sale.toCityId] ?? 0) + residentRefund);
+    if (residentRefund <= 0) return;
+    const summary = (householdRefunds[sale.toCityId] ??= { total: 0, byGroup: {} });
+    summary.total = round2(summary.total + residentRefund);
+    // 退款按“实际购买群体”归属；历史/企业代购等没有群体标记的退款按人口比例兜底分摊。
+    const groupId = sale.householdGroupId;
+    if (groupId) {
+      summary.byGroup[groupId] = round2((summary.byGroup[groupId] ?? 0) + residentRefund);
+      return;
     }
+    const groups = householdGroupsOfCity(world, sale.toCityId);
+    const shares = allocateMoney(
+      residentRefund,
+      groups.map((group) => group.people),
+    );
+    groups.forEach((group, index) => {
+      const share = shares[index] ?? 0;
+      if (share <= 0) return;
+      summary.byGroup[group.id] = round2((summary.byGroup[group.id] ?? 0) + share);
+    });
   };
 
   for (const key of [...groups.keys()].sort((a, b) => a.localeCompare(b))) {

@@ -58,7 +58,6 @@ import {
   recordHouseholdWealthStats,
   syncHouseholdPeople,
 } from '../population/household-groups';
-import { recordHouseholdConsumption } from '../population/household-economy';
 import {
   refreshBankingTotals,
   servicePlayerLoans,
@@ -103,9 +102,11 @@ function resetCompanyMonth(world: WorldState): void {
     group.lastDividend = 0;
   }
   // v0.4：居民群体本月统计清零（人数与现金是存量，不清零）。
+  // v0.5：income 保留上月值——本月消费（步骤 7）按“上月收入 × 消费倾向”计算各群体预算，
+  // 月末 applyHouseholdIncome 会把它覆盖为本月收入，因此这里不能提前清零。
   for (const group of world.households.groups) {
     group.lastMonth = {
-      income: 0,
+      income: group.lastMonth.income,
       wageIncome: 0,
       benefits: 0,
       dividendIncome: 0,
@@ -281,8 +282,8 @@ export class Simulation {
         const result = runConsumerMarket(this.state, city, cityLedgers, this.config);
         city.lastMonth.consumerSpend = result.spend;
         city.lastMonth.consumerBudget = result.budget;
-        // v0.4：消费是真实支出——从居民群体现金扣减，并记录“想要购买”的成本。
-        recordHouseholdConsumption(this.state, city, result.spend, result.desiredCost);
+        // v0.5：runConsumerMarket 内部已按群体逐笔扣款并记账（含现金流与期望消费），
+        // 这里不再统一扣减，避免重复记账。
         for (const goodId of GOOD_IDS) {
           householdConsumed[goodId] += result.bought[goodId] ?? 0;
         }

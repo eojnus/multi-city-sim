@@ -3,7 +3,7 @@
 // v0.2 新增证券/治理/居民投资/协议/通知数据；旧 v1 存档由 core/save.ts 迁移。
 
 export const SAVE_FORMAT_VERSION = 5;
-export const GAME_VERSION = '0.4.0';
+export const GAME_VERSION = '0.5.0';
 
 export type GoodId =
   | 'grain'
@@ -788,6 +788,8 @@ export interface PendingIntercitySale {
   good: GoodId;
   qty: number;
   grossValue: number;
+  /** v0.5：居民跨城购买所属群体；容量差额退款按此归属到原购买群体（旧存档可为空）。 */
+  householdGroupId?: string;
 }
 
 export interface TransportTradeRecord {
