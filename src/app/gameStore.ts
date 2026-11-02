@@ -81,6 +81,43 @@ import {
   foundCompany,
   lifecycleLimits,
 } from '../simulation/companies/lifecycle/lifecycle';
+import {
+  cityHouseholdDeposits,
+  cityInvestorEquity,
+  householdGroupsOfCity,
+} from '../simulation/population/household-groups';
+import {
+  deposit,
+  depositAccountFor,
+  loanLabel,
+  openLoan,
+  repayLoan,
+  withdraw,
+} from '../simulation/banking/banking';
+import { bankLoansOf, creditEvaluation, sameOwner } from '../simulation/banking/credit';
+import {
+  availableOperators,
+  currentOperator,
+  operatorNameFor,
+  operatorStyleDescription,
+  operatorStyleLabel,
+  termMonthsLeft,
+} from '../simulation/management/manager-pool';
+import {
+  canOperate,
+  decideProposal,
+  playerOperationFor,
+  proposalView,
+  setAuthorization,
+  setOperationMode,
+  setStandingPlan,
+} from '../simulation/management/operations';
+import { OPERATION_MODE_LABELS } from '../simulation/management/types';
+import {
+  castElectionVote,
+  playerHoldsVotingShares,
+  registerPlayerCandidate,
+} from '../simulation/management/elections';
 
 export type ViewMode = 'region' | 'city';
 export type LayerMode = 'population' | 'economy' | 'industry';
@@ -1080,5 +1117,280 @@ export class GameStore {
         company.capacity * DEMO_CONFIG.companyAi.maxExpansionShare * DEMO_CONFIG.companyAi.capacityCostPerUnit,
       ),
     };
+  }
+
+  // ---------------------------------------------------------------- v0.4 居民阶层
+  /** 城市居民阶层视图：职业群体、财富阶层与统计口径（只读）。 */
+  populationStrataView(cityId: string) {
+    const city = this.world.cities.find((entry) => entry.id === cityId);
+    if (!city) return null;
+    const groups = householdGroupsOfCity(this.world, cityId).map((group) => ({
+      id: group.id,
+      name: group.name,
+      occupation: group.occupation,
+      people: group.people,
+      income: group.lastMonth.income,
+      wageIncome: group.lastMonth.wageIncome,
+      benefits: group.lastMonth.benefits,
+      dividendIncome: group.lastMonth.dividendIncome,
+      incomeTax: group.lastMonth.incomeTax,
+      consumption: group.lastMonth.consumption,
+      desiredConsumption: group.lastMonth.desiredConsumption,
+      savings: group.lastMonth.savingsContribution,
+      cash: group.cash,
+      deposits:
+        depositAccountFor(this.world, { kind: 'household', id: group.id })?.balance ?? 0,
+    }));
+    const stats = this.world.households.lastStats.find((entry) => entry.cityId === cityId) ?? null;
+    return {
+      cityId,
+      cityName: city.name,
+      groups,
+      stats,
+      population: { ...city.population },
+      totalCash: groups.reduce((total, group) => total + group.cash, 0),
+      totalDeposits: cityHouseholdDeposits(this.world, cityId),
+      investorEquity: cityInvestorEquity(this.world, cityId),
+      note: '人数由城市人口与岗位派生，一个人只统计一次；股票权益按人口比例归属居民投资实体，不是现金。',
+    };
+  }
+
+  // ---------------------------------------------------------------- v0.4 经营者与人才市场
+  /** 人才市场视图：只展示空闲经营者（其他企业的现任 AI 经营者不是可用人才）。 */
+  talentMarketView(cityId?: string) {
+    const operators = availableOperators(this.world, cityId).map((operator) => ({
+      id: operator.id,
+      name: operator.name,
+      style: operator.style,
+      styleLabel: operatorStyleLabel(operator.style),
+      reputation: operator.reputation,
+      status: operator.status,
+      lastTenure: operator.history.length > 0 ? operator.history[operator.history.length - 1]! : null,
+      note: operator.note,
+    }));
+    return {
+      cityId: cityId ?? null,
+      operators,
+      poolLimit: DEMO_CONFIG.management.maxPoolPerCity,
+    };
+  }
+
+  /** 企业经营者视图：现任、任期、选任状态与玩家经营模式（只读）。 */
+  operatorView(companyId: string) {
+    const company = this.world.companies.find((entry) => entry.id === companyId);
+    if (!company) return null;
+    const control = this.world.governance.controls.find((entry) => entry.companyId === companyId);
+    const operator = currentOperator(this.world, companyId);
+    const style = operator?.style ?? company.ai.style;
+    const motion =
+      this.world.governance.motions.find(
+        (entry) =>
+          entry.companyId === companyId && entry.kind === 'operatorElection' && entry.status === 'open',
+      ) ?? null;
+    const canVote = motion ? this.motionEligibility(motion.id) > 0 : false;
+    const isCandidate = motion
+      ? (motion.candidates ?? []).some((entry) => entry.kind === 'player')
+      : false;
+    const operation = playerOperationFor(this.world, companyId);
+    const holdsVoting = playerHoldsVotingShares(this.world, companyId);
+    return {
+      companyId,
+      isPlayerOperator: canOperate(this.world, companyId),
+      operatorName: operatorNameFor(this.world, companyId),
+      operatorStyle: style,
+      styleLabel: operatorStyleLabel(style),
+      styleDescription: operatorStyleDescription(style),
+      basis: control?.basis ?? null,
+      termMonthsLeft: termMonthsLeft(this.world, companyId, this.world.time.tick),
+      election: motion
+        ? {
+            motionId: motion.id,
+            closesTick: motion.closesAtTick,
+            candidates: motion.candidates ?? [],
+            canVote,
+            isCandidate,
+            canRegister: holdsVoting && !isCandidate,
+            votes: motion.votes.map((vote) => ({ ...vote })),
+          }
+        : null,
+      operation: operation
+        ? {
+            mode: operation.mode,
+            modeLabel: OPERATION_MODE_LABELS[operation.mode],
+            authorization: { ...operation.authorization },
+            standingPlan: operation.standingPlan ? { ...operation.standingPlan } : null,
+            proposals: proposalView(this.world, companyId),
+          }
+        : null,
+      holdsVoting,
+      majorThresholds: DEMO_CONFIG.management.majorThresholds,
+    };
+  }
+
+  setOperationMode(companyId: string, mode: 'manual' | 'assisted' | 'delegated'): boolean {
+    const result = setOperationMode(this.world, companyId, mode, DEMO_CONFIG, this.world.time.tick);
+    return this.finishAction(result, '经营模式已更新。');
+  }
+
+  setOperationAuthorization(
+    companyId: string,
+    patch: Partial<{
+      maxInvestmentPerMonth: number;
+      maxHiresPerMonth: number;
+      maxLoanAmount: number;
+      allowInvestment: boolean;
+      allowHiring: boolean;
+      allowLoan: boolean;
+      allowPriceAdjust: boolean;
+    }>,
+  ): boolean {
+    const result = setAuthorization(this.world, companyId, patch, DEMO_CONFIG);
+    return this.finishAction(result, '授权范围已更新。');
+  }
+
+  setStandingPlan(
+    companyId: string,
+    plan: {
+      utilization: number;
+      targetJobs: number;
+      priceFactor: number;
+      investmentPerMonth: number;
+    },
+  ): boolean {
+    const result = setStandingPlan(this.world, companyId, plan, DEMO_CONFIG, this.world.time.tick);
+    return this.finishAction(result, '经营计划已保存（持续生效直到修改或到期）。');
+  }
+
+  decideProposal(proposalId: string, approve: boolean): boolean {
+    const result = decideProposal(
+      this.world,
+      proposalId,
+      approve,
+      DEMO_CONFIG,
+      this.world.time.tick,
+    );
+    return this.finishAction(result, approve ? '提案已批准并执行。' : '提案已拒绝。');
+  }
+
+  registerCandidate(motionId: string): boolean {
+    const result = registerPlayerCandidate(
+      this.world,
+      motionId,
+      DEMO_CONFIG,
+      this.world.time.tick,
+    );
+    return this.finishAction(result, '已登记参选。');
+  }
+
+  voteElection(motionId: string, candidateId: string): boolean {
+    const result = castElectionVote(
+      this.world,
+      motionId,
+      { type: 'player', id: 'player' },
+      candidateId,
+      this.world.time.tick,
+    );
+    return this.finishAction(result, '选票已提交。');
+  }
+
+  // ---------------------------------------------------------------- v0.4 银行
+  /** 银行视图：玩家与选中企业的存款、额度、贷款与还款状态（只读）。 */
+  bankView(companyId?: string | null) {
+    const playerOwner = { kind: 'player' as const, id: 'player' };
+    const playerCredit = creditEvaluation(this.world, playerOwner, DEMO_CONFIG);
+    const playerDeposit =
+      depositAccountFor(this.world, playerOwner)?.balance ?? 0;
+    const playerLoans = bankLoansOf(this.world)
+      .filter((loan) => sameOwner(loan.borrower, playerOwner))
+      .map((loan) => ({ ...loan, label: loanLabel(this.world, loan) }));
+    const company = companyId
+      ? this.world.companies.find((entry) => entry.id === companyId)
+      : null;
+    const companyView = company
+      ? (() => {
+          const owner = { kind: 'company' as const, id: company.id };
+          return {
+            companyId: company.id,
+            name: company.name,
+            cash: company.cash,
+            debt: company.debt,
+            deposits: depositAccountFor(this.world, owner)?.balance ?? 0,
+            credit: creditEvaluation(this.world, owner, DEMO_CONFIG),
+            loans: bankLoansOf(this.world)
+              .filter((loan) => sameOwner(loan.borrower, owner))
+              .map((loan) => ({ ...loan, label: loanLabel(this.world, loan) })),
+          };
+        })()
+      : null;
+    return {
+      depositRateMonthly: DEMO_CONFIG.banking.depositRateMonthly,
+      products: DEMO_CONFIG.banking.products,
+      creditLimitRate: DEMO_CONFIG.banking.creditLimitRate,
+      graceMonths: DEMO_CONFIG.banking.graceMonths,
+      player: {
+        cash: this.world.player.cash,
+        deposits: playerDeposit,
+        credit: playerCredit,
+        loans: playerLoans,
+      },
+      company: companyView,
+      lastMonth: { ...this.world.banking.lastMonth },
+      note: '银行资金无限、不会倒闭；额度 = 授信基准 × 50% − 已有未偿本金，同一主体全部贷款共享额度。',
+    };
+  }
+
+  takeLoan(
+    ownerKind: 'player' | 'company',
+    ownerId: string,
+    purpose: 'workingCapital' | 'expansion' | 'personal',
+    amount: number,
+  ): boolean {
+    const result = openLoan(
+      this.world,
+      { owner: { kind: ownerKind, id: ownerId }, purpose, amount },
+      DEMO_CONFIG,
+      this.world.time.tick,
+    );
+    return this.finishAction(result, result.note ?? '贷款已放款。');
+  }
+
+  repayBankLoan(loanId: string, amount: number): boolean {
+    const result = repayLoan(this.world, loanId, amount, DEMO_CONFIG, this.world.time.tick);
+    return this.finishAction(result, result.note ?? '还款已入账。');
+  }
+
+  depositToBank(amount: number): boolean {
+    const result = deposit(
+      this.world,
+      { kind: 'player', id: 'player' },
+      amount,
+      DEMO_CONFIG,
+      this.world.time.tick,
+    );
+    return this.finishAction(result, '存款已入账。');
+  }
+
+  withdrawFromBank(amount: number): boolean {
+    const result = withdraw(
+      this.world,
+      { kind: 'player', id: 'player' },
+      amount,
+      DEMO_CONFIG,
+      this.world.time.tick,
+    );
+    return this.finishAction(result, '取款已完成。');
+  }
+
+  /** 统一处理命令结果：成功 toast + 自动存档 + 重绘；失败只提示与重绘。 */
+  private finishAction(result: { ok: boolean; error?: string; note?: string }, successText: string): boolean {
+    if (!result.ok) {
+      this.toast(result.error ?? '操作失败', 'error');
+      this.emit();
+      return false;
+    }
+    this.toast(result.note ?? successText, 'success');
+    void this.autosave();
+    this.emit();
+    return true;
   }
 }

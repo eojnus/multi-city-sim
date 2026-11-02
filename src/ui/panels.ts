@@ -2271,8 +2271,679 @@ export function renderCompanyDetail(
           ${offersHtml}
         </div>
       </section>
+      ${renderCompanyOperatorBlock(store, company)}
       <p class="warning-note">企业现金不足会触发营运资金信贷 / 债务重组（演示）。该机制不是正式金融模型。</p>
     </article>`;
+}
+
+// ---------------------------------------------------------------- v0.4 居民阶层 · 人才市场 · 银行 · 经营者
+// 面板只读 store 的 v0.4 视图；写操作一律通过 data-action 交给 GameUI，面板本身无状态。
+
+type PopulationStrataView = NonNullable<ReturnType<GameStore['populationStrataView']>>;
+type TalentMarketView = NonNullable<ReturnType<GameStore['talentMarketView']>>;
+type BankView = NonNullable<ReturnType<GameStore['bankView']>>;
+type BankLoanView = BankView['player']['loans'][number];
+type OperatorView = NonNullable<ReturnType<GameStore['operatorView']>>;
+type OperatorElectionView = NonNullable<OperatorView['election']>;
+type OperationView = NonNullable<OperatorView['operation']>;
+type ProposalView = OperationView['proposals'][number];
+
+const WEALTH_TIER_LABELS: Record<'low' | 'middle' | 'high', string> = {
+  low: '低',
+  middle: '中',
+  high: '高',
+};
+
+const OPERATOR_BASIS_LABELS: Record<'management' | 'boardAppointment' | 'election', string> = {
+  management: '职业经理人管理',
+  boardAppointment: '董事会任命',
+  election: '股东选任',
+};
+
+const OPERATOR_STYLE_LABELS: Record<'growth' | 'steady' | 'return', string> = {
+  growth: '扩张型',
+  steady: '稳健型',
+  return: '回报型',
+};
+
+const LOAN_PURPOSE_LABELS: Record<BankLoanView['purpose'], string> = {
+  workingCapital: '周转贷款',
+  expansion: '扩张贷款',
+  personal: '个人贷款',
+  migratedDebt: '旧债务承接',
+};
+
+const LOAN_STATUS_LABELS: Record<BankLoanView['status'], string> = {
+  active: '还款中',
+  repaid: '已结清',
+  defaulted: '已违约',
+};
+
+const PROPOSAL_STATUS_LABELS: Record<ProposalView['status'], string> = {
+  pending: '待批准',
+  approved: '已批准',
+  rejected: '已拒绝',
+  executed: '已执行',
+  expired: '已过期',
+};
+
+const OPERATION_MODE_OPTIONS = [
+  { id: 'manual', label: '手动', hint: '你设定持续经营计划；AI 不代为决策。' },
+  { id: 'assisted', label: 'AI 辅助', hint: 'AI 按月生成提案，重大事项等你批准。' },
+  { id: 'delegated', label: '高度托管', hint: '授权范围内自动执行，超出范围仍需批准。' },
+] as const;
+
+const BANK_DEPOSIT_AMOUNT = 100_000;
+const BANK_WITHDRAW_AMOUNT = 100_000;
+const BANK_REPAY_AMOUNT = 10_000;
+const PLAYER_LOAN_AMOUNTS = [50_000, 200_000] as const;
+const COMPANY_LOAN_PRODUCTS = [
+  { purpose: 'workingCapital', amount: 100_000, label: '周转贷款' },
+  { purpose: 'expansion', amount: 500_000, label: '扩张贷款' },
+] as const;
+
+function operatorBasisLabel(basis: OperatorView['basis']): string {
+  return basis ? OPERATOR_BASIS_LABELS[basis] : '默认管理';
+}
+
+function candidateStyleLabel(style: 'growth' | 'steady' | 'return' | null): string {
+  return style ? OPERATOR_STYLE_LABELS[style] : '玩家';
+}
+
+function amountWanLabel(amount: number): string {
+  return `${num(amount / 10_000)} 万`;
+}
+
+/** A. 城市居民阶层与职业群体：人数由人口/岗位派生，财富口径见视图 note。 */
+export function renderPopulationStrataSection(store: GameStore, city: City): string {
+  const view = store.populationStrataView(city.id);
+  if (!view) return '';
+  const stats = view.stats;
+  const tierRows = stats
+    ? stats.tiers
+        .map(
+          (tier) => `
+            <tr>
+              <th scope="row">${esc(WEALTH_TIER_LABELS[tier.tier])}</th>
+              <td>${num(tier.people)}</td>
+              <td>${pct(tier.share)}</td>
+              <td>${money(tier.perCapitaWealth)}</td>
+              <td>${money(tier.perCapitaIncome)}</td>
+            </tr>`,
+        )
+        .join('')
+    : '';
+  const tierTotalRow = stats
+    ? `<tr class="total">
+        <th scope="row">合计</th>
+        <td>${num(stats.totalPeople)}</td>
+        <td>100.0%</td>
+        <td>${money(stats.perCapitaWealth)}</td>
+        <td>${money(stats.perCapitaIncome)}</td>
+      </tr>`
+    : '';
+  const groupRows = view.groups
+    .map(
+      (group) => `
+        <tr>
+          <th scope="row">${esc(group.name)}</th>
+          <td>${num(group.people)}</td>
+          <td>${money(group.income)}</td>
+          <td>${money(group.consumption)}</td>
+          <td>${money(group.savings)}</td>
+          <td>${money(group.cash)}</td>
+          <td>${money(group.deposits)}</td>
+        </tr>`,
+    )
+    .join('');
+  return `
+    <section class="panel-section strata-section" data-testid="population-strata-section">
+      <div class="section-head">
+        <div>
+          <span class="kicker">HOUSEHOLD STRATA</span>
+          <h2>居民阶层与职业群体</h2>
+        </div>
+        <span class="section-tag">${qty(view.population.total)} 人</span>
+      </div>
+      <p class="strata-note">人数由城市人口与岗位派生，一个人只统计一次；人均资产 = 现金 + 银行存款 + 股票权益，股票市值不是现金。</p>
+      <div class="detail-subsection strata-tiers">
+        <div class="sub-head">
+          <h4>财富阶层</h4>
+          <span>人均 · 信用点</span>
+        </div>
+        ${
+          stats
+            ? `<div class="table-wrap">
+                <table class="strata-table" aria-label="${esc(city.name)} 财富阶层">
+                  <thead>
+                    <tr>
+                      <th scope="col">阶层</th>
+                      <th scope="col">人数</th>
+                      <th scope="col">占比</th>
+                      <th scope="col">人均资产</th>
+                      <th scope="col">人均收入</th>
+                    </tr>
+                  </thead>
+                  <tbody>${tierRows}${tierTotalRow}</tbody>
+                </table>
+              </div>`
+            : '<p class="fin-hint">尚无月度统计（推进一个月后生成）。</p>'
+        }
+      </div>
+      <div class="detail-subsection strata-groups">
+        <div class="sub-head">
+          <h4>职业群体</h4>
+          <span>本月流水</span>
+        </div>
+        <div class="strata-scroll" data-scroll="pop-strata">
+          <table class="strata-table strata-table--groups" aria-label="${esc(city.name)} 职业群体">
+            <thead>
+              <tr>
+                <th scope="col">职业</th>
+                <th scope="col">人数</th>
+                <th scope="col">收入</th>
+                <th scope="col">消费</th>
+                <th scope="col">储蓄</th>
+                <th scope="col">现金</th>
+                <th scope="col">存款</th>
+              </tr>
+            </thead>
+            <tbody>${groupRows}</tbody>
+          </table>
+        </div>
+      </div>
+      <p class="fin-hint">合计：手头现金 ${money(view.totalCash)} · 银行存款 ${money(view.totalDeposits)} · 股票权益 ${money(view.investorEquity)}（权益按人口比例归属，不是现金）。</p>
+    </section>`;
+}
+
+/** B. 城市人才市场：只展示空闲经营者；在任 AI 经营者不在名单内。 */
+export function renderTalentMarketSection(store: GameStore, city: City): string {
+  const view = store.talentMarketView(city.id);
+  const rows =
+    view.operators.length === 0
+      ? '<p class="talent-empty">本城暂无可聘经营者；选任时会按需从人才池生成。</p>'
+      : `<ul class="talent-list" data-scroll="talent-market">${view.operators
+          .map((operator) => {
+            const tenure = operator.lastTenure;
+            return `
+              <li class="talent-row" data-testid="talent-row-${esc(operator.id)}">
+                <div class="talent-main">
+                  <b>${esc(operator.name)}</b>
+                  <span class="talent-style">${esc(operator.styleLabel)}</span>
+                  <em title="0–1 演示声望">声望 ${pct(operator.reputation, 0)}</em>
+                </div>
+                <div class="talent-meta">
+                  <span>上一段任职：${
+                    tenure
+                      ? `${esc(tenure.companyName)} · T${num(tenure.fromTick)}–T${num(tenure.toTick)}`
+                      : '暂无任职记录'
+                  }</span>
+                  <span class="talent-status">${operator.status === 'available' ? '空闲 · 可聘' : '在任'}</span>
+                </div>
+              </li>`;
+          })
+          .join('')}</ul>`;
+  return `
+    <section class="panel-section talent-section" data-testid="talent-market-section">
+      <div class="section-head">
+        <div>
+          <span class="kicker">OPERATOR MARKET</span>
+          <h2>人才市场</h2>
+        </div>
+        <span class="section-tag">${view.operators.length}/${num(view.poolLimit)} 空闲</span>
+      </div>
+      <p class="talent-note">只展示空闲人才；其他企业的现任 AI 经营者不在名单内。经营者选任会优先从这份人才池中挑选候选人。</p>
+      ${rows}
+    </section>`;
+}
+
+function bankCreditChips(credit: BankView['player']['credit']): string {
+  return `
+    <div class="bank-credit">
+      <span>授信基准<b>${money(credit.baseValue)}</b></span>
+      <span>额度<b>${money(credit.limit)}</b></span>
+      <span>已用<b>${money(credit.outstanding)}</b></span>
+      <span class="${credit.available <= 0 ? 'is-warn' : ''}">可借<b>${money(credit.available)}</b></span>
+    </div>`;
+}
+
+function bankLoanCards(loans: BankLoanView[], emptyText: string): string {
+  if (loans.length === 0) return `<p class="fin-hint">${esc(emptyText)}</p>`;
+  return `<ul class="bank-loans">${loans
+    .map((loan) => {
+      const repayable = loan.status !== 'repaid' && loan.outstanding > 0;
+      const arrears = loan.arrearsPrincipal + loan.arrearsInterest;
+      return `
+        <li class="bank-loan status-${esc(loan.status)}">
+          <div class="bank-loan-head">
+            <b>${esc(LOAN_PURPOSE_LABELS[loan.purpose])}</b>
+            <span class="bank-loan-id">${esc(loan.id)}</span>
+            <span class="bank-loan-state">${esc(LOAN_STATUS_LABELS[loan.status])}</span>
+          </div>
+          <div class="bank-loan-grid">
+            <span>未偿本金<b>${money(loan.outstanding)}</b></span>
+            <span>月供本金<b>${money(loan.monthlyPrincipal)}</b></span>
+            <span>月利率<b>${pct(loan.rateMonthly, 2)}</b></span>
+            <span>下一期<b>T${num(loan.nextDueTick)}</b></span>
+            <span>欠款<b class="${arrears > 0 ? 'is-warn' : ''}">${money(arrears)}</b></span>
+            <span>期限<b>${num(loan.termMonths)} 月</b></span>
+          </div>
+          <div class="bank-loan-actions">
+            <button
+              type="button"
+              class="ken-btn ken-btn--grey ken-btn--mini"
+              data-action="repay-loan"
+              data-loan-id="${esc(loan.id)}"
+              data-amount="${BANK_REPAY_AMOUNT}"
+              data-focus-key="repay-${esc(loan.id)}"
+              ${repayable ? '' : 'disabled'}
+              title="${repayable ? '提前偿还 1 万信用点本金；首版不收提前还款费' : '该合同已结清，无需还款'}"
+            >提前还款 1 万</button>
+          </div>
+        </li>`;
+    })
+    .join('')}</ul>`;
+}
+
+function bankLoanButton(
+  options: {
+    ownerKind: 'player' | 'company';
+    ownerId: string;
+    purpose: 'workingCapital' | 'expansion' | 'personal';
+    amount: number;
+    label: string;
+  },
+  available: number,
+): string {
+  const disabled = options.amount > available;
+  const focusKey = `loan-${options.ownerKind}-${options.purpose}-${options.amount}`;
+  return `<button
+    type="button"
+    class="ken-btn ken-btn--blue ken-btn--mini"
+    data-action="take-loan"
+    data-owner-kind="${options.ownerKind}"
+    data-owner-id="${esc(options.ownerId)}"
+    data-purpose="${options.purpose}"
+    data-amount="${options.amount}"
+    data-focus-key="${esc(focusKey)}"
+    ${disabled ? 'disabled' : ''}
+    title="${disabled ? `可借额度 ${money(available)}，不足 ${amountWanLabel(options.amount)}` : `申请${options.label} ${amountWanLabel(options.amount)}；放款后按合同月供还款`}"
+  >申请${options.label} ${amountWanLabel(options.amount)}</button>`;
+}
+
+function renderBankCompanyBlock(companyView: NonNullable<BankView['company']>): string {
+  const available = companyView.credit.available;
+  return `
+    <div class="bank-owner" data-testid="bank-company">
+      <div class="bank-owner-head">
+        <b>${esc(companyView.name)}</b>
+        <span>企业账户</span>
+      </div>
+      <div class="bank-kpis">
+        <span>现金<b>${money(companyView.cash)}</b></span>
+        <span class="${companyView.debt > 0 ? 'is-warn' : ''}">债务<b>${money(companyView.debt)}</b></span>
+        <span>存款<b>${money(companyView.deposits)}</b></span>
+      </div>
+      ${bankCreditChips(companyView.credit)}
+      <div class="bank-actions" role="group" aria-label="企业贷款申请">
+        ${COMPANY_LOAN_PRODUCTS.map((product) =>
+          bankLoanButton(
+            {
+              ownerKind: 'company',
+              ownerId: companyView.companyId,
+              purpose: product.purpose,
+              amount: product.amount,
+              label: product.label,
+            },
+            available,
+          ),
+        ).join('')}
+      </div>
+      <div class="gov-sub-head"><span>企业贷款</span><em>${companyView.loans.length} 笔</em></div>
+      ${bankLoanCards(companyView.loans, '该企业暂无银行贷款。')}
+    </div>`;
+}
+
+/** C. 银行：玩家账户 / 选中企业账户、授信与贷款合同。 */
+export function renderBankSection(store: GameStore, city: City): string {
+  const selected = store.selectedCompany;
+  const selectedCompany = selected && selected.cityId === city.id ? selected : null;
+  const view = store.bankView(selectedCompany?.id ?? null);
+  const player = view.player;
+  const canDeposit = player.cash >= BANK_DEPOSIT_AMOUNT;
+  const canWithdraw = player.deposits >= BANK_WITHDRAW_AMOUNT;
+  const personalAvailable = player.credit.available;
+  const companyView = view.company;
+  return `
+    <section class="panel-section bank-section" data-testid="bank-section">
+      <div class="section-head">
+        <div>
+          <span class="kicker">BANKING</span>
+          <h2>银行 · 存款与贷款</h2>
+        </div>
+        <span class="section-tag">存款月利率 ${pct(view.depositRateMonthly, 2)}</span>
+      </div>
+      <div class="bank-owner" data-testid="bank-player">
+        <div class="bank-owner-head">
+          <b>玩家账户</b>
+          <span>个人</span>
+        </div>
+        <div class="bank-kpis">
+          <span>现金<b>${money(player.cash)}</b></span>
+          <span>存款<b>${money(player.deposits)}</b></span>
+        </div>
+        ${bankCreditChips(player.credit)}
+        <div class="bank-actions" role="group" aria-label="玩家存取款">
+          <button
+            type="button"
+            class="ken-btn ken-btn--green ken-btn--mini"
+            data-action="bank-deposit"
+            data-amount="${BANK_DEPOSIT_AMOUNT}"
+            data-focus-key="bank-deposit"
+            ${canDeposit ? '' : 'disabled'}
+            title="${canDeposit ? '把 10 万现金存入银行，按月计息' : '现金不足 10 万'}"
+          >存款 ${amountWanLabel(BANK_DEPOSIT_AMOUNT)}</button>
+          <button
+            type="button"
+            class="ken-btn ken-btn--grey ken-btn--mini"
+            data-action="bank-withdraw"
+            data-amount="${BANK_WITHDRAW_AMOUNT}"
+            data-focus-key="bank-withdraw"
+            ${canWithdraw ? '' : 'disabled'}
+            title="${canWithdraw ? '从存款取出 10 万现金' : '存款不足 10 万'}"
+          >取款 ${amountWanLabel(BANK_WITHDRAW_AMOUNT)}</button>
+        </div>
+        <div class="gov-sub-head"><span>个人贷款</span><em>${player.loans.length} 笔</em></div>
+        <div class="bank-actions" role="group" aria-label="个人贷款申请">
+          ${PLAYER_LOAN_AMOUNTS.map((amount) =>
+            bankLoanButton(
+              {
+                ownerKind: 'player',
+                ownerId: 'player',
+                purpose: 'personal',
+                amount,
+                label: '个人贷款',
+              },
+              personalAvailable,
+            ),
+          ).join('')}
+        </div>
+        ${bankLoanCards(player.loans, '暂无个人贷款。')}
+      </div>
+      ${
+        companyView
+          ? renderBankCompanyBlock(companyView)
+          : '<p class="fin-hint">在左侧企业列表或地图选中本城企业后，这里显示企业账户、授信与贷款。</p>'
+      }
+      <p class="bank-note">${esc(view.note)}</p>
+      <p class="fin-hint">逾期宽限 ${num(view.graceMonths)} 个月：第 2 个月仍欠付才标记违约；不收罚息，提前还款不收手续费。</p>
+    </section>`;
+}
+
+function renderOperatorElection(
+  election: OperatorElectionView,
+): string {
+  const votesFor = (candidateId: string): number =>
+    election.votes
+      .filter((vote) => vote.candidateId === candidateId)
+      .reduce((total, vote) => total + vote.votingShares, 0);
+  const playerVote =
+    election.votes.find(
+      (vote) => vote.holder.type === 'player' && vote.holder.id === 'player',
+    )?.candidateId ?? null;
+  const candidateRows = election.candidates
+    .map((candidate) => {
+      const isPlayerCandidate = candidate.kind === 'player';
+      const voteCount = votesFor(candidate.candidateId);
+      const isVoted = playerVote === candidate.candidateId;
+      return `
+        <li class="op-candidate ${candidate.isIncumbent ? 'is-incumbent' : ''}">
+          <div class="op-candidate-main">
+            <b>${esc(candidate.name)}</b>
+            ${candidate.isIncumbent ? '<span class="op-tag op-tag--incumbent">现任</span>' : ''}
+            ${isPlayerCandidate ? '<span class="op-tag op-tag--player">玩家候选</span>' : ''}
+            <em>${esc(candidateStyleLabel(candidate.style))}</em>
+          </div>
+          <div class="op-candidate-meta">
+            <span class="op-votes">得票 ${num(voteCount)} 股</span>
+            ${
+              election.canVote
+                ? `<button
+                    type="button"
+                    class="chip-btn ${isVoted ? 'is-selected' : ''}"
+                    data-action="vote-election"
+                    data-motion-id="${esc(election.motionId)}"
+                    data-candidate-id="${esc(candidate.candidateId)}"
+                    data-focus-key="vote-${esc(election.motionId)}-${esc(candidate.candidateId)}"
+                    aria-pressed="${isVoted}"
+                    title="按议案登记日快照股数投给 ${esc(candidate.name)}"
+                  >${isVoted ? '已投' : '投票'}</button>`
+                : ''
+            }
+          </div>
+        </li>`;
+    })
+    .join('');
+  const registerHtml = election.canRegister
+    ? `<div class="op-actions">
+        <button
+          type="button"
+          class="ken-btn ken-btn--blue ken-btn--mini"
+          data-action="register-candidate"
+          data-motion-id="${esc(election.motionId)}"
+          data-focus-key="register-${esc(election.motionId)}"
+          title="登记参选该企业经营者；投票期结束后按得票计票"
+        >登记参选</button>
+      </div>`
+    : election.isCandidate
+      ? '<p class="fin-hint">你已登记参选，等待投票期结束后计票。</p>'
+      : '';
+  return `
+    <div class="detail-subsection op-election" data-testid="company-operator-election">
+      <div class="sub-head">
+        <h4>经营者选任</h4>
+        <span>投票截止 T${num(election.closesTick)}</span>
+      </div>
+      <ul class="op-candidates">${candidateRows}</ul>
+      ${
+        election.canVote
+          ? '<p class="fin-hint">你有表决权，可在截止前改票；票重按议案登记日快照股数计算。</p>'
+          : '<p class="fin-hint">你在本议案登记日没有投票权，只能观察选任过程。</p>'
+      }
+      ${registerHtml}
+    </div>`;
+}
+
+function renderPlayerOperation(company: Company, operation: OperationView): string {
+  const auth = operation.authorization;
+  const plan = operation.standingPlan;
+  const modeButtons = OPERATION_MODE_OPTIONS.map((option) => {
+    const active = operation.mode === option.id;
+    return `<button
+      type="button"
+      class="ken-btn ken-btn--mini op-mode-btn ${active ? 'ken-btn--blue is-active' : 'ken-btn--grey'}"
+      data-action="set-operation-mode"
+      data-company-id="${esc(company.id)}"
+      data-mode="${option.id}"
+      data-focus-key="op-mode-${esc(company.id)}-${option.id}"
+      aria-pressed="${active}"
+      title="${esc(option.hint)}"
+    >${esc(option.label)}</button>`;
+  }).join('');
+  const flag = (allowed: boolean): string =>
+    allowed ? '<b class="is-ok">允许</b>' : '<b class="is-warn">需批准</b>';
+  const presetButtons = (
+    [
+      { preset: 'conservative', label: '保守', hint: '投资 10 万 / 招聘 3 人 / 贷款 10 万，仅允许招聘与调价' },
+      { preset: 'standard', label: '标准', hint: '使用配置默认授权：全开，按默认上限执行' },
+      { preset: 'generous', label: '宽裕', hint: '投资 100 万 / 招聘 20 人 / 贷款 100 万，全开' },
+    ] as const
+  )
+    .map(
+      (option) => `<button
+        type="button"
+        class="ken-btn ken-btn--grey ken-btn--mini"
+        data-action="set-operation-authorization"
+        data-company-id="${esc(company.id)}"
+        data-preset="${option.preset}"
+        data-focus-key="op-auth-${esc(company.id)}-${option.preset}"
+        title="${esc(option.hint)}"
+      >${option.label}</button>`,
+    )
+    .join('');
+  const planInputs = (
+    [
+      { field: 'utilization', label: '目标利用率', value: plan?.utilization ?? 0.8, step: 0.05, min: 0, max: 1 },
+      { field: 'targetJobs', label: '目标岗位', value: plan?.targetJobs ?? company.jobDemand, step: 1, min: 0, max: undefined },
+      { field: 'priceFactor', label: '价格系数', value: plan?.priceFactor ?? 1, step: 0.05, min: 0, max: undefined },
+      { field: 'investmentPerMonth', label: '每月投资', value: plan?.investmentPerMonth ?? 0, step: 10_000, min: 0, max: undefined },
+    ] as const
+  )
+    .map(
+      (field) => `
+        <label class="op-plan-field">
+          <span>${esc(field.label)}</span>
+          <input
+            type="number"
+            data-plan-field="${field.field}"
+            data-focus-key="plan-${esc(company.id)}-${field.field}"
+            value="${field.value}"
+            step="${field.step}"
+            min="${field.min}"
+            ${field.max === undefined ? '' : `max="${field.max}"`}
+            inputmode="decimal"
+          />
+        </label>`,
+    )
+    .join('');
+  const planState = plan
+    ? `当前计划：利用率 ${pct(plan.utilization, 1)} · 岗位 ${num(plan.targetJobs)} · 价格系数 ${num(plan.priceFactor, 2)} · 每月投资 ${money(plan.investmentPerMonth)}；到期 T${num(plan.expiresTick)}。`
+    : '尚未设定持续经营计划；保存后持续生效，直到修改或到期。';
+  const pending = operation.proposals.filter((proposal) => proposal.status === 'pending');
+  const proposalRows =
+    operation.proposals.length === 0
+      ? '<p class="fin-hint">暂无待处理提案。</p>'
+      : `<ul class="op-proposals">${operation.proposals
+          .map(
+            (proposal) => `
+              <li class="op-proposal status-${esc(proposal.status)}">
+                <div class="op-proposal-head">
+                  <b>${esc(proposal.title)}</b>
+                  <span>${esc(PROPOSAL_STATUS_LABELS[proposal.status])}</span>
+                </div>
+                <p class="op-proposal-summary">${esc(proposal.summary)}</p>
+                ${
+                  proposal.reasons.length > 0
+                    ? `<ul class="op-proposal-reasons">${proposal.reasons
+                        .slice(0, 3)
+                        .map((reason) => `<li>${esc(reason)}</li>`)
+                        .join('')}</ul>`
+                    : ''
+                }
+                <div class="op-proposal-meta">
+                  <span>金额 ${money(proposal.amount)}</span>
+                  <span>提出 T${num(proposal.createdTick)}</span>
+                  <span>到期 T${num(proposal.expiresTick)}</span>
+                </div>
+                ${
+                  proposal.status === 'pending'
+                    ? `<div class="op-proposal-actions">
+                        <button
+                          type="button"
+                          class="ken-btn ken-btn--green ken-btn--mini"
+                          data-action="decide-proposal"
+                          data-proposal-id="${esc(proposal.id)}"
+                          data-approve="1"
+                          data-focus-key="approve-${esc(proposal.id)}"
+                          title="批准并立即执行该提案"
+                        >批准</button>
+                        <button
+                          type="button"
+                          class="ken-btn ken-btn--red ken-btn--mini"
+                          data-action="decide-proposal"
+                          data-proposal-id="${esc(proposal.id)}"
+                          data-approve="0"
+                          data-focus-key="reject-${esc(proposal.id)}"
+                          title="拒绝该提案；同一事项在冷却期内不会重复提出"
+                        >拒绝</button>
+                      </div>`
+                    : ''
+                }
+              </li>`,
+          )
+          .join('')}</ul>`;
+  return `
+    <div class="detail-subsection op-operation" data-testid="company-operator-operation">
+      <div class="sub-head">
+        <h4>你的经营模式</h4>
+        <span>${esc(operation.modeLabel)}</span>
+      </div>
+      <div class="op-modes" role="group" aria-label="经营模式">${modeButtons}</div>
+      <div class="op-auth">
+        <div class="op-auth-values">
+          <span>月投资上限<b>${money(auth.maxInvestmentPerMonth)}</b></span>
+          <span>月招聘上限<b>${num(auth.maxHiresPerMonth)} 人</b></span>
+          <span>单笔贷款上限<b>${money(auth.maxLoanAmount)}</b></span>
+        </div>
+        <div class="op-auth-flags">
+          <span>投资${flag(auth.allowInvestment)}</span>
+          <span>招聘${flag(auth.allowHiring)}</span>
+          <span>贷款${flag(auth.allowLoan)}</span>
+          <span>调价${flag(auth.allowPriceAdjust)}</span>
+        </div>
+        <div class="op-presets" role="group" aria-label="授权预设">${presetButtons}</div>
+      </div>
+      <div class="op-plan">
+        <div class="gov-sub-head"><span>持续经营计划</span><em>到期自动失效</em></div>
+        <p class="op-plan-state">${esc(planState)}</p>
+        <div class="op-plan-grid">${planInputs}</div>
+        <div class="op-actions">
+          <button
+            type="button"
+            class="ken-btn ken-btn--green ken-btn--mini"
+            data-action="set-standing-plan"
+            data-company-id="${esc(company.id)}"
+            data-focus-key="save-plan-${esc(company.id)}"
+            title="保存 4 项计划数值；计划持续生效，直到修改或到期"
+          >保存计划</button>
+        </div>
+      </div>
+      <div class="gov-sub-head"><span>提案</span><em>${pending.length} 项待批准</em></div>
+      ${proposalRows}
+    </div>`;
+}
+
+/** D. 企业经营者区块：现任、选任状态与玩家经营模式。 */
+export function renderCompanyOperatorBlock(store: GameStore, company: Company): string {
+  const view = store.operatorView(company.id);
+  if (!view) return '';
+  const election = view.election;
+  const operation = view.operation;
+  const electionHtml = election ? renderOperatorElection(election) : '';
+  const operationHtml = operation ? renderPlayerOperation(company, operation) : '';
+  const idleNote =
+    !view.isPlayerOperator && !election
+      ? '<p class="fin-hint">你目前不经营该企业；持有有投票权股份可在选任时参选。</p>'
+      : '';
+  return `
+    <section class="detail-subsection" data-testid="company-operator">
+      <div class="sub-head">
+        <h4>经营者与经营模式</h4>
+        <span class="mini-tag">${esc(view.isPlayerOperator ? '你在经营' : operatorBasisLabel(view.basis))}</span>
+      </div>
+      <div class="op-incumbent">
+        <div class="op-incumbent-main">
+          <b>${esc(view.operatorName)}</b>
+          <span class="op-style">${esc(view.styleLabel)}</span>
+          <em>任职依据：${esc(operatorBasisLabel(view.basis))}</em>
+          <em>${view.termMonthsLeft === null ? '任期：未设任期' : `剩余任期：${num(view.termMonthsLeft)} 个月`}</em>
+        </div>
+        <p class="op-style-note">${esc(view.styleDescription)}</p>
+      </div>
+      ${electionHtml}
+      ${operationHtml}
+      ${idleNote}
+    </section>`;
 }
 
 export function renderRightCity(store: GameStore, state: PanelState): string {
@@ -2317,12 +2988,15 @@ export function renderRightCity(store: GameStore, state: PanelState): string {
       </div>
       ${renderKpis(store, city)}
       ${renderPopulationSection(city)}
+      ${renderPopulationStrataSection(store, city)}
       ${renderPulse(city)}
     </section>
     ${renderGovernmentSection(store, city)}
     ${renderTransportSection(store, city)}
+    ${renderTalentMarketSection(store, city)}
     ${renderSystems(store, city)}
     ${renderMarket(city, state.showAllGoods)}
+    ${renderBankSection(store, city)}
     ${renderAgreementsSection(store, city)}`;
 }
 

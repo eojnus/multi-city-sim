@@ -123,6 +123,45 @@ const TOAST_ICONS: Record<string, string> = {
   error: '×',
 };
 
+/**
+ * 授权预设：这是 UI 层的档位映射，不是模拟规则。
+ * 三档按钮把玩家选择翻译成 setOperationAuthorization 的 patch；模拟层仍负责校验与落地。
+ * 标准档优先读取 config.management.defaultAuthorization；读不到时回退 30 万 / 5 人 / 20 万 / 全开。
+ */
+type AuthorizationPatch = Parameters<GameStore['setOperationAuthorization']>[1];
+
+const DEFAULT_AUTHORIZATION = DEMO_CONFIG.management.defaultAuthorization;
+
+const AUTHORIZATION_PRESETS: Record<'conservative' | 'standard' | 'generous', AuthorizationPatch> = {
+  conservative: {
+    maxInvestmentPerMonth: 100_000,
+    maxHiresPerMonth: 3,
+    maxLoanAmount: 100_000,
+    allowInvestment: false,
+    allowHiring: true,
+    allowLoan: false,
+    allowPriceAdjust: true,
+  },
+  standard: {
+    maxInvestmentPerMonth: DEFAULT_AUTHORIZATION.maxInvestmentPerMonth ?? 300_000,
+    maxHiresPerMonth: DEFAULT_AUTHORIZATION.maxHiresPerMonth ?? 5,
+    maxLoanAmount: DEFAULT_AUTHORIZATION.maxLoanAmount ?? 200_000,
+    allowInvestment: DEFAULT_AUTHORIZATION.allowInvestment ?? true,
+    allowHiring: DEFAULT_AUTHORIZATION.allowHiring ?? true,
+    allowLoan: DEFAULT_AUTHORIZATION.allowLoan ?? true,
+    allowPriceAdjust: DEFAULT_AUTHORIZATION.allowPriceAdjust ?? true,
+  },
+  generous: {
+    maxInvestmentPerMonth: 1_000_000,
+    maxHiresPerMonth: 20,
+    maxLoanAmount: 1_000_000,
+    allowInvestment: true,
+    allowHiring: true,
+    allowLoan: true,
+    allowPriceAdjust: true,
+  },
+};
+
 export class GameUI {
   protected overlay: HTMLDivElement | null = null;
   private leftScroll: HTMLDivElement | null = null;
@@ -599,6 +638,12 @@ export class GameUI {
     });
   }
 
+  /** 非法/缺失 dataset 的统一处理：toast 提示并重绘，不抛异常。 */
+  private rejectAction(message: string): void {
+    this.store.toast(message, 'error');
+    this.store.emit();
+  }
+
   private handleAction(element: HTMLElement): void {
     const action = element.dataset.action;
     if (!action) return;
@@ -787,6 +832,164 @@ export class GameUI {
       case 'expand-capacity':
         if (companyId) this.store.expandCapacity(companyId);
         break;
+      // ---------------------------------------------------------- v0.4 银行
+      case 'bank-deposit': {
+        if (!Number.isFinite(amount) || amount <= 0) {
+          this.rejectAction('存款金额无效。');
+          break;
+        }
+        this.store.depositToBank(amount);
+        break;
+      }
+      case 'bank-withdraw': {
+        if (!Number.isFinite(amount) || amount <= 0) {
+          this.rejectAction('取款金额无效。');
+          break;
+        }
+        this.store.withdrawFromBank(amount);
+        break;
+      }
+      case 'take-loan': {
+        const ownerKind = element.dataset.ownerKind;
+        const ownerId = element.dataset.ownerId;
+        const purpose = element.dataset.purpose;
+        if (ownerKind !== 'player' && ownerKind !== 'company') {
+          this.rejectAction('贷款主体无效。');
+          break;
+        }
+        if (!ownerId) {
+          this.rejectAction('贷款主体缺失。');
+          break;
+        }
+        if (purpose !== 'workingCapital' && purpose !== 'expansion' && purpose !== 'personal') {
+          this.rejectAction('贷款用途无效。');
+          break;
+        }
+        if (!Number.isFinite(amount) || amount <= 0) {
+          this.rejectAction('贷款金额无效。');
+          break;
+        }
+        this.store.takeLoan(ownerKind, ownerId, purpose, amount);
+        break;
+      }
+      case 'repay-loan': {
+        const loanId = element.dataset.loanId;
+        if (!loanId) {
+          this.rejectAction('贷款合同缺失。');
+          break;
+        }
+        if (!Number.isFinite(amount) || amount <= 0) {
+          this.rejectAction('还款金额无效。');
+          break;
+        }
+        this.store.repayBankLoan(loanId, amount);
+        break;
+      }
+      // ---------------------------------------------------------- v0.4 经营者与选任
+      case 'set-operation-mode': {
+        const mode = element.dataset.mode;
+        if (!companyId) {
+          this.rejectAction('企业参数缺失。');
+          break;
+        }
+        if (mode !== 'manual' && mode !== 'assisted' && mode !== 'delegated') {
+          this.rejectAction('经营模式无效。');
+          break;
+        }
+        this.store.setOperationMode(companyId, mode);
+        break;
+      }
+      case 'set-operation-authorization': {
+        const preset = element.dataset.preset;
+        if (!companyId) {
+          this.rejectAction('企业参数缺失。');
+          break;
+        }
+        if (preset !== 'conservative' && preset !== 'standard' && preset !== 'generous') {
+          this.rejectAction('授权预设无效。');
+          break;
+        }
+        this.store.setOperationAuthorization(companyId, AUTHORIZATION_PRESETS[preset]);
+        break;
+      }
+      case 'set-standing-plan': {
+        if (!companyId) {
+          this.rejectAction('企业参数缺失。');
+          break;
+        }
+        // 计划数值用按钮所在经营者区块内的 4 个 input 组装，避免依赖 UI 内部状态。
+        const block = element.closest<HTMLElement>('[data-testid="company-operator"]');
+        const inputs = block?.querySelectorAll<HTMLInputElement>('[data-plan-field]') ?? null;
+        if (!inputs || inputs.length === 0) {
+          this.rejectAction('找不到经营计划输入框。');
+          break;
+        }
+        const planValues: Partial<
+          Record<'utilization' | 'targetJobs' | 'priceFactor' | 'investmentPerMonth', number>
+        > = {};
+        let invalid = false;
+        inputs.forEach((input) => {
+          const field = input.dataset.planField;
+          if (
+            field !== 'utilization' &&
+            field !== 'targetJobs' &&
+            field !== 'priceFactor' &&
+            field !== 'investmentPerMonth'
+          ) {
+            return;
+          }
+          const raw = input.value.trim();
+          const parsed = Number(raw);
+          if (raw === '' || !Number.isFinite(parsed)) {
+            invalid = true;
+            return;
+          }
+          planValues[field] = parsed;
+        });
+        if (
+          invalid ||
+          planValues.utilization === undefined ||
+          planValues.targetJobs === undefined ||
+          planValues.priceFactor === undefined ||
+          planValues.investmentPerMonth === undefined
+        ) {
+          this.rejectAction('持续经营计划需要 4 项有效数值。');
+          break;
+        }
+        this.store.setStandingPlan(companyId, {
+          utilization: planValues.utilization,
+          targetJobs: planValues.targetJobs,
+          priceFactor: planValues.priceFactor,
+          investmentPerMonth: planValues.investmentPerMonth,
+        });
+        break;
+      }
+      case 'decide-proposal': {
+        const proposalId = element.dataset.proposalId;
+        if (!proposalId) {
+          this.rejectAction('提案参数缺失。');
+          break;
+        }
+        this.store.decideProposal(proposalId, element.dataset.approve === '1');
+        break;
+      }
+      case 'register-candidate': {
+        if (!motionId) {
+          this.rejectAction('选任议案参数缺失。');
+          break;
+        }
+        this.store.registerCandidate(motionId);
+        break;
+      }
+      case 'vote-election': {
+        const candidateId = element.dataset.candidateId;
+        if (!motionId || !candidateId) {
+          this.rejectAction('选票参数缺失。');
+          break;
+        }
+        this.store.voteElection(motionId, candidateId);
+        break;
+      }
       case 'toggle-goods':
         this.showAllGoods = !this.showAllGoods;
         this.renderRightPanel();

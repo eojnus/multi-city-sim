@@ -7055,3 +7055,677 @@ kbd {
     max-height: 240px;
   }
 }
+
+/* ===== 组件：人口阶层 · 人才市场 · 银行 · 经营者 ===== */
+
+.strata-section .strata-note,
+.talent-section .talent-note {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 7.4px;
+  line-height: 1.5;
+}
+
+/* ---------------------------------------------------------------- 人口阶层 */
+
+.strata-tiers .table-wrap {
+  margin-top: 2px;
+}
+
+.strata-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 7.4px;
+}
+
+.strata-table th,
+.strata-table td {
+  padding: 2px 3px;
+  border-bottom: 1px dotted rgba(124, 196, 205, 0.12);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.strata-table thead th {
+  color: var(--faint);
+  font-size: 6.8px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.strata-table thead th:first-child,
+.strata-table th[scope="row"] {
+  text-align: left;
+}
+
+.strata-table th[scope="row"] {
+  overflow: hidden;
+  max-width: 92px;
+  color: var(--muted);
+  font-weight: 500;
+  text-overflow: ellipsis;
+}
+
+.strata-table td {
+  color: var(--text);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.strata-table tr.total th,
+.strata-table tr.total td {
+  border-top: 1px solid var(--line);
+  border-bottom: 0;
+  color: var(--gold);
+}
+
+.strata-scroll {
+  max-height: 132px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* ---------------------------------------------------------------- 人才市场 */
+
+.talent-list {
+  max-height: 180px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  list-style: none;
+}
+
+.talent-row {
+  padding: 4px 0;
+  border-bottom: 1px dotted rgba(124, 196, 205, 0.12);
+}
+
+.talent-main {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.talent-main b {
+  color: var(--text);
+  font-size: 8px;
+  font-weight: 500;
+}
+
+.talent-style {
+  padding: 0 4px;
+  border: 1px solid rgba(95, 227, 192, 0.28);
+  border-radius: 3px;
+  color: var(--teal);
+  font-size: 6.6px;
+  line-height: 1.3;
+}
+
+.talent-main em {
+  margin-left: auto;
+  color: var(--gold);
+  font-family: var(--mono);
+  font-size: 6.8px;
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.talent-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  margin-top: 1px;
+  color: var(--faint);
+  font-size: 6.6px;
+}
+
+.talent-status {
+  color: var(--teal);
+}
+
+.talent-empty {
+  margin: 0;
+  color: var(--faint);
+  font-size: 7px;
+}
+
+/* ---------------------------------------------------------------- 银行 */
+
+.bank-owner {
+  margin-top: 6px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.012);
+}
+
+.bank-owner + .bank-owner {
+  margin-top: 8px;
+}
+
+.bank-owner-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.bank-owner-head b {
+  color: var(--text);
+  font-size: 8.4px;
+  font-weight: 600;
+}
+
+.bank-owner-head span {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 6.8px;
+}
+
+.bank-kpis {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  color: var(--faint);
+  font-size: 7px;
+}
+
+.bank-kpis b {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 7.6px;
+  font-weight: 500;
+}
+
+.bank-kpis .is-warn b,
+.bank-credit .is-warn b {
+  color: var(--orange);
+}
+
+.bank-credit {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  margin-top: 3px;
+  padding-top: 3px;
+  border-top: 1px dashed rgba(124, 196, 205, 0.14);
+  color: var(--faint);
+  font-size: 6.8px;
+}
+
+.bank-credit b {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 7.4px;
+  font-weight: 500;
+}
+
+.bank-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.bank-actions .ken-btn {
+  height: 23px;
+  padding: 0 7px;
+  font-size: 7.2px;
+  white-space: nowrap;
+}
+
+.bank-loans {
+  margin: 3px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.bank-loan {
+  padding: 4px 0;
+  border-bottom: 1px dotted rgba(124, 196, 205, 0.12);
+}
+
+.bank-loan-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.bank-loan-head b {
+  color: var(--text);
+  font-size: 7.8px;
+  font-weight: 500;
+}
+
+.bank-loan-id {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 6.4px;
+}
+
+.bank-loan-state {
+  margin-left: auto;
+  color: var(--teal);
+  font-size: 6.6px;
+  white-space: nowrap;
+}
+
+.bank-loan.status-defaulted .bank-loan-state {
+  color: var(--red);
+}
+
+.bank-loan.status-repaid .bank-loan-state {
+  color: var(--faint);
+}
+
+.bank-loan-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 2px 6px;
+  margin-top: 2px;
+  color: var(--faint);
+  font-size: 6.6px;
+}
+
+.bank-loan-grid span {
+  min-width: 0;
+}
+
+.bank-loan-grid b {
+  display: block;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 7.2px;
+  font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.bank-loan-grid b.is-warn {
+  color: var(--orange);
+}
+
+.bank-loan-actions {
+  margin-top: 3px;
+}
+
+.bank-loan-actions .ken-btn {
+  height: 21px;
+  padding: 0 6px;
+  font-size: 6.9px;
+}
+
+.bank-note {
+  margin: 6px 0 0;
+  padding: 4px 6px;
+  border-left: 2px solid rgba(242, 193, 78, 0.36);
+  background: rgba(3, 10, 17, 0.3);
+  color: var(--muted);
+  font-size: 6.9px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+/* ---------------------------------------------------------------- 企业经营者 */
+
+.op-incumbent-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 3px 7px;
+  color: var(--faint);
+  font-size: 7.2px;
+}
+
+.op-incumbent-main b {
+  color: var(--text);
+  font-size: 8.6px;
+  font-weight: 600;
+}
+
+.op-incumbent-main em {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 6.8px;
+  font-style: normal;
+}
+
+.op-style {
+  padding: 0 4px;
+  border: 1px solid rgba(242, 193, 78, 0.3);
+  border-radius: 3px;
+  color: var(--gold);
+  font-size: 6.6px;
+  line-height: 1.3;
+}
+
+.op-style-note {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 7px;
+  line-height: 1.45;
+}
+
+.op-election,
+.op-operation {
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px solid rgba(124, 196, 205, 0.13);
+}
+
+.op-candidates {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.op-candidate {
+  padding: 3px 0;
+  border-bottom: 1px dotted rgba(124, 196, 205, 0.1);
+}
+
+.op-candidate-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 3px 5px;
+}
+
+.op-candidate-main b {
+  color: var(--text);
+  font-size: 7.8px;
+  font-weight: 500;
+}
+
+.op-candidate-main em {
+  color: var(--faint);
+  font-size: 6.6px;
+  font-style: normal;
+}
+
+.op-candidate-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.op-votes {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 6.9px;
+}
+
+.op-candidate .chip-btn {
+  height: 18px;
+  padding: 0 6px;
+  font-size: 6.6px;
+}
+
+.op-tag {
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--muted);
+  font-size: 6.2px;
+  line-height: 1.3;
+}
+
+.op-tag--incumbent {
+  border-color: rgba(242, 193, 78, 0.32);
+  color: var(--gold);
+}
+
+.op-tag--player {
+  border-color: rgba(95, 227, 192, 0.32);
+  color: var(--teal);
+}
+
+.op-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.op-actions .ken-btn {
+  height: 22px;
+  padding: 0 7px;
+  font-size: 7px;
+}
+
+.op-modes,
+.op-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.op-modes {
+  margin-bottom: 5px;
+}
+
+.op-mode-btn {
+  height: 22px;
+  padding: 0 8px;
+  font-size: 7.2px;
+}
+
+.op-mode-btn.is-active {
+  outline: 1px solid rgba(242, 193, 78, 0.55);
+  outline-offset: 1px;
+}
+
+.op-auth {
+  padding: 4px 5px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.012);
+}
+
+.op-auth-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  color: var(--faint);
+  font-size: 6.8px;
+}
+
+.op-auth-values b {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 7.4px;
+  font-weight: 500;
+}
+
+.op-auth-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  margin-top: 3px;
+  color: var(--faint);
+  font-size: 6.8px;
+}
+
+.op-auth-flags b {
+  margin-left: 3px;
+  font-size: 6.8px;
+  font-weight: 500;
+}
+
+.op-auth-flags b.is-ok {
+  color: var(--teal);
+}
+
+.op-auth-flags b.is-warn {
+  color: var(--orange);
+}
+
+.op-presets {
+  margin-top: 4px;
+}
+
+.op-presets .ken-btn {
+  height: 21px;
+  padding: 0 8px;
+  font-size: 7px;
+}
+
+.op-plan {
+  margin-top: 6px;
+}
+
+.op-plan-state {
+  margin: 0 0 4px;
+  color: var(--muted);
+  font-size: 6.9px;
+  line-height: 1.45;
+}
+
+.op-plan-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px 6px;
+}
+
+.op-plan-field {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  color: var(--faint);
+  font-size: 6.4px;
+}
+
+.op-plan-field input {
+  width: 100%;
+  height: 20px;
+  padding: 0 5px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: rgba(3, 10, 17, 0.5);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 7.2px;
+}
+
+.op-plan-field input:focus-visible {
+  outline: 1px solid var(--gold);
+  outline-offset: 1px;
+}
+
+.op-proposals {
+  margin: 3px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.op-proposal {
+  padding: 4px 0;
+  border-bottom: 1px dotted rgba(124, 196, 205, 0.1);
+}
+
+.op-proposal-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.op-proposal-head b {
+  color: var(--text);
+  font-size: 7.8px;
+  font-weight: 500;
+}
+
+.op-proposal-head span {
+  color: var(--faint);
+  font-size: 6.4px;
+  white-space: nowrap;
+}
+
+.op-proposal.status-pending .op-proposal-head span {
+  color: var(--gold);
+}
+
+.op-proposal-summary {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 7px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.op-proposal-reasons {
+  margin: 2px 0 0;
+  padding-left: 12px;
+  color: var(--faint);
+  font-size: 6.6px;
+  line-height: 1.4;
+}
+
+.op-proposal-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  margin-top: 2px;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 6.6px;
+}
+
+.op-proposal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 3px;
+}
+
+.op-proposal-actions .ken-btn {
+  height: 21px;
+  padding: 0 8px;
+  font-size: 7px;
+}
+
+@media (max-width: 1180px) {
+  .strata-table {
+    font-size: 7px;
+  }
+
+  .strata-scroll {
+    max-height: 118px;
+  }
+
+  .talent-list {
+    max-height: 150px;
+  }
+
+  .bank-loan-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .bank-credit,
+  .op-auth-flags {
+    gap: 2px 6px;
+  }
+}
+
+@media (max-height: 720px) {
+  .strata-scroll {
+    max-height: 96px;
+  }
+
+  .talent-list {
+    max-height: 120px;
+  }
+
+  .bank-loans {
+    max-height: 150px;
+    overflow-y: auto;
+  }
+}
