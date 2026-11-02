@@ -2,10 +2,14 @@ import type {
   Company,
   HolderRef,
   InvestmentResult,
+  MayorFiscalView,
+  OwnBondHoldingView,
   PlayerNotification,
+  PublicBondOfferView,
   ShareKind,
   TradeActionResult,
   TradeFlow,
+  ViewerIdentity,
   WorldState,
 } from '../simulation/contracts/types';
 import { Simulation } from '../simulation/core/simulation';
@@ -41,8 +45,21 @@ import {
   markAllNotificationsRead,
   markNotificationRead,
   unreadNotificationCount,
-  visibleNotifications,
+  // 旧函数只负责“新在前”的展示顺序；权限过滤走 v0.7 的 fiscal-view（渲染期按当前身份重算）。
+  visibleNotifications as orderNotifications,
 } from '../simulation/notifications/notifications';
+import {
+  buildMayorFiscalView,
+  buildOwnBondHoldingViews,
+  buildPublicBondOffer,
+  viewerIdentity,
+  visibleLogEntries,
+  visibleNotifications as filterVisibleNotifications,
+} from '../simulation/government/fiscal-view';
+import {
+  issueGovernmentBond,
+  subscribeGovernmentBond,
+} from '../simulation/government/bonds';
 import {
   cancelAgreement,
   applyAutoDecisions,
@@ -560,13 +577,61 @@ export class GameStore {
 
   /** 通知中心数据：已按玩家身份与持股权利筛选，不含模拟日志。 */
   get notifications(): PlayerNotification[] {
-    // 补充指令 §7：城市级通知只能在"当前担任该市市长"期间展示。
-    // 旧存档里的城市通知在换任 / 离职 / 破产重选后仍留在通知列表，必须在展示期重过滤；
-    // 模拟层在生成时也校验一次（notifications.ts notificationVisible），这里是第二道防线。
-    const mayorCityId = this.mayorCityId;
-    return visibleNotifications(this.world).filter(
-      (notice) => notice.audience !== 'city' || (notice.cityId ?? null) === mayorCityId,
+    // 补充指令 §7 / IMPLEMENTATION_v0.7 §8：权限只在渲染期按**当前** viewer 计算（不缓存）。
+    // 旧存档里的城市通知在换任 / 离职 / 破产重选后仍留在通知列表，必须在这里重过滤；
+    // fiscal-view 负责 visibility（public/mayor+cityId），audience=city 再按当前市长兜底。
+    const viewer = this.viewer;
+    const allowed = new Set(
+      filterVisibleNotifications(this.world, viewer).map((notice) => notice.id),
     );
+    return orderNotifications(this.world)
+      .filter((notice) => allowed.has(notice.id))
+      .filter(
+        (notice) =>
+          notice.audience !== 'city' || (notice.cityId ?? null) === viewer.mayorCityId,
+      );
+  }
+
+  /** 当前查看者身份（只含权限判断字段；每次现算，换任/读档立即生效）。 */
+  get viewer(): ViewerIdentity {
+    return viewerIdentity(this.world);
+  }
+
+  /** 事件日志的可见条目（按当前身份重过滤；面板不得直接读 world.log）。 */
+  visibleLog(): ReturnType<typeof visibleLogEntries> {
+    return visibleLogEntries(this.world, this.viewer);
+  }
+
+  /**
+   * 市长财政视图（唯一允许给界面用的财政形状）。
+   * 非该城现任市长返回 null，调用方必须按 null 处理，不得回退读 city.treasury。
+   */
+  fiscalView(cityId: string): MayorFiscalView | null {
+    const city = this.world.cities.find((entry) => entry.id === cityId);
+    if (!city) return null;
+    return buildMayorFiscalView(this.world, city, DEMO_CONFIG, this.viewer);
+  }
+
+  /** 单批发债的公开投资信息（白名单形状；批次不存在返回 null）。 */
+  publicBondView(issuanceId: string): PublicBondOfferView | null {
+    return buildPublicBondOffer(this.world, issuanceId);
+  }
+
+  /** 债券市场公开信息（不含发行计划总额、总售额、政府总债务）。 */
+  get bondMarketOffers(): PublicBondOfferView[] {
+    const issuances = this.world.bonds?.issuances ?? [];
+    return issuances
+      .map((issuance) => buildPublicBondOffer(this.world, issuance.id))
+      .filter((offer): offer is PublicBondOfferView => offer !== null)
+      .sort(
+        (a, b) =>
+          a.maturityTick - b.maturityTick || a.issuanceId.localeCompare(b.issuanceId),
+      );
+  }
+
+  /** 玩家自己的持债记录（任何玩家都能看自己的）。 */
+  get ownBondHoldings(): OwnBondHoldingView[] {
+    return buildOwnBondHoldingViews(this.world, this.viewer.playerId);
   }
 
   get unreadNotificationCount(): number {
@@ -1083,6 +1148,75 @@ export class GameStore {
       return false;
     }
     this.toast(result.note ?? '交通建设已开工。', 'success');
+    void this.autosave();
+    this.emit();
+    return true;
+  }
+
+  // ---- v0.7 债券：发债（仅市长）与认购（所有玩家） ----
+
+  /**
+   * 发起债券发行（仅该城市现任市长）。
+   * 计划份数、两次发行间隔、单次上限均由模拟层校验；界面只发起命令、不预判额度。
+   */
+  issueBond(cityId: string, planUnits: number): boolean {
+    if (!playerIsMayor(this.world, cityId)) {
+      this.toast('只有该城市市长可以发起债券发行。', 'warning');
+      this.emit();
+      return false;
+    }
+    const city = this.world.cities.find((entry) => entry.id === cityId);
+    if (!city) {
+      this.toast('城市不存在，无法发行债券。', 'error');
+      this.emit();
+      return false;
+    }
+    const result = issueGovernmentBond(
+      this.world,
+      city,
+      DEMO_CONFIG,
+      planUnits,
+      this.world.time.tick,
+    );
+    if (!result.ok) {
+      this.toast(result.error ?? '债券发行失败', 'error');
+      this.emit();
+      return false;
+    }
+    this.toast(`已发起债券发行：计划 ${planUnits} 份，等待认购。`, 'success');
+    void this.autosave();
+    this.emit();
+    return true;
+  }
+
+  /**
+   * 认购债券（任何玩家；用真实可用资金，禁止贷款购债）。
+   * 超过可售份数或资金不足时模拟层按可成交份数部分成交，界面如实反馈成交结果。
+   */
+  subscribeBond(issuanceId: string, units: number): boolean {
+    const result = subscribeGovernmentBond(
+      this.world,
+      DEMO_CONFIG,
+      issuanceId,
+      { kind: 'player', id: this.viewer.playerId },
+      units,
+      this.world.time.tick,
+    );
+    if (!result.ok) {
+      this.toast(result.error ?? '认购失败', 'error');
+      this.emit();
+      return false;
+    }
+    if (result.units <= 0) {
+      this.toast('没有可成交的份数；请检查可认购份数与可用资金。', 'warning');
+      this.emit();
+      return false;
+    }
+    const partial = result.units < units ? `（申请 ${units} 份，按可成交部分成交）` : '';
+    this.toast(
+      `认购成功：${result.units} 份，实付 ${result.principal.toFixed(0)} 信用点${partial}。`,
+      'success',
+    );
     void this.autosave();
     this.emit();
     return true;
