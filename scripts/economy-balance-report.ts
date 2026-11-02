@@ -56,17 +56,83 @@ interface BondObservation {
     unsoldUnits: number;
     bankAdvance: number;
     couponPaid: number;
-    couponArrears: number;
+    /** 当期"新增欠付利息"无法从账本期末快照反推 → 记 null；欠付余额看 D3 的 bondAccruedInterest 逐月序列。 */
+    couponArrears: number | null;
     principalRepaid: number;
   }>;
 }
 
-function collectBonds(world: WorldState): BondObservation | null {
-  // 块 1 落地前：world.bonds 为可选字段（v0.7 契约预留）；即便存在也不臆造结构。
-  const bonds = (world as { bonds?: unknown }).bonds;
-  if (!bonds || typeof bonds !== 'object') return null;
-  // TODO(块6)：块 1 落地后按 WorldState.bonds 实际结构映射 issues/months；当前不实现。
+function holderCityId(world: WorldState, holder: { kind: string; id: string }): string | null {
+  if (holder.kind === 'player') return world.player.homeCityId;
+  if (holder.kind === 'company') return world.companies.find((item) => item.id === holder.id)?.cityId ?? null;
+  if (holder.kind === 'investorGroup') return world.investorGroups.find((item) => item.id === holder.id)?.cityId ?? null;
   return null;
+}
+
+function collectBonds(world: WorldState): BondObservation | null {
+  // world.bonds 未初始化（旧存档/块 0 前）→ null（"机制未落地"，不是"无发行"）。
+  const bonds = world.bonds;
+  if (!bonds || !Array.isArray(bonds.issuances)) return null;
+  const cityNames = new Map(world.cities.map((city) => [city.id, city.name]));
+  const issues: BondIssueRow[] = bonds.issuances.map((issuance) => {
+    const holdings = bonds.holdings.filter((item) => item.issuanceId === issuance.id);
+    return {
+      issueId: issuance.id,
+      cityId: issuance.cityId,
+      cityName: cityNames.get(issuance.cityId) ?? issuance.cityId,
+      tick: issuance.issuedTick,
+      plannedUnits: issuance.planUnits,
+      soldUnits: issuance.soldUnits,
+      unsoldUnits: issuance.unsoldUnits,
+      coverageRatio: issuance.planUnits > 0 ? issuance.soldUnits / issuance.planUnits : null,
+      holders: holdings.map((holding) => {
+        const holderCity = holderCityId(world, holding.holder);
+        return {
+          holderType: holding.holder.kind,
+          units: holding.units,
+          crossCity: holderCity !== null && holderCity !== issuance.cityId,
+        };
+      }),
+      couponPaid: issuance.interestPaid,
+      couponArrears: issuance.arrearsInterest,
+      principalRepaid: issuance.principalRepaid,
+      bankAdvance: issuance.bankAdvancedAmount,
+    };
+  });
+  const monthMap = new Map<number, BondObservation['months'][number]>();
+  const ensureMonth = (tick: number): BondObservation['months'][number] => {
+    let row = monthMap.get(tick);
+    if (!row) {
+      row = {
+        tick,
+        issues: 0,
+        plannedUnits: 0,
+        soldUnits: 0,
+        unsoldUnits: 0,
+        bankAdvance: 0,
+        couponPaid: 0,
+        couponArrears: null,
+        principalRepaid: 0,
+      };
+      monthMap.set(tick, row);
+    }
+    return row;
+  };
+  for (const issuance of bonds.issuances) {
+    const row = ensureMonth(issuance.issuedTick);
+    row.issues += 1;
+    row.plannedUnits += issuance.planUnits;
+    row.soldUnits += issuance.soldUnits;
+    row.unsoldUnits += issuance.unsoldUnits;
+  }
+  for (const payment of bonds.payments) {
+    const row = ensureMonth(payment.tick);
+    if (payment.kind === 'coupon') row.couponPaid += payment.interestPaid;
+    row.principalRepaid += payment.principalPaid;
+    if (payment.fundedByBankAdvance) row.bankAdvance += payment.principalPaid + payment.interestPaid;
+  }
+  const months = [...monthMap.values()].sort((a, b) => a.tick - b.tick);
+  return { issues, months };
 }
 
 // ------------------------------------------------------------------ 参数解析
@@ -732,10 +798,26 @@ function run(months: number): { report: Report; elapsedMs: number } {
         `${highDividend.length > 3 ? ' 等' : ''}。`,
     );
   }
+  // 15. 债券：单期未售出超过 50%（发不出去）。
+  for (const issue of report.bonds?.issues ?? []) {
+    if (issue.coverageRatio !== null && issue.coverageRatio < 0.5) {
+      anomalies.push(
+        `${issue.cityName} ${issue.issueId}（${issue.tick} 月）：发行覆盖率 ${(issue.coverageRatio * 100).toFixed(1)}%，` +
+          `未售 ${issue.unsoldUnits}/${issue.plannedUnits} 份 —— 债券发不出去（需求侧或认购约束，见 block6 D5）。`,
+      );
+    }
+  }
+  // 16. 债券：计划份数超过 config 上限（契约/校验漏掉的证据）。
+  const planUnitsCap = DEMO_CONFIG.government.bondMarket.maxPlanUnitsPerIssue;
+  for (const issue of report.bonds?.issues ?? []) {
+    if (issue.plannedUnits > planUnitsCap) {
+      anomalies.push(`${issue.cityName} ${issue.issueId}：计划 ${issue.plannedUnits} 份超过 maxPlanUnitsPerIssue=${planUnitsCap}。`);
+    }
+  }
   report.anomalies = anomalies;
   report.limitations = [
     '单一固定条件（种子 20261101、36 月、玩家无操作），不是多种子统计；结论不能外推为概率。',
-    '债券、居民消费贷、AI 政府自动发债、债务预警与破产判定尚未实现，本基线无法观察这些机制。',
+    '债券账本已由块 1 第一批落地（发行/认购/票息/到期/破产兑付/垫付状态机与不变量），但结算接线（settleGovernmentDebt 实际发售）与 AI 自动发债、居民消费贷、破产判定仍待后续批次；本基线 36 月无发行记录，"无债券"不是结论。',
     '债务/GDP、预警档位与趋势由契约层 assessCityFiscalRisk 计算；本基线无债券/政府贷款发行记录，总负债 0 表示"尚未发生"，不代表财政健康。',
     '12 个月 GDP 判定窗口由块0 播种 12 条估计值（estimated=true、tick −12…−1），真实替换由块1 实现；本基线窗口始终为估计值，故负债/GDP 分母是开局估计合计。',
     '居民消费预算公式为现有代码的 propensity 口径；任务书新公式 80%/5% 尚未落地，仅作参考列展示。',
@@ -862,15 +944,26 @@ function printReport(report: Report, elapsedMs: number): void {
         unsoldUnits: acc.unsoldUnits + item.unsoldUnits,
         bankAdvance: acc.bankAdvance + item.bankAdvance,
         couponPaid: acc.couponPaid + item.couponPaid,
-        couponArrears: acc.couponArrears + item.couponArrears,
+        couponArrears: acc.couponArrears + (item.couponArrears ?? 0),
         principalRepaid: acc.principalRepaid + item.principalRepaid,
       }),
       { issues: 0, plannedUnits: 0, soldUnits: 0, unsoldUnits: 0, bankAdvance: 0, couponPaid: 0, couponArrears: 0, principalRepaid: 0 },
     );
     console.log(
       `  债券合计：发行 ${totals.issues} 期，计划 ${totals.plannedUnits} 份 / 成交 ${totals.soldUnits} 份 / 未售 ${totals.unsoldUnits} 份；` +
-        `票息 ${fmt(totals.couponPaid)}（欠付 ${fmt(totals.couponArrears)}），还本 ${fmt(totals.principalRepaid)}，银行垫付 ${fmt(totals.bankAdvance)}`,
+        `票息 ${fmt(totals.couponPaid)}（累计欠付 ${fmt(totals.couponArrears)}），还本 ${fmt(totals.principalRepaid)}，银行垫付 ${fmt(totals.bankAdvance)}`,
     );
+    if (report.bonds.issues.length === 0) {
+      console.log('  债券账本已初始化，但本基线无发行记录（块1 结算接线未完成时属预期；见 block6 D11 预期 vs 实测）。');
+    }
+    for (const issue of report.bonds.issues.slice(0, 10)) {
+      const crossCityUnits = issue.holders.filter((item) => item.crossCity).reduce((sum, item) => sum + item.units, 0);
+      const holderMix = issue.holders.map((item) => `${item.holderType}:${item.units}`).join('/') || '无';
+      console.log(
+        `  ${issue.cityName} ${issue.issueId}（tick ${issue.tick}）：计划 ${issue.plannedUnits} / 成交 ${issue.soldUnits} / 未售 ${issue.unsoldUnits}` +
+          `，覆盖率 ${issue.coverageRatio === null ? '—' : (issue.coverageRatio * 100).toFixed(1) + '%'}，跨城 ${crossCityUnits} 份，主体 ${holderMix}`,
+      );
+    }
   }
 
   console.log('\n[E] 会计利润 vs 经营现金流（利润 > 0 但现金流 < 利润 50% 的企业）');
