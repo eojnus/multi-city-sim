@@ -324,8 +324,10 @@ export function recordHouseholdConsumption(
 }
 
 /**
- * 某群体本月可用于消费的预算：上月收入 × 消费倾向，且不超过群体手头现金。
- * 逐群体消费必须以此为准，任何群体都不能动用其他群体的现金。
+ * 某群体本月可用于消费的现金预算（DECISIONS #39 冻结口径）：
+ * min(现金, 0.8 × 上月可支配收入 + 0.05 × 现金)，且不超过群体手头现金。
+ * 逐群体消费必须以此为准，任何群体都不能动用其他群体的现金；
+ * 可借消费贷额度单列（effectiveBudget 不含可借额度，见 #26）。
  */
 export function householdGroupBudget(
   world: WorldState,
@@ -333,9 +335,14 @@ export function householdGroupBudget(
   group: HouseholdGroup,
   config: DemoConfig,
 ): number {
-  const propensity = Math.max(0, config.consumer.propensity);
-  const incomeBudget = round2(group.lastMonth.income * propensity);
-  return round2(Math.max(0, Math.min(incomeBudget, group.cash)));
+  void world;
+  void city;
+  const budgetConfig = config.households.consumerBudget;
+  const cash = round2(Math.max(0, group.cash));
+  const referenceSpend = round2(
+    Math.max(0, group.lastMonth.income) * budgetConfig.lastIncomeShare + cash * budgetConfig.cashShare,
+  );
+  return round2(Math.min(cash, Math.max(0, referenceSpend)));
 }
 
 /**
