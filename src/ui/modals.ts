@@ -410,7 +410,12 @@ function renderReport(store: GameStore): string {
   }
   priceChanges.sort((a, b) => Math.abs(b.change) - Math.abs(a.change));
   const topPrices = priceChanges.slice(0, 6);
-  const monthLogs = world.log.filter((entry) => entry.tick === world.time.tick).slice(-8).reverse();
+  // 渲染期按当前身份重过滤（v0.7 §8）：日志面板与月度报告都不得直接读 world.log。
+  const monthLogs = store
+    .visibleLog()
+    .filter((entry) => entry.tick === world.time.tick)
+    .slice(-8)
+    .reverse();
   const body = `
     ${modalHeader('report', `${esc(store.dateLabel)} · 第 ${world.time.tick} 回合。数据来自当前演示口径。`)}
     <div class="modal-body">

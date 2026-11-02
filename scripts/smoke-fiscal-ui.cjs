@@ -320,6 +320,166 @@ app.whenReady().then(async () => {
   check('读档：市长身份保留且财政详情可见', afterReload.mayorCityId === 'lanport' && reloadMayor.hasLedger === true, JSON.stringify({ afterReload, reloadMayor, saved: saved.result }));
   await capture(win, '08-after-reload-mayor.png');
 
+  // ---- 9. KPI「企业数量」（v0.7 #2）与市长财政面板 / 债券市场（块4） ----
+  stage('KPI：企业数量可点击直达企业列表');
+  const kpi = await read(win, `(() => {
+    const card = document.querySelector('[data-testid="kpi-companies"]');
+    const text = card ? card.innerText : '';
+    return {
+      exists: Boolean(card),
+      text,
+      showsCompanies: /\\d+\\s*家/.test(text),
+      leaksTreasury: text.includes('财政') || /\\d+\\.\\d\\s*万/.test(text),
+    };
+  })()`);
+  await click(win, '[data-testid="kpi-companies"]');
+  await sleep(700);
+  const companiesReached = await read(win, `(() => {
+    const section = document.querySelector('[data-testid="companies-section"]');
+    if (!section) return { visible: false };
+    const rect = section.getBoundingClientRect();
+    return { visible: rect.top >= -40 && rect.top < window.innerHeight };
+  })()`);
+  check(
+    'KPI 企业数量：显示家数、不含财政余额，点击可跳到企业列表',
+    kpi.exists && kpi.showsCompanies && !kpi.leaksTreasury && companiesReached.visible === true,
+    JSON.stringify({ kpi, companiesReached }),
+  );
+
+  stage('市长财政面板（块4）');
+  await scrollTo(win, '[data-testid="mayor-fiscal-panel"]');
+  const panel = await read(win, `(() => {
+    const panel = document.querySelector('[data-testid="mayor-fiscal-panel"]');
+    const text = panel ? panel.innerText : '';
+    const pick = (testId) => {
+      const el = document.querySelector('[data-testid="' + testId + '"]');
+      return el ? el.textContent || '' : '';
+    };
+    return {
+      exists: Boolean(panel),
+      treasury: pick('fiscal-treasury'),
+      totalDebt: pick('fiscal-total-debt'),
+      ratio: pick('fiscal-debt-ratio'),
+      badge: pick('fiscal-risk-badge'),
+      hasMonthFlow: text.includes('当月收入') && text.includes('当月支出'),
+      hasDebtRows: text.includes('银行贷款') && text.includes('在外债券本金') && text.includes('应计未付利息'),
+      hasDue: text.includes('本月应付项') && text.includes('本月银行垫付'),
+      hasRules: text.includes('银行无条件垫付') && text.includes('破产规则') && text.includes('100%'),
+      hasIssueForm: Boolean(document.querySelector('[data-testid="issue-bond"]')),
+      faceHint: text.includes('面额'),
+      gdpCollapsed: (() => {
+        const details = document.querySelector('[data-testid="fiscal-gdp-window"]');
+        return details ? details.open === false : null;
+      })(),
+    };
+  })()`);
+  check(
+    '财政面板：可用资金/当月收支/债务/风险/兑付入口齐全',
+    panel.exists &&
+      /[0-9]/.test(panel.treasury) &&
+      /[0-9]/.test(panel.totalDebt) &&
+      /%/.test(panel.ratio) &&
+      panel.hasMonthFlow &&
+      panel.hasDebtRows &&
+      panel.hasDue &&
+      panel.hasRules &&
+      panel.hasIssueForm &&
+      panel.faceHint,
+    JSON.stringify(panel),
+  );
+  check(
+    '财政面板：风险用文字+图标表达（不只颜色）',
+    /●|▲|✖/.test(panel.badge) &&
+      /正常|关注|高风险|已破产/.test(panel.badge) &&
+      /上升|下降|持平|无可比/.test(panel.badge),
+    panel.badge,
+  );
+  await capture(win, '10-mayor-fiscal-panel.png');
+
+  stage('12 个月 GDP 窗口');
+  await read(win, `(() => {
+    const details = document.querySelector('[data-testid="fiscal-gdp-window"]');
+    if (details) details.open = true;
+    return true;
+  })()`);
+  await sleep(500);
+  const gdp = await read(win, `(() => {
+    const details = document.querySelector('[data-testid="fiscal-gdp-window"]');
+    if (!details) return { rows: 0 };
+    const rows = details.querySelectorAll('.gdp-window-row').length;
+    const text = details.innerText;
+    return {
+      rows,
+      estimated: (text.match(/估计/g) || []).length,
+      summary: (details.querySelector('summary') || {}).textContent || '',
+      hasJudgementNote: text.includes('判定合计') || text.includes('判定用'),
+      dates: Array.from(details.querySelectorAll('.gdp-window-row > span')).map((el) => el.textContent),
+      uniqueDates: new Set(Array.from(details.querySelectorAll('.gdp-window-row > span')).map((el) => el.textContent)).size,
+    };
+  })()`);
+  check(
+    '12 个月 GDP：默认收合，展开后逐月列出并标注估计月',
+    panel.gdpCollapsed === true &&
+      gdp.rows === 12 &&
+      gdp.estimated >= 1 &&
+      gdp.uniqueDates === 12 &&
+      gdp.dates.every((date) => /^\d{4}\.\d{2}$/.test(date)),
+    JSON.stringify(gdp),
+  );
+  await capture(win, '11-fiscal-gdp-window.png');
+
+  stage('债券市场（空态，所有玩家可见）');
+  await scrollTo(win, '[data-testid="bond-market-section"]');
+  const market = await read(win, `(() => {
+    const section = document.querySelector('[data-testid="bond-market-section"]');
+    const text = section ? section.innerText : '';
+    const empty = document.querySelector('[data-testid="bond-market-empty"]');
+    return {
+      exists: Boolean(section),
+      emptyText: empty ? empty.textContent || '' : '',
+      ownEmpty: Boolean(document.querySelector('[data-testid="own-bond-empty"]')),
+      subscribeButtons: document.querySelectorAll('[data-action="subscribe-bond"]').length,
+      hasWhitelistNote: text.includes('发行计划总额') && text.includes('不可贷款购债'),
+      noDebtLabel: !text.includes('总负债') && !text.includes('计划总额：'),
+    };
+  })()`);
+  check(
+    '债券市场：独立区、空态文案、无认购按钮、不含政府总债务',
+    market.exists &&
+      /暂无已发行债券/.test(market.emptyText) &&
+      market.ownEmpty &&
+      market.subscribeButtons === 0 &&
+      market.hasWhitelistNote &&
+      market.noDebtLabel,
+    JSON.stringify(market),
+  );
+  await capture(win, '12-bond-market-empty.png');
+
+  stage('债券市场：非市长可见（公开信息）');
+  await setMayor(win, null);
+  await sleep(500);
+  const citizenMarket = await read(win, `(() => ({
+    mayorCityId: window.__lanwan.store.mayorCityId,
+    hasMarket: Boolean(document.querySelector('[data-testid="bond-market-section"]')),
+    hasFiscalPanel: Boolean(document.querySelector('[data-testid="mayor-fiscal-panel"]')),
+    hasRestricted: Boolean(document.querySelector('[data-testid="fiscal-restricted"]')),
+  }))()`);
+  check(
+    '债券市场：非市长仍可见，但看不到市长财政面板',
+    citizenMarket.mayorCityId === null &&
+      citizenMarket.hasMarket === true &&
+      citizenMarket.hasFiscalPanel === false,
+    JSON.stringify(citizenMarket),
+  );
+  await scrollTo(win, '[data-testid="bond-market-section"]');
+  await capture(win, '13-bond-market-citizen.png');
+
+  // 恢复市长身份，供小窗口检查使用（与 09 的语义一致）。
+  await setMayor(win, 'lanport');
+  await sleep(600);
+  await scrollTo(win, '[data-testid="mayor-fiscal-panel"]');
+  await capture(win, '14-mayor-fiscal-panel-restored.png');
+
   // ---- 8. 小窗口（1100x700）无横向溢出 + 文字不裁切 ----
   stage('小窗口检查');
   win.setSize(1100, 700);
@@ -333,6 +493,30 @@ app.whenReady().then(async () => {
   })()`);
   check('小窗口：无横向页面溢出、政府章节不被裁切', smallWindow.overflowX === false && smallWindow.govClipped === false, JSON.stringify(smallWindow));
   await capture(win, '09-small-window.png');
+
+  // 秘书处 #2 要求：1100x700 下 KPI「企业数量」同样不裁切、不溢出。
+  stage('小窗口：KPI 企业数量');
+  await scrollTo(win, '[data-testid="kpi-companies"]');
+  const smallKpi = await read(win, `(() => {
+    const card = document.querySelector('[data-testid="kpi-companies"]');
+    const grid = card ? card.parentElement : null;
+    const rect = card ? card.getBoundingClientRect() : null;
+    const gridRect = grid ? grid.getBoundingClientRect() : null;
+    return {
+      exists: Boolean(card),
+      text: card ? card.innerText.replace(/\\n/g, ' | ') : '',
+      clippedX: grid ? grid.scrollWidth > grid.clientWidth + 2 : null,
+      inViewport: rect ? rect.left >= -1 && rect.right <= window.innerWidth + 1 : null,
+      gridWidth: gridRect ? Math.round(gridRect.width) : null,
+      overflowX: document.documentElement.scrollWidth > window.innerWidth + 2,
+    };
+  })()`);
+  check(
+    '小窗口：KPI 企业数量不裁切、不横向溢出',
+    smallKpi.exists && /家/.test(smallKpi.text) && smallKpi.clippedX === false && smallKpi.inViewport === true && smallKpi.overflowX === false,
+    JSON.stringify(smallKpi),
+  );
+  await capture(win, '15-small-window-kpi.png');
 
   const failed = checks.filter((entry) => !entry.pass);
   console.log(JSON.stringify({
