@@ -85,9 +85,9 @@
 | --- | --- | --- |
 | 类型检查 | `npm run typecheck` | 通过（0 错误，含 `tests/acceptance/**`） |
 | 业务基线 | `npx vitest run tests/`（不含 acceptance） | 306 用例全过，见 §1 基线；合并后单独复跑 `economy-stability` 120 月用例通过（27.3s，接近 30s 超时线，并发时易超时，属测试超时余量问题，非回归） |
-| 验收 H 组 | `npx vitest run tests/acceptance/migration-v7.test.ts` | 9/9 通过（H01–H07 已执行项） |
+| 验收 H 组 | `npx vitest run tests/acceptance/migration-v7.test.ts` | 14/14 通过（H01–H07 已执行项，含 v1–v6 六档全链） |
 | 验收 G 组 | `npx vitest run tests/acceptance/gdp-estimate.test.ts` | 6 通过 / 2 红（G04 两条，`pushRealGdpPoint` 空实现） |
-| 验收 I 组 | `npx vitest run tests/acceptance/permissions.test.ts` | 10 通过 / 8 红（公开债券投影×2、I03、I04 空实现；I07a/c/d/e、I09 界面未修） |
+| 验收 I 组 | `npx vitest run tests/acceptance/permissions.test.ts` | 5 通过 / 8 红（公开债券投影×2、I03、I04 空实现；I07a/c/d/e、I09 界面未修） |
 | 验收合计 | `npx vitest run tests/acceptance` | **35 用例：25 绿 / 10 红**（红全部为“实现未落地”，无权属误判） |
 | 构建 | `npm run build` | 待本轮测试文件定稿后执行并补记 |
 
