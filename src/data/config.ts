@@ -3,7 +3,7 @@
 
 export const DEMO_CONFIG = {
   meta: {
-    label: '演示参数 v0.3',
+    label: '演示参数 v0.4',
     assumptions: [
       '1 回合 = 1 个游戏月；月度结算。',
       '人口按群体统计，不为每个居民建立独立 AI。',
@@ -29,6 +29,14 @@ export const DEMO_CONFIG = {
       '【暂定】玩家为市长时政策必须由玩家选择，AI 不代选；选举资格与任期是演示规则。',
       '【暂定】15 项政策均为可替换原型：预算、期限、效果系数集中配置。',
       '【暂定】城际容量超载只减少卖方该笔收益；买方付款不变，差额记为无主体的收益损失。',
+      '【暂定】居民群体按职业分为 7 类，人数由城市人口与就业权威派生；阶层按人均总资产分低/中/高，阈值为演示值。',
+      '【暂定】居民群体初始财富按“若干个月群体收入”注入（仅新世界；旧存档迁移不创造资金）。',
+      '【暂定】经营者风格沿用扩张/稳健/回报三种；任期 24 个月；3 名候选人；严重经营问题触发提前改选。',
+      '【暂定】玩家经营模式分手动/AI 辅助/高度托管；重大事项阈值与默认授权可配置。',
+      '【暂定】银行资金无限、不会倒闭；个人额度 = 净资产 50%，企业额度 = 非负账面股权价值 50%；同一主体共享额度。',
+      '【暂定】存款月息 0.10%、周转贷款 0.50%/24 月、扩张贷款 0.60%/36 月、个人贷款 0.60%/24 月；等额本金、次月起还。',
+      '【暂定】逾期宽限 1 个月，第 2 个月仍欠付标记违约；首版不加罚息、不收提前还款费。',
+      '【暂定】旧 company.debt 迁移为银行承接贷款，利息与还款从此有对手方与留痕。',
     ],
   },
   simulation: {
@@ -367,6 +375,111 @@ export const DEMO_CONFIG = {
   ui: {
     tickAnimationMs: 280,
     autoTickMs: 1400,
+  },
+  /** v0.4：居民群体与财富阶层（全部为可替换的暂定参数）。 */
+  households: {
+    /** 每城群体数 = 职业类别数（管理/生产/销售/研发/公共部门/失业/非劳动力）。 */
+    /** 初始财富：按“若干个月群体收入”注入，制造可解释的初始贫富差距。 */
+    initialWealthIncomeMonths: {
+      management: 18,
+      production: 6,
+      sales: 5,
+      research: 7,
+      publicSector: 5,
+      unemployed: 2,
+      nonLabor: 3,
+    },
+    /** 初始财富中银行存款占比（其余为手头现金）。 */
+    initialDepositShare: 0.55,
+    /** 消费倾向（群体预算 = 可支配现金 × 该比例；仍受实际现金约束）。 */
+    consumptionPropensity: 0.96,
+    /** 财富阶层阈值（人均总资产 = 现金 + 存款 + 股票权益，信用点）。 */
+    tierThresholds: { middle: 15_000, high: 60_000 },
+    /** 展示用：保留最近几个月的阶层统计。 */
+    maxStatsMonths: 24,
+    /** 群体名称（界面展示用，不含模拟规则）。 */
+    labels: {
+      management: '管理层',
+      production: '生产工人',
+      sales: '销售人员',
+      research: '研发人员',
+      publicSector: '公共部门',
+      unemployed: '失业居民',
+      nonLabor: '非劳动力',
+    },
+  },
+  /** v0.4：经营者、人才市场与选任（全部为可替换的暂定参数）。 */
+  management: {
+    /** 首版任期：24 个游戏月。 */
+    termMonths: 24,
+    /** 每次选任通常提供的候选人数（含现任）。 */
+    candidatesPerElection: 3,
+    /** 选任议案的投票期（结算月数）。 */
+    electionOpenTicks: 2,
+    /** 初始经营者池规模（每城）。 */
+    initialPoolPerCity: 5,
+    /** 人才市场上限（每城），避免无限增长。 */
+    maxPoolPerCity: 12,
+    /** 池内可用人才不足时新生成的人数上限（每次选任）。 */
+    maxNewPerElection: 2,
+    /** 无现任时平票的确定性排序：按 candidateId 字典序。 */
+    /** 严重经营问题触发选任的判定参数。 */
+    severe: {
+      lossMonths: 4,
+      cashWageMonths: 0.5,
+      minAgeMonths: 6,
+      /** 同一企业两次选任的最小间隔（月），避免每月重复生成议案。 */
+      cooldownMonths: 6,
+    },
+    /** 玩家经营模式：重大事项阈值（超过阈值才需要玩家批准）。 */
+    majorThresholds: {
+      investmentAmount: 300_000,
+      hireCount: 5,
+      loanAmount: 200_000,
+      priceChangeRatio: 0.05,
+    },
+    /** 玩家拒绝/批准的提案不会在这么多月内以同一去重键重复生成。 */
+    proposalCooldownMonths: 3,
+    /** 待处理提案上限（每家玩家经营企业）。 */
+    maxPendingProposals: 6,
+    /** 提案过期月数。 */
+    proposalTtlMonths: 4,
+    /** 默认授权（高度托管模式）。 */
+    defaultAuthorization: {
+      maxInvestmentPerMonth: 500_000,
+      maxHiresPerMonth: 8,
+      maxLoanAmount: 300_000,
+      allowInvestment: true,
+      allowHiring: true,
+      allowLoan: true,
+      allowPriceAdjust: true,
+    },
+    /** 手动模式持续计划的有效月数（到期后需要玩家重新设定）。 */
+    standingPlanMonths: 12,
+  },
+  /** v0.4：独立银行系统（资金无限、不会倒闭；额度由财产/市值决定）。 */
+  banking: {
+    /** 活期存款月利率 0.10%（名义年化 1.2%）。 */
+    depositRateMonthly: 0.001,
+    /** 贷款产品：月利率与期限（月）。 */
+    products: {
+      workingCapital: { rateMonthly: 0.005, termMonths: 24, label: '企业周转贷款' },
+      expansion: { rateMonthly: 0.006, termMonths: 36, label: '企业扩张贷款' },
+      personal: { rateMonthly: 0.006, termMonths: 24, label: '玩家个人贷款' },
+      migratedDebt: { rateMonthly: 0.005, termMonths: 12, label: '旧债务承接' },
+    },
+    /** 授信上限 = 授信基准 × 该比例。 */
+    creditLimitRate: 0.5,
+    /** 逾期宽限月数；第 2 个月仍欠付标记违约。 */
+    graceMonths: 1,
+    /** 首版不收提前还款费。 */
+    earlyRepaymentFee: 0,
+    /** 贷款审批的最低金额。 */
+    minLoanAmount: 10_000,
+    /** 授信快照保留月数（每借款人）。 */
+    maxSnapshotsPerBorrower: 24,
+    /** 银行月度统计保留月数。 */
+    maxLoanPaymentsPerLoan: 60,
   },
 } as const;
 

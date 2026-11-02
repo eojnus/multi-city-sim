@@ -11,6 +11,7 @@
 import type { Company, HolderRef, InvestorGroup, LogEntry, WorldState } from '../contracts/types';
 import type { DemoConfig } from '../../data/config';
 import { allocateProportionally, round2 } from '../core/math';
+import { debitHouseholdSavings } from '../population/household-economy';
 import { monthlyWageBill } from '../companies/company';
 import { PRODUCTIVITY } from '../../data/demo-data';
 import {
@@ -105,7 +106,10 @@ export function collectInvestableFunds(world: WorldState, config: DemoConfig, lo
     const groups = groupsOfCity(world, city.id);
     if (groups.length === 0) continue;
     const income = Math.max(0, city.householdIncomeLastMonth);
-    const contribution = round2(income * config.investors.savingsRate);
+    const desiredContribution = round2(income * config.investors.savingsRate);
+    // v0.4：储蓄是真实转账——先从居民群体现金扣出，再进入投资实体；
+    // 群体现金不足时按实际可转出额缩小，不凭空创造资金。
+    const contribution = debitHouseholdSavings(world, city, desiredContribution);
     if (contribution > 0) {
       const amounts = allocateMoney(contribution, groups.map((group) => group.populationShare));
       groups.forEach((group, index) => {

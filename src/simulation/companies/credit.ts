@@ -1,3 +1,13 @@
+// ⚠️ 已废弃（v0.4）：本文件是 v0.3 及更早的“无对手方企业信贷”。
+//
+// v0.4 起企业债务的唯一权威是 world.banking.loans（独立银行系统）：
+// - 借款走 banking.openLoan（形成贷款合同，立即占用授信额度）；
+// - 利息与还款走 banking.serviceCompanyLoans（有对手方、有流水）；
+// - company.debt 只是银行贷款未偿本金的派生镜像，由 banking.syncCompanyDebt 维护。
+//
+// 保留本文件仅因为 tests/lifecycle.test.ts 仍用 companyCreditLimit() 构造“额度耗尽”的
+// 测试场景；生产代码已无调用方。不要在业务代码里重新调用这里的函数。
+
 import type { Company } from '../contracts/types';
 import type { DemoConfig } from '../../data/config';
 import { monthlyWageBill } from './company';

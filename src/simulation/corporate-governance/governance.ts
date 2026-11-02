@@ -13,22 +13,31 @@
 import type {
   Board,
   BoardSeat,
+  Company,
   CompanyControl,
   HolderRef,
   HolderType,
   LogEntry,
   Motion,
+  MotionCandidate,
   MotionVote,
   VotingEntitlement,
   WorldState,
 } from '../contracts/types';
 import type { DemoConfig } from '../../data/config';
 import { allocateProportionally, clamp, round2 } from '../core/math';
+import {
+  applyOperatorElectionResult,
+  tallyElection,
+} from '../management/elections';
+import { ELECTION_TRIGGER_LABELS, type ElectionTrigger } from '../management/types';
 
 const MANAGEMENT_NOTE = '演示：职业经理人经营，持股不等于控制权。';
 const BOARD_NOTE = '演示规则：按投票权持股比例分配董事席位；席位不等于经营控制权。';
 const MOTION_NOTE =
   '暂定演示规则：议案创建时记录投票权登记日快照，只有快照内持有人可按快照股数投票；赞成票多于反对票即通过。';
+const ELECTION_NOTE =
+  '演示规则：经营者选任议案按登记日投票权快照投票；得票最多者当选，平票优先现任，无现任时按 candidateId 字典序；任期来自 config.management.termMonths。';
 
 const PLAYER_ID = 'player';
 
@@ -129,8 +138,8 @@ function holderVotingShares(world: WorldState, companyId: string, holder: Holder
   return entry ? round2(entry.shares) : 0;
 }
 
-/** 创建议案时冻结的投票权登记日快照。 */
-function votingSnapshot(world: WorldState, companyId: string): VotingEntitlement[] {
+/** 创建议案时冻结的投票权登记日快照（经营者选任也复用它，因此导出）。 */
+export function votingSnapshot(world: WorldState, companyId: string): VotingEntitlement[] {
   return votingHoldersOf(world, companyId).map((entry) => ({
     holder: { type: entry.holder.type, id: entry.holder.id },
     shares: round2(entry.shares),
@@ -238,10 +247,18 @@ export function ensureGovernance(world: WorldState, config: DemoConfig, tick: nu
         operator: 'management',
         basis: 'management',
         sinceTick: tick,
+        operatorId: null,
+        termEndTick: null,
         note: MANAGEMENT_NOTE,
       };
       world.governance.controls.push(control);
     }
+  }
+
+  // 兼容旧存档：旧 control 没有 v0.4 的经营者字段，补齐默认值（不改变既有控制关系）。
+  for (const control of world.governance.controls) {
+    if (control.operatorId === undefined) control.operatorId = null;
+    if (control.termEndTick === undefined) control.termEndTick = null;
   }
 
   refreshBoards(world, config, tick);
@@ -323,6 +340,62 @@ export function openDividendPolicyMotion(
   return firstProposed;
 }
 
+/**
+ * 创建经营者选任议案（供 management/elections 开启选任时复用）。
+ *
+ * - 候选人由调用方在创建时固定（Motion.candidates）；
+ * - eligible 使用创建时的登记日投票权快照；
+ * - 同一企业同时最多一个 open 的选任议案（返回 null 表示已有在表决的选任）；
+ * - params 只放 number|string（termMonths/trigger），符合存档校验约束。
+ */
+export function openElectionMotion(
+  world: WorldState,
+  company: Company,
+  config: DemoConfig,
+  tick: number,
+  trigger: ElectionTrigger,
+  candidates: MotionCandidate[],
+  proposedBy: HolderRef,
+  log?: LogEntry[],
+): Motion | null {
+  ensureGovernanceState(world);
+  if (candidates.length === 0) return null;
+  const hasOpen = world.governance.motions.some(
+    (motion) =>
+      motion.companyId === company.id &&
+      motion.kind === 'operatorElection' &&
+      motion.status === 'open',
+  );
+  if (hasOpen) return null;
+
+  const motion: Motion = {
+    id: nextMotionId(world, `${company.id}-election-${tick}`),
+    companyId: company.id,
+    kind: 'operatorElection',
+    title: `${company.name} 经营者选任（${ELECTION_TRIGGER_LABELS[trigger]}）`,
+    proposedBy: { type: proposedBy.type, id: proposedBy.id },
+    createdTick: tick,
+    closesAtTick: tick + Math.max(1, Math.floor(config.management.electionOpenTicks)),
+    params: { termMonths: config.management.termMonths, trigger },
+    candidates: candidates.map((candidate) => ({ ...candidate })),
+    status: 'open',
+    eligible: votingSnapshot(world, company.id),
+    votes: [],
+    decidedTick: null,
+    result: '',
+    note: ELECTION_NOTE,
+  };
+  world.governance.motions.push(motion);
+  if (log) {
+    log.push({
+      tick,
+      kind: 'player',
+      message: `股东选任议案：${company.name} 开启经营者选任（${ELECTION_TRIGGER_LABELS[trigger]}），候选人 ${candidates.length} 名，投票期至第 ${motion.closesAtTick} 月。`,
+    });
+  }
+  return motion;
+}
+
 /** 记录一张表决票；同一持股人改票时覆盖旧记录（演示便利）。 */
 export function castVote(
   world: WorldState,
@@ -370,6 +443,9 @@ export function autoCastVotes(world: WorldState, config: DemoConfig, tick: numbe
     .sort((a, b) => a.id.localeCompare(b.id));
 
   for (const motion of openMotions) {
+    // 经营者选任是多候选人计票，不适用“赞成/反对”二元投票；
+    // 自动投票由 management/elections.autoCastElectionVotes 处理，这里必须跳过。
+    if (motion.kind === 'operatorElection') continue;
     // 只对登记日快照内的持有人自动投票；新受让人不获得本次议案的票。
     const holders = eligibleHoldersOf(motion);
     for (const { holder } of holders) {
@@ -442,6 +518,8 @@ function applyMotion(
         operator: 'management',
         basis: 'management',
         sinceTick: tick,
+        operatorId: null,
+        termEndTick: null,
         note: MANAGEMENT_NOTE,
       };
       world.governance.controls.push(control);
@@ -449,6 +527,9 @@ function applyMotion(
     control.operator = operator;
     control.basis = 'boardAppointment';
     control.sinceTick = tick;
+    // 董事会任命的持有人经营者不是 AI 经营者档案；任期字段清空（玩家/AI 选任另走 operatorElection）。
+    control.operatorId = null;
+    control.termEndTick = null;
     control.note = '演示：经股东议案表决更换经营者；持股本身仍不直接控制企业。';
 
     log.push({
@@ -469,7 +550,6 @@ export function closeMotions(
   tick: number,
   log: LogEntry[],
 ): Motion[] {
-  void config;
   ensureGovernanceState(world);
 
   const due = world.governance.motions
@@ -479,6 +559,28 @@ export function closeMotions(
   const closed: Motion[] = [];
   for (const motion of due) {
     const company = world.companies.find((candidate) => candidate.id === motion.companyId);
+
+    // 经营者选任：多候选人计票，不走“赞成>反对”的二元规则。
+    if (motion.kind === 'operatorElection') {
+      motion.decidedTick = tick;
+      const { winnerCandidateId, result } = tallyElection(world, motion, config, tick);
+      if (winnerCandidateId) {
+        applyOperatorElectionResult(world, motion, config, tick);
+        motion.status = 'passed';
+        if (!motion.result) motion.result = result;
+      } else {
+        motion.status = 'rejected';
+        motion.result = result;
+        log.push({
+          tick,
+          kind: 'warning',
+          message: `经营者选任未产生当选人：${company?.name ?? motion.companyId}。${result}`,
+        });
+      }
+      closed.push(motion);
+      continue;
+    }
+
     const { forShares, againstShares } = motionShareTotals(motion);
     const passed = forShares > againstShares;
     motion.decidedTick = tick;

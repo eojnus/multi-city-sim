@@ -3,6 +3,7 @@ import type { DemoConfig } from '../../data/config';
 import { round2 } from '../core/math';
 import type { FinanceResult } from '../finance/finance';
 import { recordFiscal } from './treasury';
+import { applyHouseholdIncome } from '../population/household-economy';
 
 /**
  * 城市财政与居民收入。个人所得税从工资中扣除，企业所得税进入财政；
@@ -80,6 +81,17 @@ export function settleGovernment(
         publicGross * (1 - city.incomeTaxRate) +
         benefitsPaid +
         residentDividends,
+    );
+
+    // v0.4：把同一批收入按职业群体计入群体现金（工资/福利/股息返还/个税），
+    // 合计口径与上面的 householdIncome 一致，不新增货币。
+    applyHouseholdIncome(
+      world,
+      city,
+      finance,
+      benefitsPaid,
+      householdRefunds[city.id] ?? 0,
+      log,
     );
 
     city.treasury = round2(treasury);

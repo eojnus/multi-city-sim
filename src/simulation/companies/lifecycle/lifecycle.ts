@@ -23,7 +23,8 @@ import {
   syncPlayerHoldings,
 } from '../../securities/securities';
 import { groupsOfCity, groupHolder } from '../../investors/investors';
-import { creditAvailable } from '../credit';
+import { availableCredit } from '../../banking/credit';
+import { settleCompanyLiquidation } from '../../banking/banking';
 import { syncCityPopulationFromAllocations } from '../../population/population';
 import { cityMarketPrices } from '../../markets/markets';
 import { recordFiscal, receiveTreasury, spendTreasury } from '../../government/treasury';
@@ -432,8 +433,16 @@ export function liquidateCompany(
 
   const cash = round2(Math.max(0, company.cash));
   const debt = round2(Math.max(0, company.debt));
-  const debtRepaid = round2(Math.min(cash, debt));
-  const debtForgiven = round2(debt - debtRepaid);
+  // v0.4：企业债务权威在银行——先偿还银行贷款，剩余部分才按持股分配。
+  const debtSettlement = settleCompanyLiquidation(
+    world,
+    company,
+    cash,
+    config,
+    world.time.tick,
+  );
+  const debtRepaid = debtSettlement.repaid;
+  const debtForgiven = debtSettlement.forgiven;
   let remainingCash = round2(cash - debtRepaid);
 
   // 股份持有明细（含仅分红股东）；剩余资产按股分配，取整余额给最大股东。
@@ -443,6 +452,9 @@ export function liquidateCompany(
   const byHolder = new Map<string, { holder: HolderRef; shares: number }>();
   for (const holding of world.securities.holdings) {
     if (holding.companyId !== company.id || holding.shares <= 0) continue;
+    // 倒闭企业持有的自身股份是库存股：没有经济所有者，随企业注销而不参与分配，
+    // 否则再分配时会把新增股份并入随后被删除的记录，造成股份凭空减少。
+    if (holding.holder.type === 'company' && holding.holder.id === company.id) continue;
     const key = `${holding.holder.type}:${holding.holder.id}`;
     const existing = byHolder.get(key);
     if (existing) existing.shares = round2(existing.shares + holding.shares);
@@ -572,6 +584,11 @@ export function liquidateCompany(
   for (const holding of crossHoldings) {
     const issuer = world.companies.find((entry) => entry.id === holding.companyId);
     const count = Math.round(holding.shares);
+    if (!issuer) {
+      // 发行企业已不存在（或就是本企业自身）：该笔持股随类别注销，不再分配。
+      world.securities.holdings = world.securities.holdings.filter((entry) => entry !== holding);
+      continue;
+    }
     if (sortedHolders.length > 0 && defunctShareTotal > 0 && count > 0) {
       const sharesSplit = allocateProportionally(
         count,
@@ -741,7 +758,8 @@ export function checkBankruptcies(
     if (company.cash >= wage * config.lifecycle.bankruptcy.cashWageMonths) continue;
     // 真正的退出条件是“现金耗尽且已无可用信贷”，而不是会计利润为负：
     // 现有演示经济中企业长期薄利，仅凭亏损判定会造成不现实的连锁倒闭。
-    if (creditAvailable(company, config) > 1) continue;
+    // v0.4：可用信贷来自独立银行的授信评估（无快照时即时计算）。
+    if (availableCredit(world, { kind: 'company', id: company.id }, config) > 1) continue;
     if (activePolicy(world, company.cityId, 'companyRelief')) {
       // 纾困政策存在时，给企业一个观察期；若纾困预算已用尽则照常判定。
       const policy = activePolicy(world, company.cityId, 'companyRelief')!;

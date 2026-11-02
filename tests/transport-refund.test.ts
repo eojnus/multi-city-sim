@@ -16,6 +16,7 @@ import { settleGovernment } from '../src/simulation/government/fiscal';
 import { collectInvestableFunds } from '../src/simulation/investors/investors';
 import { runConsumerMarket } from '../src/simulation/markets/consumer';
 import { appointPlayerMayor } from '../src/simulation/politics/politics';
+import { migrateLegacyCompanyDebt } from '../src/simulation/banking/banking';
 
 const PRICE = 101.6;
 
@@ -266,6 +267,9 @@ describe('修复三：跨城超载结算的买卖双方资金流', () => {
   it('资金不足时只成交可负担部分；完全买不起时不留待结算交易或资金变化', () => {
     const { world, buyer } = contractSetup();
     buyer.cash = 0;
+    // v0.4：银行是债务唯一权威。用一笔巨额承接贷款把账面股权压到 0，使可借额度为 0。
+    buyer.debt = 1_000_000_000;
+    migrateLegacyCompanyDebt(world, DEMO_CONFIG, world.time.tick);
     const before = buyer.cash;
     const flows = executeTradeRoutes(world, DEMO_CONFIG, []);
     expect(flows).toHaveLength(0);

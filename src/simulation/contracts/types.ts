@@ -2,8 +2,8 @@
 // 这些类型描述的是“演示方案 v0.2”的数据结构，不代表最终策划规则。
 // v0.2 新增证券/治理/居民投资/协议/通知数据；旧 v1 存档由 core/save.ts 迁移。
 
-export const SAVE_FORMAT_VERSION = 4;
-export const GAME_VERSION = '0.3.0';
+export const SAVE_FORMAT_VERSION = 5;
+export const GAME_VERSION = '0.4.0';
 
 export type GoodId =
   | 'grain'
@@ -463,13 +463,26 @@ export interface Board {
   note: string;
 }
 
-export type MotionKind = 'dividendPolicy' | 'operatorAppointment';
+export type MotionKind = 'dividendPolicy' | 'operatorAppointment' | 'operatorElection';
 
 export interface MotionVote {
   holder: HolderRef;
   vote: 'for' | 'against' | 'abstain';
   votingShares: number;
   tick: number;
+  /** v0.4：选任议案中的候选票（仅 kind='operatorElection' 使用）。 */
+  candidateId?: string;
+}
+
+/** v0.4：经营者选任议案中的候选人（候选人在议案创建时固定；玩家可在投票期内登记加入）。 */
+export interface MotionCandidate {
+  candidateId: string;
+  kind: 'ai' | 'player';
+  /** AI 候选人对应的经营者档案 id；玩家候选人为 null。 */
+  operatorId: string | null;
+  name: string;
+  style: CompanyStyle | null;
+  isIncumbent: boolean;
 }
 
 /** 议案登记日的投票权快照：议案创建时的持有人与股数。 */
@@ -489,6 +502,8 @@ export interface Motion {
   closesAtTick: number;
   /** dividendPolicy: { ratio }；operatorAppointment: { operatorType, operatorId }。 */
   params: Record<string, number | string>;
+  /** v0.4：选任议案的候选人名单（kind='operatorElection' 时存在）。 */
+  candidates?: MotionCandidate[];
   status: 'open' | 'passed' | 'rejected';
   /**
    * 表决权登记日快照（创建议案时记录）。
@@ -506,8 +521,12 @@ export interface CompanyControl {
   companyId: string;
   /** 'management' 表示职业经理人经营；换成具体持有人需经议案通过。 */
   operator: HolderRef | 'management';
-  basis: 'management' | 'boardAppointment';
+  basis: 'management' | 'boardAppointment' | 'election';
   sinceTick: number;
+  /** v0.4：现任经营者档案 id（AI 经营者）；职业经理人/玩家持有型经营者为 null。 */
+  operatorId?: string | null;
+  /** v0.4：任期结束的 tick（24 个月）；null 表示未设任期。 */
+  termEndTick?: number | null;
   note: string;
 }
 
@@ -898,6 +917,269 @@ export interface CompanyLifecycleState {
   nextLiquidationNumber: number;
 }
 
+// ---------------------------------------------------------------- 居民群体与财富阶层
+//
+// 居民群体（household group）是“人口、收入与资产”的承载模型，**不是额外人口**：
+// - 人数（people）由城市人口与就业权威派生，每月重算；一个居民只会落在一个群体里。
+// - 现金（cash）是群体手头现金；银行存款权威在 world.banking.deposits 的 household 账户。
+// - 股票权益复用现有 securities 账本：群体通过本城居民投资实体间接持股，
+//   估值时按群体人口占本城比例归属实体净资产（首版暂定口径，见交付报告）。
+
+export type OccupationClass =
+  | 'management'
+  | 'production'
+  | 'sales'
+  | 'research'
+  | 'publicSector'
+  | 'unemployed'
+  | 'nonLabor';
+
+export type WealthTier = 'low' | 'middle' | 'high';
+
+export interface HouseholdMonthlyStats {
+  /** 本月税后现金收入（工资 + 福利 + 股息返还，已扣个税）。 */
+  income: number;
+  wageIncome: number;
+  benefits: number;
+  dividendIncome: number;
+  incomeTax: number;
+  /** 本月实际消费支出（成交额）。 */
+  consumption: number;
+  /** 本月想要购买的商品成本（用于展示预算约束）。 */
+  desiredConsumption: number;
+  /** 本月转入居民投资实体的储蓄。 */
+  savingsContribution: number;
+  /** 本月现金净变化 = income - consumption - savingsContribution。 */
+  netCashChange: number;
+}
+
+export interface HouseholdGroup {
+  id: string;
+  cityId: string;
+  occupation: OccupationClass;
+  name: string;
+  /** 该群体人数；由城市人口/就业/企业岗位角色派生，不是独立人口权威。 */
+  people: number;
+  /** 手头现金（信用点）。银行存款不在本字段，见 world.banking.deposits。 */
+  cash: number;
+  lastMonth: HouseholdMonthlyStats;
+  note: string;
+}
+
+/** 每城财富阶层统计快照（展示用；人口合计等于城市总人口）。 */
+export interface HouseholdTierStat {
+  tier: WealthTier;
+  people: number;
+  share: number;
+  perCapitaWealth: number;
+  perCapitaIncome: number;
+  cash: number;
+  deposits: number;
+  /** 按本城居民投资实体净资产归属的股票权益（市值口径，不是现金）。 */
+  equity: number;
+}
+
+export interface HouseholdWealthStats {
+  cityId: string;
+  tick: number;
+  tiers: HouseholdTierStat[];
+  totalPeople: number;
+  totalCash: number;
+  totalDeposits: number;
+  totalEquity: number;
+  /** 人均可支配收入（本月，按群体人数加权）。 */
+  perCapitaIncome: number;
+  /** 人均总资产（现金 + 存款 + 股票权益）。 */
+  perCapitaWealth: number;
+  note: string;
+}
+
+export interface HouseholdState {
+  groups: HouseholdGroup[];
+  lastStats: HouseholdWealthStats[];
+}
+
+// ---------------------------------------------------------------- 经营者、人才市场与选任
+
+export interface OperatorTenure {
+  companyId: string;
+  companyName: string;
+  fromTick: number;
+  toTick: number;
+  reason: string;
+}
+
+export interface OperatorProfile {
+  id: string;
+  name: string;
+  style: CompanyStyle;
+  /** 0–1 演示声望，用于候选人排序与人才市场展示。 */
+  reputation: number;
+  /** employed 表示正在经营某家企业；available 表示在人才市场待选。 */
+  status: 'employed' | 'available';
+  companyId: string | null;
+  appointedTick: number | null;
+  termEndTick: number | null;
+  history: OperatorTenure[];
+  note: string;
+}
+
+export type PlayerOperationMode = 'manual' | 'assisted' | 'delegated';
+
+/** 高度托管模式下玩家为该企业预设的授权范围（超出范围的重大事项需玩家批准）。 */
+export interface PlayerAuthorization {
+  maxInvestmentPerMonth: number;
+  maxHiresPerMonth: number;
+  maxLoanAmount: number;
+  allowInvestment: boolean;
+  allowHiring: boolean;
+  allowLoan: boolean;
+  allowPriceAdjust: boolean;
+}
+
+export type ProposalKind = 'hire' | 'expand' | 'loan' | 'dividend' | 'price';
+export type ProposalStatus = 'pending' | 'approved' | 'rejected' | 'executed' | 'expired';
+
+export interface PlayerProposal {
+  id: string;
+  companyId: string;
+  kind: ProposalKind;
+  title: string;
+  summary: string;
+  reasons: string[];
+  params: Record<string, number | string>;
+  amount: number;
+  status: ProposalStatus;
+  createdTick: number;
+  decidedTick: number | null;
+  /** 去重键：同一去重键在冷却期内不会重复生成提案。 */
+  dedupeKey: string;
+  expiresTick: number;
+  result: string;
+}
+
+/** 持续生效的经营计划（手动模式下由玩家设定，直到修改或条件失效）。 */
+export interface StandingPlan {
+  utilization: number;
+  targetJobs: number;
+  priceFactor: number;
+  investmentPerMonth: number;
+  expiresTick: number;
+  note: string;
+}
+
+export interface PlayerCompanyOperation {
+  companyId: string;
+  mode: PlayerOperationMode;
+  authorization: PlayerAuthorization;
+  standingPlan: StandingPlan | null;
+  proposals: PlayerProposal[];
+  lastExecutedTick: number;
+  note: string;
+}
+
+export interface ManagementState {
+  operators: OperatorProfile[];
+  playerOperations: PlayerCompanyOperation[];
+  nextOperatorNumber: number;
+}
+
+// ---------------------------------------------------------------- 银行（独立系统，资金无限、不会倒闭）
+
+export type BankOwnerKind = 'player' | 'household' | 'company' | 'investorGroup';
+
+export interface BankOwner {
+  kind: BankOwnerKind;
+  id: string;
+}
+
+export interface DepositAccount {
+  id: string;
+  owner: BankOwner;
+  balance: number;
+  /** 月利率（如 0.001 = 0.10%）。 */
+  rateMonthly: number;
+  accruedInterest: number;
+  lastInterestTick: number;
+  openedTick: number;
+  note: string;
+}
+
+export type LoanPurpose = 'workingCapital' | 'expansion' | 'personal' | 'migratedDebt';
+export type LoanStatus = 'active' | 'repaid' | 'defaulted';
+
+export interface LoanPayment {
+  tick: number;
+  principalDue: number;
+  interestDue: number;
+  principalPaid: number;
+  interestPaid: number;
+  /** 本次未付金额（转入欠款，不另计罚息）。 */
+  arrears: number;
+  note: string;
+}
+
+export interface LoanContract {
+  id: string;
+  borrower: BankOwner;
+  purpose: LoanPurpose;
+  /** 原始本金（等额本金还款的分母）。 */
+  principal: number;
+  outstanding: number;
+  monthlyPrincipal: number;
+  rateMonthly: number;
+  termMonths: number;
+  startTick: number;
+  /** 首期还款 tick（放款后的下一月）。 */
+  nextDueTick: number;
+  paidPrincipal: number;
+  paidInterest: number;
+  /** 已计息但尚未支付的利息。 */
+  accruedInterest: number;
+  arrearsPrincipal: number;
+  arrearsInterest: number;
+  /** 连续欠付月数；≥2 标记违约。 */
+  missedPayments: number;
+  status: LoanStatus;
+  payments: LoanPayment[];
+  note: string;
+}
+
+/** 每月基于上一完整月数据生成的授信估值快照，当月保持稳定。 */
+export interface CreditSnapshot {
+  tick: number;
+  borrower: BankOwner;
+  /** 授信基准：个人 = 可核验净资产；企业 = 非负账面股权价值。 */
+  baseValue: number;
+  limitRate: number;
+  limit: number;
+  outstanding: number;
+  available: number;
+  method: 'netWorth' | 'equityBook';
+  reason: string;
+}
+
+export interface BankMonthlyStats {
+  tick: number;
+  interestExpense: number;
+  interestIncome: number;
+  principalIssued: number;
+  principalRepaid: number;
+  depositsTotal: number;
+  loansOutstanding: number;
+  newDefaults: number;
+  note: string;
+}
+
+export interface BankingState {
+  deposits: DepositAccount[];
+  loans: LoanContract[];
+  snapshots: CreditSnapshot[];
+  lastMonth: BankMonthlyStats;
+  nextAccountNumber: number;
+  nextLoanNumber: number;
+}
+
 // ---------------------------------------------------------------- 世界与存档
 
 export interface WorldState {
@@ -923,6 +1205,12 @@ export interface WorldState {
   transport: TransportState;
   /** v0.3：企业成立与倒闭记录。 */
   lifecycle: CompanyLifecycleState;
+  /** v0.4：居民群体（人口、收入与资产承载模型；不是额外人口）。 */
+  households: HouseholdState;
+  /** v0.4：经营者、人才市场与玩家经营模式。 */
+  management: ManagementState;
+  /** v0.4：独立银行系统（存款、贷款、授信快照）。 */
+  banking: BankingState;
   history: WorldHistoryPoint[];
   log: LogEntry[];
   lastTick: {

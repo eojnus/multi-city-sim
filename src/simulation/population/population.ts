@@ -2,6 +2,7 @@ import type { City, WorldState, LogEntry } from '../contracts/types';
 import type { DemoConfig } from '../../data/config';
 import { clamp, round2 } from '../core/math';
 import type { DeterministicRng } from '../core/rng';
+import { rebalanceHouseholdWealthForMigration } from './household-groups';
 
 export function setCityPopulation(
   city: City,
@@ -169,6 +170,9 @@ export function applyMigration(
       nextDestLf,
       destination.population.employed,
     );
+
+    // v0.4：迁移者带走其人均现金与存款（跨城资产跟随人口，不复制也不丢失）。
+    rebalanceHouseholdWealthForMigration(world, source.id, destination.id, people);
 
     world.lastTick.migration.push({
       fromCityId: source.id,

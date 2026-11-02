@@ -54,6 +54,24 @@ import { advanceTransportConstruction } from '../transport/network';
 import { settleTransportMonth } from '../transport/settlement';
 import { checkBankruptcies, maybeFoundCompanies } from '../companies/lifecycle/lifecycle';
 import { startWorkforceMonth } from '../labor/workforce';
+import {
+  recordHouseholdWealthStats,
+  syncHouseholdPeople,
+} from '../population/household-groups';
+import { recordHouseholdConsumption } from '../population/household-economy';
+import {
+  refreshBankingTotals,
+  servicePlayerLoans,
+  settleDepositInterest,
+} from '../banking/banking';
+import { refreshCreditSnapshots } from '../banking/credit';
+import { ensureOperators, pruneOperatorPool, releaseOperator } from '../management/manager-pool';
+import { autoCastElectionVotes, maybeOpenElections } from '../management/elections';
+import {
+  ensurePlayerOperations,
+  expireProposals,
+  generateProposals,
+} from '../management/operations';
 
 function blankStats(): CompanyMonthlyStats {
   return {
@@ -84,6 +102,20 @@ function resetCompanyMonth(world: WorldState): void {
   for (const group of world.investors) {
     group.lastDividend = 0;
   }
+  // v0.4：居民群体本月统计清零（人数与现金是存量，不清零）。
+  for (const group of world.households.groups) {
+    group.lastMonth = {
+      income: 0,
+      wageIncome: 0,
+      benefits: 0,
+      dividendIncome: 0,
+      incomeTax: 0,
+      consumption: 0,
+      desiredConsumption: 0,
+      savingsContribution: 0,
+      netCashChange: 0,
+    };
+  }
   for (const city of world.cities) {
     city.lastMonth = {
       ...city.lastMonth,
@@ -106,6 +138,16 @@ function resetCompanyMonth(world: WorldState): void {
   world.securities.lastTrades = [];
   // 上期交通统计的维护支出口径保留，其余在结算时重写。
   world.transport.lastMonth = { ...world.transport.lastMonth, maintenancePaid: 0 };
+  // v0.4：银行本月流量统计清零（存款/贷款存量在结算时实时刷新，不清零）。
+  world.banking.lastMonth = {
+    ...world.banking.lastMonth,
+    tick: world.time.tick,
+    interestExpense: 0,
+    interestIncome: 0,
+    principalIssued: 0,
+    principalRepaid: 0,
+    newDefaults: 0,
+  };
 }
 
 function advanceTime(world: WorldState): void {
@@ -174,25 +216,42 @@ export class Simulation {
       const startStock: Record<GoodId, number> = {} as Record<GoodId, number>;
       for (const goodId of GOOD_IDS) startStock[goodId] = totalStock(this.state, goodId);
 
-      // 1. 政治：任期、选举；非玩家政府按弱项与领导人倾向选择政策。
+      // 1. 经营者与选任：补齐经营者/玩家经营状态，任期到期、空缺或严重经营问题触发选任。
+      ensureOperators(this.state, this.config, this.state.time.tick);
+      ensurePlayerOperations(this.state, this.config, this.state.time.tick);
+      maybeOpenElections(this.state, this.config, this.state.time.tick, logs);
+      pruneOperatorPool(this.state, this.config, this.state.time.tick);
+      expireProposals(this.state, this.config, this.state.time.tick);
+
+      // 2. 政治：任期、选举；非玩家政府按弱项与领导人倾向选择政策。
       //    玩家为市长的城市由玩家选择，autoSelectPolicies 明确跳过。
       advancePolitics(this.state, this.config, this.state.time.tick, logs);
       autoSelectPolicies(this.state, this.config, logs);
 
-      // 2. 交通建设推进与维护（财政支出，容量在建成后提高）。
+      // 3. 交通建设推进与维护（财政支出，容量在建成后提高）。
       advanceTransportConstruction(this.state, this.config, logs);
 
-      // 3. 人口自然变动 + 迁移（迁移是原子操作）
+      // 4. 人口自然变动 + 迁移（迁移是原子操作，迁移者带走人均现金与存款）
       applyNaturalGrowth(this.state, rng, this.config, logs);
       applyMigration(this.state, rng, this.config, logs);
 
-      // 4. 企业自动经营计划与劳动力匹配（计划读取政策补贴与上月结果）
+      // 5. 银行：活期存款按月计息（存款账户余额真实增加）。
+      settleDepositInterest(this.state, this.config, this.state.time.tick, logs);
+
+      // 6. 授信估值快照：基于上一完整月数据生成，当月保持稳定。
+      refreshCreditSnapshots(this.state, this.config, this.state.time.tick);
+
+      // 7. 企业自动经营计划与劳动力匹配（计划读取现任经营者风格与上月结果）
       planCompanies(this.state, this.config, logs);
       const labor = reconcileLabor(this.state, this.config, logs);
+      // 招聘/裁员改变了各职业人数：重算群体人数，并按人均资产转移现金与存款。
+      syncHouseholdPeople(this.state, this.config);
 
       // 5. 企业成立与倒闭（成立资金来自出资人；倒闭不留半期状态）
       maybeFoundCompanies(this.state, this.config, logs);
       checkBankruptcies(this.state, this.config, logs);
+      // 倒闭企业：释放经营者、清理控制权与玩家经营记录，避免悬空引用。
+      this.reconcileLifecycleAssignments();
 
       // 6. 长期贸易合同与政府协议：真实转移货物与资金（世界内部，库存净额不变）
       const tradeFlows = executeTradeRoutes(this.state, this.config, logs);
@@ -222,6 +281,8 @@ export class Simulation {
         const result = runConsumerMarket(this.state, city, cityLedgers, this.config);
         city.lastMonth.consumerSpend = result.spend;
         city.lastMonth.consumerBudget = result.budget;
+        // v0.4：消费是真实支出——从居民群体现金扣减，并记录“想要购买”的成本。
+        recordHouseholdConsumption(this.state, city, result.spend, result.desiredCost);
         for (const goodId of GOOD_IDS) {
           householdConsumed[goodId] += result.bought[goodId] ?? 0;
         }
@@ -240,11 +301,15 @@ export class Simulation {
       // 13. 治理：先计票并应用既有议案（影响本月股息政策），再重选董事
       ensureGovernance(this.state, this.config, this.state.time.tick);
       autoCastVotes(this.state, this.config, this.state.time.tick);
+      // v0.4：选任议案的 AI 持有人自动投票（与二元议案分开计票）。
+      autoCastElectionVotes(this.state, this.config, this.state.time.tick);
       const decidedMotions = closeMotions(this.state, this.config, this.state.time.tick, logs);
       refreshBoards(this.state, this.config, this.state.time.tick);
 
-      // 14. 企业财务：工资、税、按实际持股分配股息、产能
+      // 14. 企业财务：工资、税、银行还本付息、按实际持股分配股息、产能
       const finance = settleCompanyFinance(this.state, this.config, logs);
+      // 14a. 玩家个人贷款还本付息（工资/税之后，股息之前无冲突）。
+      servicePlayerLoans(this.state, this.config, this.state.time.tick, logs);
 
       // 14b. 基于已结算利润提出下期议案（表决期结束后生效）
       openDividendPolicyMotion(this.state, this.config, this.state.time.tick);
@@ -256,6 +321,9 @@ export class Simulation {
 
       // 16. 政策执行：补贴、培训、纾困、研发、住房、救助等（实际财政支出与状态变化）
       settlePolicies(this.state, this.config, { hiresByCompany: labor.hiresByCompany, log: logs });
+
+      // 16b. 玩家经营模式：AI 辅助/高度托管按需生成重大事项提案（未批准不执行）。
+      generateProposals(this.state, this.config, this.state.time.tick, logs);
 
       // 13. 居民可投资资金（从下月消费预算中划出，不新增货币）
       collectInvestableFunds(this.state, this.config, logs);
@@ -269,6 +337,7 @@ export class Simulation {
 
       // 15. 玩家通知（按身份与持股权利筛选，不展示模拟步骤）
       this.publishNotices(finance.playerDividendsByCompany, decidedMotions);
+      this.publishManagementNotices();
 
       // 16. GDP 与历史
       computeCityGdp(this.state);
@@ -295,6 +364,10 @@ export class Simulation {
       }
 
       // 17. 库存守恒审计
+      // v0.4：记录本月财富阶层快照（人数合计等于城市总人口）。
+      recordHouseholdWealthStats(this.state, this.config, this.state.time.tick);
+      // 银行存贷款存量统计按月末实际余额刷新（流量字段在本月结算中累加）。
+      refreshBankingTotals(this.state);
       const audits: GoodsAudit[] = [];
       for (const goodId of GOOD_IDS) {
         let produced = 0;
@@ -370,8 +443,23 @@ export class Simulation {
     }
   }
 
-  /** 已结束的协议只保留最近 10 条，避免存档无限增长；进行中的协议不受影响。 */
-  private pruneAgreementHistory(): void {
+  /** 倒闭企业：释放经营者、清理控制权与玩家经营记录，避免悬空引用。 */
+  private reconcileLifecycleAssignments(): void {
+    const companyIds = new Set(this.state.companies.map((company) => company.id));
+    for (const operator of [...this.state.management.operators]) {
+      if (operator.status === 'employed' && operator.companyId && !companyIds.has(operator.companyId)) {
+        releaseOperator(this.state, operator.id, this.state.time.tick, '企业已倒闭');
+      }
+    }
+    this.state.governance.controls = this.state.governance.controls.filter((control) =>
+      companyIds.has(control.companyId),
+    );
+    this.state.management.playerOperations = this.state.management.playerOperations.filter(
+      (operation) => companyIds.has(operation.companyId),
+    );
+  }
+
+  /** 已结束的协议只保留最近 10 条，避免存档无限增长；进行中的协议不受影响。 */  private pruneAgreementHistory(): void {
     const finished = this.state.agreements.filter(
       (agreement) => agreement.status === 'completed' || agreement.status === 'cancelled',
     );
@@ -509,6 +597,74 @@ export class Simulation {
         control.operator.type === 'player' &&
         control.operator.id === 'player',
     );
+  }
+
+  /**
+   * v0.4：经营者选任、玩家经营提案与银行贷款的通知。
+   * 只在事件发生当月生成，避免每月重复刷屏；无投票权/无经营身份时不打扰玩家。
+   */
+  private publishManagementNotices(): void {
+    const tick = this.state.time.tick;
+
+    // 1. 选任：玩家有投票权，或玩家已登记为候选人。
+    for (const motion of this.state.governance.motions) {
+      if (motion.kind !== 'operatorElection' || motion.status !== 'open') continue;
+      if (motion.createdTick !== tick) continue;
+      const company = this.state.companies.find((candidate) => candidate.id === motion.companyId);
+      if (!company) continue;
+      const canVote = playerEligibleShares(this.state, motion) > 0;
+      const isCandidate = (motion.candidates ?? []).some((entry) => entry.kind === 'player');
+      if (!canVote && !isCandidate) continue;
+      const names = (motion.candidates ?? []).map((entry) => entry.name).join('、');
+      notifyPlayer(this.state, this.config, {
+        audience: 'company',
+        kind: 'vote',
+        priority: 'important',
+        companyId: company.id,
+        title: `${company.name} 经营者选任开始`,
+        body: `候选人：${names}。投票期至第 ${motion.closesAtTick} 期；你${canVote ? '持有投票权股份，可投票' : ''}${canVote && isCandidate ? '；' : ''}${isCandidate ? '已登记为候选人' : ''}。`,
+      });
+    }
+
+    // 2. 玩家经营企业：待批准的重大事项提案。
+    for (const operation of this.state.management.playerOperations) {
+      for (const proposal of operation.proposals) {
+        if (proposal.status !== 'pending' || proposal.createdTick !== tick) continue;
+        const company = this.state.companies.find((candidate) => candidate.id === proposal.companyId);
+        if (!company) continue;
+        notifyPlayer(this.state, this.config, {
+          audience: 'company',
+          kind: 'major',
+          priority: 'important',
+          companyId: company.id,
+          title: `${company.name} 有待批准的提案`,
+          body: `${proposal.title}：${proposal.summary}${proposal.reasons.length > 0 ? `（原因：${proposal.reasons.join('；')}）` : ''}`,
+        });
+      }
+    }
+
+    // 3. 贷款：本月新出现欠款或违约的，通知借款主体是玩家或玩家经营的企业。
+    for (const loan of this.state.banking.loans) {
+      const payment = loan.payments.find((entry) => entry.tick === tick);
+      if (!payment) continue;
+      if (payment.arrears <= 0.01 && loan.status !== 'defaulted') continue;
+      const companyId = loan.borrower.kind === 'company' ? loan.borrower.id : null;
+      const isPlayerDebt = loan.borrower.kind === 'player';
+      const isPlayerCompany = companyId !== null && this.playerIsOperator(companyId);
+      if (!isPlayerDebt && !isPlayerCompany) continue;
+      const company = companyId
+        ? this.state.companies.find((candidate) => candidate.id === companyId)
+        : null;
+      const subject = isPlayerDebt ? '你的个人贷款' : `${company?.name ?? '企业'}的银行贷款`;
+      notifyPlayer(this.state, this.config, {
+        audience: company ? 'company' : 'personal',
+        kind: 'major',
+        priority: 'important',
+        companyId: company?.id,
+        title: `${subject}${loan.status === 'defaulted' ? '已标记违约' : '出现欠款'}`,
+        body: `合同 ${loan.id}：本月应还利息 ${payment.interestDue.toFixed(2)}、本金 ${payment.principalDue.toFixed(2)}，实付利息 ${payment.interestPaid.toFixed(2)}、本金 ${payment.principalPaid.toFixed(2)}。`,
+      });
+    }
   }
 
   private isPlayerInterestedCompany(companyId: string): boolean {

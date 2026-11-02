@@ -9,6 +9,7 @@ import { sumCityStock } from '../src/simulation/markets/markets';
 import { GOOD_IDS } from '../src/simulation/companies/company';
 import { visibleNotifications } from '../src/simulation/notifications/notifications';
 import { companyCreditLimit } from '../src/simulation/companies/credit';
+import { migrateLegacyCompanyDebt } from '../src/simulation/banking/banking';
 import { syncCityPopulationFromAllocations } from '../src/simulation/population/population';
 import { startPolicy } from '../src/simulation/policies/policies';
 
@@ -172,7 +173,9 @@ describe('企业倒闭：员工、资产、库存、债务、股份与协议的�
     expect(sim.invest(company.id, 500_000).ok).toBe(true);
     company.inventory.grain = 1_000;
     company.cash = 900_000;
+    // v0.4：企业债务权威在银行——先建立承接贷款，清算才有可偿还的合同。
     company.debt = 300_000;
+    migrateLegacyCompanyDebt(world, DEMO_CONFIG, world.time.tick);
     setCompanyEmployees(company, 20);
     company.jobDemand = 20;
     // 让城市人口与新员工数一致，避免把测试数据当成真实结算。
@@ -283,6 +286,7 @@ describe('企业倒闭：员工、资产、库存、债务、股份与协议的�
     company.ai.lossMonths = 5;
     company.ai.ageMonths = 20;
     company.debt = companyCreditLimit(company, DEMO_CONFIG);
+    migrateLegacyCompanyDebt(world, DEMO_CONFIG, world.time.tick);
     const liquidated = checkBankruptcies(world, DEMO_CONFIG, []);
     expect(liquidated).toContain(company.id);
     const record = world.lifecycle.liquidations.find((entry) => entry.companyId === company.id)!;
@@ -295,6 +299,7 @@ describe('企业倒闭：员工、资产、库存、债务、股份与协议的�
     saved.ai.lossMonths = 5;
     saved.ai.ageMonths = 20;
     saved.debt = companyCreditLimit(saved, DEMO_CONFIG);
+    migrateLegacyCompanyDebt(world, DEMO_CONFIG, world.time.tick);
     startPolicy(world2, saved.cityId, 'companyRelief', DEMO_CONFIG);
     const liquidated2 = checkBankruptcies(world2, DEMO_CONFIG, []);
     expect(liquidated2).not.toContain(saved.id);

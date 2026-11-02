@@ -1,6 +1,7 @@
 import type { GoodId, WorldState } from '../contracts/types';
 import { GOOD_IDS, roleTotal } from '../companies/company';
 import { sumCityStock } from '../markets/markets';
+import { round2 } from './math';
 
 export interface GoodsAudit {  goodId: GoodId;
   startStock: number;
@@ -141,6 +142,10 @@ export function checkInvariants(world: WorldState, audits: GoodsAudit[] = []): s
   problems.push(...checkTransport(world));
   problems.push(...checkLifecycle(world));
   problems.push(...checkCompanyAi(world));
+  // ---- v0.4 居民群体、经营者与银行 ----
+  problems.push(...checkHouseholds(world));
+  problems.push(...checkManagement(world));
+  problems.push(...checkBanking(world));
 
   for (const audit of audits) {
     if (Math.abs(audit.endStock - audit.expectedEndStock) > 0.2) {
@@ -659,6 +664,136 @@ function checkCompanyAi(world: WorldState): string[] {
     if (company.ai.lastPlan) {
       if (company.ai.lastPlan.targetJobs < 0) problems.push(`${company.name}: 计划岗位为负`);
       if (!(company.ai.lastPlan.utilization >= 0)) problems.push(`${company.name}: 计划利用率为负`);
+    }
+  }
+  return problems;
+}
+
+/** v0.4：居民群体人数合计必须等于城市总人口（一个人只被统计一次）。 */
+function checkHouseholds(world: WorldState): string[] {
+  const problems: string[] = [];
+  if (!world.households || !Array.isArray(world.households.groups)) {
+    return ['世界缺少居民群体数据'];
+  }
+  for (const city of world.cities) {
+    const groups = world.households.groups.filter((group) => group.cityId === city.id);
+    if (groups.length === 0) {
+      problems.push(`${city.name}: 缺少居民群体`);
+      continue;
+    }
+    let people = 0;
+    for (const group of groups) {
+      if (!Number.isInteger(group.people) || group.people < 0) {
+        problems.push(`${city.name} ${group.name}: 群体人数无效`);
+      }
+      if (group.cash < -0.01) problems.push(`${city.name} ${group.name}: 群体现金为负`);
+      people += group.people;
+    }
+    if (people !== city.population.total) {
+      problems.push(
+        `${city.name}: 居民群体人数合计 ${people} 与城市总人口 ${city.population.total} 不一致`,
+      );
+    }
+    // 群体本月净现金变化 = 收入 - 消费 - 储蓄（容差 0.05）。
+    for (const group of groups) {
+      const expected = round2(
+        group.lastMonth.income - group.lastMonth.consumption - group.lastMonth.savingsContribution,
+      );
+      if (Math.abs(expected - group.lastMonth.netCashChange) > 0.05) {
+        problems.push(
+          `${city.name} ${group.name}: 群体现金流不闭合（应 ${expected}，记 ${group.lastMonth.netCashChange}）`,
+        );
+      }
+    }
+  }
+  return problems;
+}
+
+/** v0.4：经营者任职关系一致；AI 经营者不得同时经营两家企业。 */
+function checkManagement(world: WorldState): string[] {
+  const problems: string[] = [];
+  if (!world.management || !Array.isArray(world.management.operators)) {
+    return ['世界缺少经营者数据'];
+  }
+  const operatorById = new Map(world.management.operators.map((entry) => [entry.id, entry]));
+  const busyCompanies = new Map<string, string>();
+  for (const control of world.governance.controls) {
+    if (!control.operatorId) continue;
+    const operator = operatorById.get(control.operatorId);
+    if (!operator) {
+      problems.push(`企业 ${control.companyId}: 经营者档案 ${control.operatorId} 不存在`);
+      continue;
+    }
+    if (operator.status !== 'employed' || operator.companyId !== control.companyId) {
+      problems.push(`${operator.name}: 经营者状态与企业控制记录不一致`);
+    }
+    const existing = busyCompanies.get(operator.id);
+    if (existing && existing !== control.companyId) {
+      problems.push(`${operator.name}: 同时经营两家企业（${existing}、${control.companyId}）`);
+    }
+    busyCompanies.set(operator.id, control.companyId);
+  }
+  for (const operator of world.management.operators) {
+    if (operator.status === 'employed') {
+      if (!operator.companyId) problems.push(`${operator.name}: 在职但未记录企业`);
+    } else if (operator.companyId !== null) {
+      problems.push(`${operator.name}: 在人才市场但仍绑定企业`);
+    }
+  }
+  // 选任议案：候选人唯一，选票必须指向候选人，一人一票。
+  for (const motion of world.governance.motions) {
+    if (motion.kind !== 'operatorElection') continue;
+    const candidates = new Set((motion.candidates ?? []).map((entry) => entry.candidateId));
+    if (candidates.size === 0) problems.push(`选任议案 ${motion.id}: 缺少候选人`);
+    const voters = new Set<string>();
+    for (const vote of motion.votes) {
+      if (!vote.candidateId || !candidates.has(vote.candidateId)) {
+        problems.push(`选任议案 ${motion.id}: 选票指向不存在的候选人`);
+      }
+      const key = holderKeyOf(vote.holder);
+      if (voters.has(key)) problems.push(`选任议案 ${motion.id}: 持有人 ${key} 重复投票`);
+      voters.add(key);
+    }
+  }
+  return problems;
+}
+
+/** v0.4：银行账目一致（存款非负、贷款余额与已还本金一致、企业债务镜像一致）。 */
+function checkBanking(world: WorldState): string[] {
+  const problems: string[] = [];
+  if (!world.banking || !Array.isArray(world.banking.loans)) {
+    return ['世界缺少银行数据'];
+  }
+  for (const account of world.banking.deposits) {
+    if (account.balance < -0.01) problems.push(`存款账户 ${account.id}: 余额为负`);
+  }
+  const debtByCompany = new Map<string, number>();
+  for (const loan of world.banking.loans) {
+    if (loan.outstanding < -0.01) problems.push(`贷款 ${loan.id}: 未偿本金为负`);
+    if (loan.paidPrincipal < -0.01 || loan.paidInterest < -0.01) {
+      problems.push(`贷款 ${loan.id}: 已还金额为负`);
+    }
+    const expected = round2(loan.principal - loan.paidPrincipal);
+    if (Math.abs(expected - loan.outstanding) > 0.01) {
+      problems.push(`贷款 ${loan.id}: 未偿本金 ${loan.outstanding} 与已还本金不一致（应 ${expected}）`);
+    }
+    if (loan.status === 'repaid' && loan.outstanding > 0.01) {
+      problems.push(`贷款 ${loan.id}: 已结清但仍有未偿本金`);
+    }
+    if (loan.borrower.kind === 'company') {
+      const current = debtByCompany.get(loan.borrower.id) ?? 0;
+      // 违约贷款仍计入企业债务（银行不放弃债权），与 syncCompanyDebt 口径一致。
+      if (loan.status !== 'repaid') {
+        debtByCompany.set(loan.borrower.id, round2(current + loan.outstanding));
+      }
+    }
+  }
+  for (const company of world.companies) {
+    const expected = debtByCompany.get(company.id) ?? 0;
+    if (Math.abs(expected - company.debt) > 0.01) {
+      problems.push(
+        `${company.name}: 企业债务镜像 ${company.debt} 与银行贷款未偿 ${expected} 不一致`,
+      );
     }
   }
   return problems;

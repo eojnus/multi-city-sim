@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SAVE_FORMAT_VERSION } from '../src/simulation/contracts/types';
+import { GAME_VERSION, SAVE_FORMAT_VERSION } from '../src/simulation/contracts/types';
 import { serializeSave } from '../src/simulation/core/save';
 import { Simulation } from '../src/simulation/core/simulation';
 
@@ -40,7 +40,7 @@ describe('桌面验证脚本的存档格式断言（读取真实文件）', () =
     const result = verifySaveFile({ savesDir: dir, slot: 'manual-1', storeFormatVersion: SAVE_FORMAT_VERSION });
     expect(result.ok, result.error ?? '').toBe(true);
     expect(result.fileFormatVersion).toBe(SAVE_FORMAT_VERSION);
-    expect(result.fileGameVersion).toBe('0.3.0');
+    expect(result.fileGameVersion).toBe(GAME_VERSION);
     expect(result.fileBytes).toBeGreaterThan(0);
     expect(result.listing).toContain('manual-1.json');
   });

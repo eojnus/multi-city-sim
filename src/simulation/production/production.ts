@@ -8,7 +8,8 @@ import { GOOD_IDS } from '../companies/company';
 import { PRODUCTIVITY, RECIPES } from '../../data/demo-data';
 import { round2 } from '../core/math';
 import { monthlyWageBill } from '../companies/company';
-import { creditAvailable } from '../companies/credit';
+import { drawWorkingCapital } from '../banking/banking';
+import { availableCredit } from '../banking/credit';
 import { workforceSkillMultiplier } from '../labor/workforce';
 import { leaderSectorMultiplier } from '../politics/politics';
 import { keyIndustryFocus } from '../policies/query';
@@ -152,12 +153,17 @@ export function runInputPurchasing(
     // 结算式采购融资：无成交时不改变现金和债务，借款只与实际成交金额挂钩。
     if (purchaseSpend > 0) {
       const cashGap = round2(Math.max(0, wage * 1.5 - company.cash));
+      // v0.4：采购融资走独立银行（形成贷款合同），不再直接增加无对手方债务。
       const borrow = round2(
-        Math.min(purchaseSpend, cashGap, creditAvailable(company, config)),
+        Math.min(
+          purchaseSpend,
+          cashGap,
+          availableCredit(world, { kind: 'company', id: company.id }, config),
+        ),
       );
       if (borrow > 0) {
-        company.cash = round2(company.cash + borrow);
-        company.debt = round2(company.debt + borrow);
+        // 并入该企业已有周转贷款（没有则新建），避免每笔采购都生成独立合同。
+        drawWorkingCapital(world, company, borrow, config, world.time.tick);
       }
     }
   }

@@ -23,6 +23,12 @@ import { createShareStructure, syncAllCompanyShares } from '../securities/securi
 import { createInitialTransport } from '../transport/network';
 import { createInitialPolitics } from '../politics/politics';
 import { freshAiState } from '../companies/lifecycle/lifecycle';
+import {
+  createInitialHouseholds,
+  recordHouseholdWealthStats,
+} from '../population/household-groups';
+import { createInitialBanking } from '../banking/banking';
+import { createInitialManagement } from '../management/manager-pool';
 
 function createMarket(): Record<GoodId, MarketState> {
   const market = {} as Record<GoodId, MarketState>;
@@ -266,6 +272,10 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
       },
     },
     lifecycle: { foundings: [], liquidations: [], nextFoundingNumber: 1, nextLiquidationNumber: 1 },
+    // v0.4：居民群体、经营者与银行在下面按依赖顺序初始化。
+    households: { groups: [], lastStats: [] },
+    management: { operators: [], playerOperations: [], nextOperatorNumber: 1 },
+    banking: createInitialBanking(config),
     history: [],
     log: [],
     lastTick: {
@@ -280,6 +290,11 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
   // 居民投资实体：先建立资金来源，再发行股份给出资方。
   createInvestorGroups(world, config);
   createInitialShareStructure(world, config);
+
+  // v0.4：居民群体（人口/收入/资产承载）、经营者（沿用原企业风格）、银行（空账本）。
+  world.households = createInitialHouseholds(world, config);
+  world.management = createInitialManagement(world, config, 0);
+  recordHouseholdWealthStats(world, config, 0);
 
   // 政府主导的交通网络与候选人/领导人（演示规则）。
   world.transport = createInitialTransport(world, config);
@@ -314,7 +329,7 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
   world.log.push({
     tick: 0,
     kind: 'system',
-    message: `世界初始化完成：${cities.length} 座城市、${companies.length} 家企业、${GOODS.length} 种商品、${world.investors.length} 个居民投资实体。所有数值为演示方案 v0.2。`,
+    message: `世界初始化完成：${cities.length} 座城市、${companies.length} 家企业、${GOODS.length} 种商品、${world.investors.length} 个居民投资实体、${world.households.groups.length} 个居民群体、${world.management.operators.length} 名经营者。所有数值为演示方案 v0.4。`,
   });
   return world;
 }

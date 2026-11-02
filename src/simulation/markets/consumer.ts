@@ -5,6 +5,7 @@ import type { CityLedgers } from './markets';
 import { applyConsumerDemand } from './markets';
 import { executeIntercityPurchase } from './intercity';
 import { householdGroupWeights } from '../population/population';
+import { cityHouseholdBudget } from '../population/household-groups';
 import { clamp, round2 } from '../core/math';
 
 export interface ConsumerResult {
@@ -26,7 +27,8 @@ export function runConsumerMarket(
   ledgers: CityLedgers,
   config: DemoConfig,
 ): ConsumerResult {
-  const budget = Math.max(0, city.householdIncomeLastMonth * config.consumer.propensity);
+  // v0.4：居民预算来自群体可支配现金（受实际现金约束），不再是纯收入口径。
+  const budget = cityHouseholdBudget(world, city, config);
   const weights = householdGroupWeights(city, config);
   const consumerGoods = GOODS.filter((good) => good.category === 'consumer');
 

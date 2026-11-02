@@ -3,7 +3,8 @@ import type { DemoConfig } from '../../data/config';
 import { RECIPES } from '../../data/demo-data';
 import { round2 } from '../core/math';
 import { productionTarget } from '../production/production';
-import { creditAvailable } from '../companies/credit';
+import { drawWorkingCapital } from '../banking/banking';
+import { availableCredit } from '../banking/credit';
 import { corridorKey, recordIntercitySale } from '../transport/network';
 
 /**
@@ -41,10 +42,10 @@ export function executeTradeRoutes(
 
     // 先计算“现金 + 可用信贷”能买到的数量。融资只在最终提交点发生，
     // 因此资金不足导致交易不成立时不会留下债务或现金变化。
-    const availableCredit = creditAvailable(importer, config);
+    const creditRoom = availableCredit(world, { kind: 'company', id: importer.id }, config);
     const maxAffordableQty =
       price > 0
-        ? Math.floor(((Math.max(0, importer.cash) + availableCredit) / price) * 100) / 100
+        ? Math.floor(((Math.max(0, importer.cash) + creditRoom) / price) * 100) / 100
         : 0;
     let qty = Math.min(
       route.monthlyTarget,
@@ -57,23 +58,19 @@ export function executeTradeRoutes(
     const value = round2(qty * price);
     if (value <= 0) continue;
     const borrowNeeded = round2(Math.max(0, value - importer.cash));
-    if (borrowNeeded > availableCredit + 1e-6) continue;
+    if (borrowNeeded > creditRoom + 1e-6) continue;
 
     // 所有条件都已确认，再提交融资、货物、资金和成交记录。
     const exporterStock = exporter.inventory[route.good] ?? 0;
     if (exporterStock < qty || importer.cash + borrowNeeded < value - 1e-6) continue;
 
-    const importerCashBefore = importer.cash;
-    const importerDebtBefore = importer.debt;
+    // v0.4：进口融资走独立银行（形成贷款合同）；失败则放弃本笔交易，不留部分状态。
     if (borrowNeeded > 0) {
-      importer.cash = round2(importer.cash + borrowNeeded);
-      importer.debt = round2(importer.debt + borrowNeeded);
+      // 并入已有周转贷款（没有则新建），仍受同一授信额度限制。
+      const drawn = drawWorkingCapital(world, importer, borrowNeeded, config, world.time.tick);
+      if (drawn + 1e-6 < borrowNeeded) continue;
     }
-    if (importer.cash + 1e-6 < value) {
-      importer.cash = importerCashBefore;
-      importer.debt = importerDebtBefore;
-      continue;
-    }
+    if (importer.cash + 1e-6 < value) continue;
 
     // ---- 原子提交 ----
     exporter.inventory[route.good] = round2(exporterStock - qty);

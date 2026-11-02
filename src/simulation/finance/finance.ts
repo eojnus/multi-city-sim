@@ -2,7 +2,7 @@ import type { LogEntry, WorldState } from '../contracts/types';
 import type { DemoConfig } from '../../data/config';
 import { clamp, round2 } from '../core/math';
 import { monthlyWageBill } from '../companies/company';
-import { ensureLiquidity, payInterest, repayDebt, companyCreditLimit, restructureDebt } from '../companies/credit';
+import { ensureCompanyLiquidity, serviceCompanyLoans } from '../banking/banking';
 import { distributeDividend, playerTotalShares } from '../securities/securities';
 
 export interface FinanceResult {
@@ -61,17 +61,8 @@ export function settleCompanyFinance(
     if (!city) continue;
     const stats = company.lastMonth;
     const owedWages = monthlyWageBill(company);
-    const creditLimit = companyCreditLimit(company, config);
-    if (company.debt > creditLimit * 0.8 && company.cash < owedWages * 0.2) {
-      const forgiven = restructureDebt(company);
-      company.cash = round2(company.cash + owedWages * 0.35);
-      log.push({
-        tick: world.time.tick,
-        kind: 'warning',
-        message: `${company.name} 触发债务重组：减免 ${forgiven.toFixed(0)} 债务并注入 ${(owedWages * 0.35).toFixed(0)} 营运资金（演示机制）。`,
-      });
-    }
-    ensureLiquidity(company, owedWages, config);
+    // v0.4：现金不足时按银行授信自动借入周转贷款（旧的无对手方信贷已停用）。
+    ensureCompanyLiquidity(world, company, owedWages, config, world.time.tick);
     const paidWages = round2(Math.min(company.cash, owedWages));
     company.cash = round2(company.cash - paidWages);
     const arrears = round2(owedWages - paidWages);
@@ -87,8 +78,9 @@ export function settleCompanyFinance(
     company.cash = round2(company.cash - taxPaid);
     stats.corporateTax = taxPaid;
 
-    payInterest(company, config);
-    repayDebt(company, config);
+    // v0.4：银行还本付息排在工资与企业所得税之后、股息之前（债务优先于分红）。
+    const loanService = serviceCompanyLoans(world, company, config, world.time.tick, log);
+    stats.interestPaid = loanService.interestPaid;
     stats.profit = round2(preTaxProfit - taxPaid - stats.interestPaid);
     if (!company.ai) {
       company.ai = {

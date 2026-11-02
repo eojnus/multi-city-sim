@@ -37,7 +37,9 @@ describe('固定种子与长期稳定性', () => {
     expect(serializeSave(a.state, 'fixed')).toBe(serializeSave(b.state, 'fixed'));
   });
 
-  it('推进 120 个月保持人口、就业、资金、商品、股份与预算约束', () => {
+  // v0.4：世界规模扩大（居民群体、经营者、银行、更多企业），120 期模拟耗时上升，
+  // 显式放宽该长期用例的超时，避免把“跑得久”误判成失败。
+  it('推进 120 个月保持人口、就业、资金、商品、股份与预算约束', { timeout: 30_000 }, () => {
     const sim = Simulation.create();
     for (let index = 0; index < 120; index++) {
       const result = sim.tick();

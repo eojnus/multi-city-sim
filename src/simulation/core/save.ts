@@ -14,6 +14,12 @@ import { createInitialTransport } from '../transport/network';
 import { createInitialPolitics } from '../politics/politics';
 import { freshAiState } from '../companies/lifecycle/lifecycle';
 import { POLICY_IDS } from '../policies/definitions';
+import {
+  computeHouseholdWealthStats,
+  migrateHouseholds,
+} from '../population/household-groups';
+import { createInitialManagement } from '../management/manager-pool';
+import { createInitialBanking, migrateLegacyCompanyDebt } from '../banking/banking';
 
 export interface ParseResult {
   ok: boolean;
@@ -128,6 +134,14 @@ export function parseSave(text: string): ParseResult {
       }
       worldValue = migration.world;
       if (migratedFrom === undefined) migratedFrom = 3;
+    }
+    if (formatVersion <= 4) {
+      const migration = migrateWorldV4ToV5(worldValue);
+      if (!migration.ok || !migration.world) {
+        return { ok: false, error: migration.error ?? 'v4 存档迁移失败' };
+      }
+      worldValue = migration.world;
+      if (migratedFrom === undefined) migratedFrom = 4;
     }
 
     const structureError = validateWorldStructure(worldValue);
@@ -475,9 +489,71 @@ export function migrateWorldV3ToV4(raw: unknown): MigrationResult {
   return { ok: true, world: candidateWorld };
 }
 
+/**
+ * v4 → v5 迁移：补齐居民群体、经营者与独立银行。
+ * - 不创造资金：居民群体现金与存款为 0（财富来自投资实体权益归属）；
+ * - 旧 company.debt 承接为银行贷款合同（本金不变、不清零、不重复计息）；
+ * - 经营者按确定性规则生成，沿用企业既有 ai.style，不改变企业资产与行为。
+ */
+export function migrateWorldV4ToV5(raw: unknown): MigrationResult {
+  if (!isRecord(raw)) return { ok: false, error: '存档 world 不是对象' };
+  if (!Array.isArray(raw.cities) || raw.cities.length === 0) {
+    return { ok: false, error: 'v4 存档缺少城市数据，无法迁移' };
+  }
+  if (!Array.isArray(raw.companies)) {
+    return { ok: false, error: 'v4 存档缺少企业数据，无法迁移' };
+  }
+  const world = deepClone(raw) as unknown as WorldState & Record<string, unknown>;
+  const config = DEMO_CONFIG;
+  const timeValue = (world as unknown as Record<string, unknown>).time;
+  const tick = isRecord(timeValue) && isFiniteNumber(timeValue.tick) ? timeValue.tick : 0;
+
+  // 1. 居民群体：旧存档没有居民现金存量，迁移时不凭空造钱。
+  const householdRecord = isRecord(world.households) ? world.households : null;
+  if (!householdRecord || !Array.isArray(householdRecord.groups) || householdRecord.groups.length === 0) {
+    world.households = migrateHouseholds(world as unknown as WorldState, config);
+  } else if (!Array.isArray(householdRecord.lastStats)) {
+    householdRecord.lastStats = [];
+  }
+
+  // 2. 银行：空账本 + 旧债务承接（公司债务是既有数据，必须保留而不是清零）。
+  const bankingRecord = isRecord(world.banking) ? world.banking : null;
+  if (!bankingRecord || !Array.isArray(bankingRecord.loans) || !Array.isArray(bankingRecord.deposits)) {
+    world.banking = createInitialBanking(config);
+  }
+  migrateLegacyCompanyDebt(world as unknown as WorldState, config, tick);
+
+  // 3. 经营者：旧存档没有经营者档案时确定性生成，并沿用企业既有风格。
+  const managementRecord = isRecord(world.management) ? world.management : null;
+  if (!managementRecord || !Array.isArray(managementRecord.operators) || managementRecord.operators.length === 0) {
+    world.management = createInitialManagement(world as unknown as WorldState, config, tick);
+  } else if (!Array.isArray(managementRecord.playerOperations)) {
+    managementRecord.playerOperations = [];
+  }
+
+  // 4. 治理控制权补齐新字段（旧存档 control 没有 operatorId / termEndTick）。
+  const governance = isRecord(world.governance) ? world.governance : null;
+  if (governance && Array.isArray(governance.controls)) {
+    for (const control of governance.controls as unknown as Record<string, unknown>[]) {
+      if (typeof control.operatorId !== 'string') control.operatorId = null;
+      if (!isFiniteNumber(control.termEndTick) && control.termEndTick !== null) {
+        control.termEndTick = null;
+      }
+      if (control.basis !== 'management' && control.basis !== 'boardAppointment' && control.basis !== 'election') {
+        control.basis = 'management';
+      }
+    }
+  }
+
+  // 5. 阶层统计快照。
+  const households = world.households as unknown as WorldState['households'];
+  households.lastStats = computeHouseholdWealthStats(world as unknown as WorldState, config, tick);
+
+  return { ok: true, world: world as unknown as WorldState };
+}
+
 function snapshotVotingHolders(
-  world: WorldState,
-  companyId: string,
+  world: WorldState,  companyId: string,
 ): { holder: { type: 'player' | 'company' | 'investorGroup' | 'city'; id: string }; shares: number }[] {
   const votingClassIds = new Set(
     (world.securities?.classes ?? [])
@@ -622,6 +698,16 @@ export function validateWorldStructure(world: unknown): string | null {
 
   const lifecycleError = validateLifecycle(world.lifecycle, cityIds);
   if (lifecycleError) return lifecycleError;
+
+  // v0.4：居民群体、经营者与银行。
+  const householdError = validateHouseholds(world.households, cityIds);
+  if (householdError) return householdError;
+
+  const managementError = validateManagement(world.management, companyIds, cityIds);
+  if (managementError) return managementError;
+
+  const bankingError = validateBanking(world.banking, cityIds, companyIds, investorIds);
+  if (bankingError) return bankingError;
 
   for (let index = 0; index < world.tradeRoutes.length; index++) {
     const error = validateTradeRoute(world.tradeRoutes[index], index);
@@ -1194,7 +1280,11 @@ function validateGovernance(
     if (typeof motion.companyId !== 'string' || !companyIds.has(motion.companyId)) {
       return `议案 ${motion.id} 引用了不存在的企业`;
     }
-    if (motion.kind !== 'dividendPolicy' && motion.kind !== 'operatorAppointment') {
+    if (
+      motion.kind !== 'dividendPolicy' &&
+      motion.kind !== 'operatorAppointment' &&
+      motion.kind !== 'operatorElection'
+    ) {
       return `议案 ${motion.id}.kind 无效`;
     }
     if (typeof motion.title !== 'string' || !isRecord(motion.params)) {
@@ -1207,6 +1297,41 @@ function validateGovernance(
     }
     const holderError = holderCheck(motion.proposedBy, `governance.motions[${index}].proposedBy`);
     if (holderError) return holderError;
+    // v0.4：经营者选任议案的候选人名单（候选人在议案创建时固定，玩家可登记加入）。
+    const candidateIds = new Set<string>();
+    if (motion.candidates !== undefined) {
+      if (!Array.isArray(motion.candidates)) return `议案 ${motion.id}.candidates 必须是数组`;
+      for (let candidateIndex = 0; candidateIndex < motion.candidates.length; candidateIndex++) {
+        const candidate = motion.candidates[candidateIndex];
+        if (!isRecord(candidate)) return `议案 ${motion.id}.candidates[${candidateIndex}] 不是对象`;
+        if (typeof candidate.candidateId !== 'string' || candidate.candidateId.length === 0) {
+          return `议案 ${motion.id}.candidates[${candidateIndex}].candidateId 无效`;
+        }
+        if (candidateIds.has(candidate.candidateId)) {
+          return `议案 ${motion.id}.candidates 存在重复候选人 ${candidate.candidateId}`;
+        }
+        candidateIds.add(candidate.candidateId);
+        if (candidate.kind !== 'ai' && candidate.kind !== 'player') {
+          return `议案 ${motion.id}.candidates[${candidateIndex}].kind 无效`;
+        }
+        if (candidate.operatorId !== null && typeof candidate.operatorId !== 'string') {
+          return `议案 ${motion.id}.candidates[${candidateIndex}].operatorId 无效`;
+        }
+        if (typeof candidate.name !== 'string' || typeof candidate.isIncumbent !== 'boolean') {
+          return `议案 ${motion.id}.candidates[${candidateIndex}] 字段无效`;
+        }
+        if (
+          candidate.style !== null &&
+          candidate.style !== 'growth' &&
+          candidate.style !== 'steady' &&
+          candidate.style !== 'return'
+        ) {
+          return `议案 ${motion.id}.candidates[${candidateIndex}].style 无效`;
+        }
+      }
+    } else if (motion.kind === 'operatorElection') {
+      return `选任议案 ${motion.id} 缺少候选人名单`;
+    }
     if (!isInteger(motion.createdTick) || !isInteger(motion.closesAtTick)) {
       return `议案 ${motion.id} 时间字段无效`;
     }
@@ -1243,6 +1368,14 @@ function validateGovernance(
       if (!isFiniteNumber(vote.votingShares) || !isInteger(vote.tick)) {
         return `议案 ${motion.id}.votes[${voteIndex}] 数值无效`;
       }
+      // v0.4：选任议案的每一票必须指向候选人名单中的一位。
+      if (motion.kind === 'operatorElection') {
+        if (typeof vote.candidateId !== 'string' || !candidateIds.has(vote.candidateId)) {
+          return `选任议案 ${motion.id}.votes[${voteIndex}].candidateId 无效`;
+        }
+      } else if (vote.candidateId !== undefined) {
+        return `非选任议案 ${motion.id}.votes[${voteIndex}] 不应包含 candidateId`;
+      }
       const voter = vote.holder as Record<string, unknown>;
       const voterKey = `${String(voter.type)}:${String(voter.id)}`;
       const entitled = eligibility.get(voterKey);
@@ -1271,8 +1404,19 @@ function validateGovernance(
       const holderError = holderCheck(control.operator, `governance.controls[${index}].operator`);
       if (holderError) return holderError;
     }
-    if (control.basis !== 'management' && control.basis !== 'boardAppointment') {
+    if (
+      control.basis !== 'management' &&
+      control.basis !== 'boardAppointment' &&
+      control.basis !== 'election'
+    ) {
       return `经营控制记录 ${index}.basis 无效`;
+    }
+    // v0.4：经营者档案引用与任期（旧档迁移会补 null）。
+    if (control.operatorId !== undefined && control.operatorId !== null) {
+      if (typeof control.operatorId !== 'string') return `经营控制记录 ${index}.operatorId 无效`;
+    }
+    if (control.termEndTick !== undefined && control.termEndTick !== null) {
+      if (!isInteger(control.termEndTick)) return `经营控制记录 ${index}.termEndTick 无效`;
     }
     if (!isInteger(control.sinceTick) || typeof control.note !== 'string') {
       return `经营控制记录 ${index} 字段无效`;
@@ -1685,6 +1829,336 @@ function validateLifecycle(value: unknown, cityIds: Set<string>): string | null 
       return `lifecycle.liquidations[${index}].inventoryWrittenOff 无效`;
     }
     if (typeof record.note !== 'string') return `lifecycle.liquidations[${index}].note 无效`;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------- v0.4 校验器
+
+const OCCUPATION_KEYS = new Set([
+  'management',
+  'production',
+  'sales',
+  'research',
+  'publicSector',
+  'unemployed',
+  'nonLabor',
+]);
+const WEALTH_TIERS = new Set(['low', 'middle', 'high']);
+const OPERATION_MODES = new Set(['manual', 'assisted', 'delegated']);
+const PROPOSAL_KINDS = new Set(['hire', 'expand', 'loan', 'dividend', 'price']);
+const PROPOSAL_STATUSES = new Set(['pending', 'approved', 'rejected', 'executed', 'expired']);
+const LOAN_PURPOSES = new Set(['workingCapital', 'expansion', 'personal', 'migratedDebt']);
+const LOAN_STATUSES = new Set(['active', 'repaid', 'defaulted']);
+const BANK_OWNER_KINDS = new Set(['player', 'household', 'company', 'investorGroup']);
+
+function validateBankOwner(
+  value: unknown,
+  path: string,
+  companyIds: Set<string>,
+  investorIds: Set<string>,
+): string | null {
+  if (!isRecord(value)) return `${path} 不是对象`;
+  if (typeof value.kind !== 'string' || !BANK_OWNER_KINDS.has(value.kind)) {
+    return `${path}.kind 无效`;
+  }
+  if (typeof value.id !== 'string' || value.id.length === 0) return `${path}.id 无效`;
+  if (value.kind === 'player' && value.id !== 'player') return `${path}.id 对玩家无效`;
+  if (value.kind === 'company' && !companyIds.has(value.id)) {
+    return `${path} 引用了不存在的企业 ${value.id}`;
+  }
+  if (value.kind === 'investorGroup' && !investorIds.has(value.id)) {
+    return `${path} 引用了不存在的居民投资实体 ${value.id}`;
+  }
+  return null;
+}
+
+function validateHouseholds(value: unknown, cityIds: Set<string>): string | null {
+  if (!isRecord(value)) return 'world.households 无效';
+  if (!Array.isArray(value.groups)) return 'households.groups 必须是数组';
+  if (!Array.isArray(value.lastStats)) return 'households.lastStats 必须是数组';
+  const ids = new Set<string>();
+  for (let index = 0; index < value.groups.length; index++) {
+    const group = value.groups[index];
+    if (!isRecord(group)) return `households.groups[${index}] 不是对象`;
+    if (typeof group.id !== 'string' || group.id.length === 0) {
+      return `households.groups[${index}].id 无效`;
+    }
+    if (ids.has(group.id)) return `居民群体 ID 重复：${group.id}`;
+    ids.add(group.id);
+    if (typeof group.cityId !== 'string' || !cityIds.has(group.cityId)) {
+      return `居民群体 ${group.id} 引用了不存在的城市`;
+    }
+    if (typeof group.occupation !== 'string' || !OCCUPATION_KEYS.has(group.occupation)) {
+      return `居民群体 ${group.id}.occupation 无效`;
+    }
+    if (!isFiniteNumber(group.people) || group.people < 0) return `居民群体 ${group.id}.people 无效`;
+    if (!isFiniteNumber(group.cash) || group.cash < -0.01) return `居民群体 ${group.id}.cash 无效`;
+    if (typeof group.name !== 'string' || typeof group.note !== 'string') {
+      return `居民群体 ${group.id} 文本字段无效`;
+    }
+    const stats = group.lastMonth;
+    if (!isRecord(stats)) return `居民群体 ${group.id}.lastMonth 无效`;
+    for (const key of [
+      'income',
+      'wageIncome',
+      'benefits',
+      'dividendIncome',
+      'incomeTax',
+      'consumption',
+      'desiredConsumption',
+      'savingsContribution',
+      'netCashChange',
+    ]) {
+      if (!isFiniteNumber(stats[key])) return `居民群体 ${group.id}.lastMonth.${key} 无效`;
+    }
+  }
+  for (let index = 0; index < value.lastStats.length; index++) {
+    const stats = value.lastStats[index];
+    if (!isRecord(stats)) return `households.lastStats[${index}] 不是对象`;
+    if (typeof stats.cityId !== 'string' || !cityIds.has(stats.cityId)) {
+      return `households.lastStats[${index}] 引用了不存在的城市`;
+    }
+    if (!Array.isArray(stats.tiers)) return `households.lastStats[${index}].tiers 无效`;
+    for (const tier of stats.tiers) {
+      if (!isRecord(tier) || typeof tier.tier !== 'string' || !WEALTH_TIERS.has(tier.tier)) {
+        return `households.lastStats[${index}].tiers 含无效阶层`;
+      }
+      for (const key of ['people', 'share', 'perCapitaWealth', 'perCapitaIncome', 'cash', 'deposits', 'equity']) {
+        if (!isFiniteNumber(tier[key])) return `households.lastStats[${index}].tiers.${key} 无效`;
+      }
+    }
+  }
+  return null;
+}
+
+function validateManagement(
+  value: unknown,
+  companyIds: Set<string>,
+  cityIds: Set<string>,
+): string | null {
+  if (!isRecord(value)) return 'world.management 无效';
+  if (!Array.isArray(value.operators)) return 'management.operators 必须是数组';
+  if (!Array.isArray(value.playerOperations)) return 'management.playerOperations 必须是数组';
+  if (!isInteger(value.nextOperatorNumber)) return 'management.nextOperatorNumber 无效';
+  const operatorIds = new Set<string>();
+  for (let index = 0; index < value.operators.length; index++) {
+    const operator = value.operators[index];
+    if (!isRecord(operator)) return `management.operators[${index}] 不是对象`;
+    if (typeof operator.id !== 'string' || operator.id.length === 0) {
+      return `management.operators[${index}].id 无效`;
+    }
+    if (operatorIds.has(operator.id)) return `经营者 ID 重复：${operator.id}`;
+    operatorIds.add(operator.id);
+    if (typeof operator.name !== 'string') return `经营者 ${operator.id}.name 无效`;
+    if (operator.style !== 'growth' && operator.style !== 'steady' && operator.style !== 'return') {
+      return `经营者 ${operator.id}.style 无效`;
+    }
+    if (!isFiniteNumber(operator.reputation)) return `经营者 ${operator.id}.reputation 无效`;
+    if (operator.status !== 'employed' && operator.status !== 'available') {
+      return `经营者 ${operator.id}.status 无效`;
+    }
+    if (operator.companyId !== null) {
+      if (typeof operator.companyId !== 'string' || !companyIds.has(operator.companyId)) {
+        return `经营者 ${operator.id}.companyId 无效`;
+      }
+    }
+    for (const key of ['appointedTick', 'termEndTick']) {
+      if (operator[key] !== null && !isInteger(operator[key])) {
+        return `经营者 ${operator.id}.${key} 无效`;
+      }
+    }
+    if (!Array.isArray(operator.history)) return `经营者 ${operator.id}.history 无效`;
+    for (const tenure of operator.history) {
+      if (!isRecord(tenure) || typeof tenure.companyId !== 'string') {
+        return `经营者 ${operator.id}.history 含无效记录`;
+      }
+      if (!isInteger(tenure.fromTick) || !isInteger(tenure.toTick)) {
+        return `经营者 ${operator.id}.history 时间无效`;
+      }
+    }
+    if (typeof operator.note !== 'string') return `经营者 ${operator.id}.note 无效`;
+  }
+
+  const operatedCompanies = new Set<string>();
+  for (let index = 0; index < value.playerOperations.length; index++) {
+    const operation = value.playerOperations[index];
+    if (!isRecord(operation)) return `management.playerOperations[${index}] 不是对象`;
+    if (typeof operation.companyId !== 'string' || !companyIds.has(operation.companyId)) {
+      return `玩家经营记录 ${index} 引用了不存在的企业`;
+    }
+    if (operatedCompanies.has(operation.companyId)) {
+      return `玩家经营记录重复：${operation.companyId}`;
+    }
+    operatedCompanies.add(operation.companyId);
+    if (typeof operation.mode !== 'string' || !OPERATION_MODES.has(operation.mode)) {
+      return `玩家经营记录 ${index}.mode 无效`;
+    }
+    const auth = operation.authorization;
+    if (!isRecord(auth)) return `玩家经营记录 ${index}.authorization 无效`;
+    for (const key of ['maxInvestmentPerMonth', 'maxHiresPerMonth', 'maxLoanAmount']) {
+      if (!isFiniteNumber(auth[key]) || auth[key] < 0) {
+        return `玩家经营记录 ${index}.authorization.${key} 无效`;
+      }
+    }
+    for (const key of ['allowInvestment', 'allowHiring', 'allowLoan', 'allowPriceAdjust']) {
+      if (typeof auth[key] !== 'boolean') return `玩家经营记录 ${index}.authorization.${key} 无效`;
+    }
+    if (operation.standingPlan !== null) {
+      const plan = operation.standingPlan;
+      if (!isRecord(plan)) return `玩家经营记录 ${index}.standingPlan 无效`;
+      for (const key of ['utilization', 'targetJobs', 'priceFactor', 'investmentPerMonth']) {
+        if (!isFiniteNumber(plan[key])) return `玩家经营记录 ${index}.standingPlan.${key} 无效`;
+      }
+      if (!isInteger(plan.expiresTick)) return `玩家经营记录 ${index}.standingPlan.expiresTick 无效`;
+    }
+    if (!Array.isArray(operation.proposals)) return `玩家经营记录 ${index}.proposals 无效`;
+    for (let proposalIndex = 0; proposalIndex < operation.proposals.length; proposalIndex++) {
+      const proposal = operation.proposals[proposalIndex];
+      if (!isRecord(proposal)) return `玩家提案 ${proposalIndex} 不是对象`;
+      if (typeof proposal.id !== 'string' || typeof proposal.title !== 'string') {
+        return `玩家提案 ${proposalIndex} 字段无效`;
+      }
+      if (typeof proposal.kind !== 'string' || !PROPOSAL_KINDS.has(proposal.kind)) {
+        return `玩家提案 ${proposal.id}.kind 无效`;
+      }
+      if (typeof proposal.status !== 'string' || !PROPOSAL_STATUSES.has(proposal.status)) {
+        return `玩家提案 ${proposal.id}.status 无效`;
+      }
+      if (!isFiniteNumber(proposal.amount)) return `玩家提案 ${proposal.id}.amount 无效`;
+      if (!isInteger(proposal.createdTick) || !isInteger(proposal.expiresTick)) {
+        return `玩家提案 ${proposal.id} 时间字段无效`;
+      }
+      if (proposal.decidedTick !== null && !isInteger(proposal.decidedTick)) {
+        return `玩家提案 ${proposal.id}.decidedTick 无效`;
+      }
+      if (!Array.isArray(proposal.reasons) || !isRecord(proposal.params)) {
+        return `玩家提案 ${proposal.id} 内容无效`;
+      }
+      if (typeof proposal.dedupeKey !== 'string' || typeof proposal.result !== 'string') {
+        return `玩家提案 ${proposal.id} 文本字段无效`;
+      }
+    }
+  }
+  // cityIds 目前不参与经营者校验，保留参数以便未来按城市限制人才池。
+  void cityIds;
+  return null;
+}
+
+function validateBanking(
+  value: unknown,
+  cityIds: Set<string>,
+  companyIds: Set<string>,
+  investorIds: Set<string>,
+): string | null {
+  if (!isRecord(value)) return 'world.banking 无效';
+  if (!Array.isArray(value.deposits)) return 'banking.deposits 必须是数组';
+  if (!Array.isArray(value.loans)) return 'banking.loans 必须是数组';
+  if (!Array.isArray(value.snapshots)) return 'banking.snapshots 必须是数组';
+  if (!isRecord(value.lastMonth)) return 'banking.lastMonth 无效';
+  if (!isInteger(value.nextAccountNumber) || !isInteger(value.nextLoanNumber)) {
+    return 'banking 编号计数器无效';
+  }
+  void cityIds;
+
+  const accountIds = new Set<string>();
+  for (let index = 0; index < value.deposits.length; index++) {
+    const account = value.deposits[index];
+    if (!isRecord(account)) return `banking.deposits[${index}] 不是对象`;
+    if (typeof account.id !== 'string' || accountIds.has(account.id)) {
+      return `存款账户 ${index} ID 无效或重复`;
+    }
+    accountIds.add(account.id);
+    const ownerError = validateBankOwner(account.owner, `banking.deposits[${index}].owner`, companyIds, investorIds);
+    if (ownerError) return ownerError;
+    for (const key of ['balance', 'rateMonthly', 'accruedInterest']) {
+      if (!isFiniteNumber(account[key]) || account[key] < -0.01) {
+        return `存款账户 ${account.id}.${key} 无效`;
+      }
+    }
+    if (!isInteger(account.lastInterestTick) || !isInteger(account.openedTick)) {
+      return `存款账户 ${account.id} 时间字段无效`;
+    }
+    if (typeof account.note !== 'string') return `存款账户 ${account.id}.note 无效`;
+  }
+
+  const loanIds = new Set<string>();
+  for (let index = 0; index < value.loans.length; index++) {
+    const loan = value.loans[index];
+    if (!isRecord(loan)) return `banking.loans[${index}] 不是对象`;
+    if (typeof loan.id !== 'string' || loanIds.has(loan.id)) {
+      return `贷款合同 ${index} ID 无效或重复`;
+    }
+    loanIds.add(loan.id);
+    const ownerError = validateBankOwner(loan.borrower, `banking.loans[${index}].borrower`, companyIds, investorIds);
+    if (ownerError) return ownerError;
+    if (typeof loan.purpose !== 'string' || !LOAN_PURPOSES.has(loan.purpose)) {
+      return `贷款合同 ${loan.id}.purpose 无效`;
+    }
+    for (const key of [
+      'principal',
+      'outstanding',
+      'monthlyPrincipal',
+      'rateMonthly',
+      'paidPrincipal',
+      'paidInterest',
+      'accruedInterest',
+      'arrearsPrincipal',
+      'arrearsInterest',
+    ]) {
+      if (!isFiniteNumber(loan[key])) return `贷款合同 ${loan.id}.${key} 无效`;
+    }
+    if (!isInteger(loan.termMonths) || loan.termMonths <= 0) return `贷款合同 ${loan.id}.termMonths 无效`;
+    if (!isInteger(loan.startTick) || !isInteger(loan.nextDueTick)) {
+      return `贷款合同 ${loan.id} 时间字段无效`;
+    }
+    if (!isInteger(loan.missedPayments) || loan.missedPayments < 0) {
+      return `贷款合同 ${loan.id}.missedPayments 无效`;
+    }
+    if (typeof loan.status !== 'string' || !LOAN_STATUSES.has(loan.status)) {
+      return `贷款合同 ${loan.id}.status 无效`;
+    }
+    if (!Array.isArray(loan.payments)) return `贷款合同 ${loan.id}.payments 无效`;
+    for (const payment of loan.payments) {
+      if (!isRecord(payment) || !isInteger(payment.tick)) {
+        return `贷款合同 ${loan.id} 含无效还款记录`;
+      }
+      for (const key of ['principalDue', 'interestDue', 'principalPaid', 'interestPaid', 'arrears']) {
+        if (!isFiniteNumber(payment[key])) return `贷款合同 ${loan.id} 还款记录 ${key} 无效`;
+      }
+    }
+    if (typeof loan.note !== 'string') return `贷款合同 ${loan.id}.note 无效`;
+  }
+
+  for (let index = 0; index < value.snapshots.length; index++) {
+    const snapshot = value.snapshots[index];
+    if (!isRecord(snapshot)) return `banking.snapshots[${index}] 不是对象`;
+    const ownerError = validateBankOwner(snapshot.borrower, `banking.snapshots[${index}].borrower`, companyIds, investorIds);
+    if (ownerError) return ownerError;
+    for (const key of ['baseValue', 'limitRate', 'limit', 'outstanding', 'available']) {
+      if (!isFiniteNumber(snapshot[key])) return `授信快照 ${index}.${key} 无效`;
+    }
+    if (!isInteger(snapshot.tick)) return `授信快照 ${index}.tick 无效`;
+    if (snapshot.method !== 'netWorth' && snapshot.method !== 'equityBook') {
+      return `授信快照 ${index}.method 无效`;
+    }
+    if (typeof snapshot.reason !== 'string') return `授信快照 ${index}.reason 无效`;
+  }
+
+  const stats = value.lastMonth;
+  for (const key of [
+    'interestExpense',
+    'interestIncome',
+    'principalIssued',
+    'principalRepaid',
+    'depositsTotal',
+    'loansOutstanding',
+    'newDefaults',
+  ]) {
+    if (!isFiniteNumber(stats[key])) return `banking.lastMonth.${key} 无效`;
+  }
+  if (!isInteger(stats.tick) || typeof stats.note !== 'string') {
+    return 'banking.lastMonth 字段无效';
   }
   return null;
 }

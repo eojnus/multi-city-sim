@@ -41,12 +41,13 @@ export function planCompanyDecision(
   world: WorldState,
   company: Company,
   config: DemoConfig,
+  styleOverride?: CompanyStyle,
 ): PlannedDecision {
   const city = world.cities.find((candidate) => candidate.id === company.cityId);
   if (!city) {
     const fallback: CompanyAiPlan = {
       tick: world.time.tick,
-      style: company.ai?.style ?? 'steady',
+      style: styleOverride ?? company.ai?.style ?? 'steady',
       utilization: company.utilization,
       targetJobs: company.jobDemand,
       expectedWageCost: monthlyWageBill(company),
@@ -58,7 +59,8 @@ export function planCompanyDecision(
     return { plan: fallback, utilization: company.utilization, targetJobs: company.jobDemand, investment: 0, priceFactor: company.priceFactor, reasons: fallback.reasons };
   }
 
-  const style = company.ai?.style ?? 'steady';
+  // v0.4：经营风格由现任经营者决定（无经营者时回退企业自身风格）。
+  const style = styleOverride ?? company.ai?.style ?? 'steady';
   const params = styleParams(style, config);
   const reasons: string[] = [];
   const output = company.recipeOutput;

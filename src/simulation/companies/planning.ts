@@ -3,6 +3,8 @@ import type { DemoConfig } from '../../data/config';
 import { round2 } from '../core/math';
 import { companyStyleLabel, planCompanyDecision } from './ai/strategy';
 import { expandCompanyCapacity } from './lifecycle/lifecycle';
+import { currentStyle } from '../management/manager-pool';
+import { planPlayerOperatedCompany } from '../management/operations';
 
 /**
  * 企业月度经营计划：由 ai/strategy 依据风格、现金、库存、需求、
@@ -17,7 +19,11 @@ export function planCompanies(
   log: LogEntry[],
 ): void {
   for (const company of [...world.companies].sort((a, b) => a.id.localeCompare(b.id))) {
-    const decision = planCompanyDecision(world, company, config);
+    // v0.4：玩家经营的企业按玩家模式处理（手动计划 / AI 辅助提案 / 高度托管授权执行）。
+    if (planPlayerOperatedCompany(world, company, config, world.time.tick, log)) continue;
+
+    const style = currentStyle(world, company);
+    const decision = planCompanyDecision(world, company, config, style);
     const previousJobs = company.jobDemand;
     const previousUtilization = company.utilization;
 
@@ -50,7 +56,7 @@ export function planCompanies(
       log.push({
         tick: world.time.tick,
         kind: 'labor',
-        message: `${company.name} 岗位需求 ${previousJobs} → ${company.jobDemand}，利用率 ${(previousUtilization * 100).toFixed(0)}% → ${(company.utilization * 100).toFixed(0)}%（${companyStyleLabel(company.ai.style)}）。`,
+        message: `${company.name} 岗位需求 ${previousJobs} → ${company.jobDemand}，利用率 ${(previousUtilization * 100).toFixed(0)}% → ${(company.utilization * 100).toFixed(0)}%（${companyStyleLabel(style)}）。`,
       });
     }
   }
