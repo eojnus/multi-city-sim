@@ -1,4 +1,11 @@
-import type { SaveFile, WorldState } from '../contracts/types';
+import type {
+  BondHolder,
+  FiscalVisibility,
+  HolderRef,
+  SaveFile,
+  WorldState,
+} from '../contracts/types';
+import { buildGdpWindow, createEmptyBondState, createEmptyGovernmentState, createEmptyHouseholdFinanceState } from './initializer';
 import { GAME_VERSION, SAVE_FORMAT_VERSION } from '../contracts/types';
 import { GOOD_IDS } from '../companies/company';
 import { checkInvariants } from './invariants';
@@ -150,6 +157,14 @@ export function parseSave(text: string): ParseResult {
       }
       worldValue = migration.world;
       if (migratedFrom === undefined) migratedFrom = 5;
+    }
+    if (formatVersion <= 6) {
+      const migration = migrateWorldV6ToV7(worldValue);
+      if (!migration.ok || !migration.world) {
+        return { ok: false, error: migration.error ?? 'v6 存档迁移失败' };
+      }
+      worldValue = migration.world;
+      if (migratedFrom === undefined) migratedFrom = 6;
     }
 
     const structureError = validateWorldStructure(worldValue);
@@ -354,7 +369,7 @@ export function migrateWorldV2ToV3(raw: unknown): MigrationResult {
       // 已结束议案：快照只用于存档结构与审计，按已记录票数还原，避免用当前持股改写历史。
       const byHolder = new Map<
         string,
-        { holder: { type: 'player' | 'company' | 'investorGroup' | 'city'; id: string }; shares: number }
+        { holder: HolderRef; shares: number }
       >();
       for (const vote of motion.votes ?? []) {
         const key = `${vote.holder.type}:${vote.holder.id}`;
@@ -588,13 +603,13 @@ export function migrateWorldV5ToV6(raw: unknown): MigrationResult {
 
 function snapshotVotingHolders(
   world: WorldState,  companyId: string,
-): { holder: { type: 'player' | 'company' | 'investorGroup' | 'city'; id: string }; shares: number }[] {
+): { holder: HolderRef; shares: number }[] {
   const votingClassIds = new Set(
     (world.securities?.classes ?? [])
       .filter((shareClass) => shareClass.companyId === companyId && shareClass.kind === 'voting')
       .map((shareClass) => shareClass.id),
   );
-  const totals = new Map<string, { holder: { type: 'player' | 'company' | 'investorGroup' | 'city'; id: string }; shares: number }>();
+  const totals = new Map<string, { holder: HolderRef; shares: number }>();
   for (const holding of world.securities?.holdings ?? []) {
     if (holding.companyId !== companyId) continue;
     if (!votingClassIds.has(holding.shareClassId)) continue;
@@ -687,12 +702,7 @@ export function validateWorldStructure(world: unknown): string | null {
 
   const holderCheck = (holder: unknown, path: string): string | null => {
     if (!isRecord(holder)) return `${path} 不是持有人对象`;
-    if (
-      holder.type !== 'player' &&
-      holder.type !== 'company' &&
-      holder.type !== 'investorGroup' &&
-      holder.type !== 'city'
-    ) {
+    if (typeof holder.type !== 'string' || !HOLDER_TYPES.has(holder.type)) {
       return `${path}.type 无效`;
     }
     if (typeof holder.id !== 'string') return `${path}.id 无效`;
@@ -742,6 +752,24 @@ export function validateWorldStructure(world: unknown): string | null {
 
   const bankingError = validateBanking(world.banking, cityIds, companyIds, investorIds);
   if (bankingError) return bankingError;
+
+  // v0.7：债券、政府债务与居民消费金融（迁移后必定存在）。
+  const bondsError = validateBonds(world.bonds, cityIds, companyIds, investorIds);
+  if (bondsError) return bondsError;
+
+  const householdFinanceError = validateHouseholdFinance(
+    world.householdFinance,
+    cityIds,
+    new Set(((world.households as Record<string, unknown>).groups as Record<string, unknown>[]).map((g) => g.id as string)),
+  );
+  if (householdFinanceError) return householdFinanceError;
+
+  const governmentError = validateCityGovernments(
+    world.cities,
+    cityIds,
+    new Set(collectBondIssuanceIds(world.bonds)),
+  );
+  if (governmentError) return governmentError;
 
   for (let index = 0; index < world.tradeRoutes.length; index++) {
     const error = validateTradeRoute(world.tradeRoutes[index], index);
@@ -919,6 +947,20 @@ function validateCity(value: unknown, index: number): string | null {
     const point = value.gdpHistory[i];
     if (!isRecord(point) || !isFiniteNumber(point.tick) || !isFiniteNumber(point.value)) {
       return `城市 ${id}.gdpHistory[${i}] 无效`;
+    }
+    if (point.estimated !== undefined && typeof point.estimated !== 'boolean') {
+      return `城市 ${id}.gdpHistory[${i}].estimated 必须是布尔值`;
+    }
+  }
+
+  const gdpWindowError = validateGdpWindow(value.gdpWindow, id);
+  if (gdpWindowError) return gdpWindowError;
+  const gdpEstimateError = validateGdpInfo(value.gdpEstimate, `城市 ${id}.gdpEstimate`);
+  if (gdpEstimateError) return gdpEstimateError;
+  if (value.bankruptcy !== undefined) {
+    if (!isRecord(value.bankruptcy)) return `城市 ${id}.bankruptcy 无效`;
+    if (value.bankruptcy.status !== 'solvent' && value.bankruptcy.status !== 'bankrupt') {
+      return `城市 ${id}.bankruptcy.status 无效`;
     }
   }
 
@@ -1099,6 +1141,24 @@ function validateLogEntry(value: unknown, index: number): string | null {
     return `log[${index}].kind 无效`;
   }
   if (typeof value.message !== 'string') return `log[${index}].message 无效`;
+  if (value.visibility !== undefined) {
+    const visibilityError = validateVisibility(value.visibility, `log[${index}].visibility`);
+    if (visibilityError) return visibilityError;
+  }
+  return null;
+}
+
+/** v0.7：财政可见性字段校验（scope/cityId 组合必须自洽）。 */
+function validateVisibility(value: unknown, path: string): string | null {
+  if (!isRecord(value)) return `${path} 不是对象`;
+  if (value.scope !== 'public' && value.scope !== 'mayor') return `${path}.scope 无效`;
+  if (value.scope === 'public') {
+    if (value.cityId !== null) return `${path}.cityId 在 public 时必须为 null`;
+    return null;
+  }
+  if (typeof value.cityId !== 'string' || value.cityId.length === 0) {
+    return `${path}.cityId 在 mayor 时必须是非空字符串`;
+  }
   return null;
 }
 
@@ -1582,7 +1642,9 @@ function validateNotifications(
       notice.kind !== 'vote' &&
       notice.kind !== 'major' &&
       notice.kind !== 'agreement' &&
-      notice.kind !== 'market'
+      notice.kind !== 'market' &&
+      notice.kind !== 'fiscal' &&
+      notice.kind !== 'bankruptcy'
     ) {
       return `notifications[${index}].kind 无效`;
     }
@@ -1604,6 +1666,10 @@ function validateNotifications(
       return `notifications[${index}] 文本无效`;
     }
     if (typeof notice.read !== 'boolean') return `notifications[${index}].read 无效`;
+    if (notice.visibility !== undefined) {
+      const visibilityError = validateVisibility(notice.visibility, `notifications[${index}].visibility`);
+      if (visibilityError) return visibilityError;
+    }
   }
   return null;
 }
@@ -1894,9 +1960,19 @@ const WEALTH_TIERS = new Set(['low', 'middle', 'high']);
 const OPERATION_MODES = new Set(['manual', 'assisted', 'delegated']);
 const PROPOSAL_KINDS = new Set(['hire', 'expand', 'loan', 'dividend', 'price']);
 const PROPOSAL_STATUSES = new Set(['pending', 'approved', 'rejected', 'executed', 'expired']);
-const LOAN_PURPOSES = new Set(['workingCapital', 'expansion', 'personal', 'migratedDebt']);
-const LOAN_STATUSES = new Set(['active', 'repaid', 'defaulted']);
-const BANK_OWNER_KINDS = new Set(['player', 'household', 'company', 'investorGroup']);
+const LOAN_PURPOSES = new Set([
+  'workingCapital',
+  'expansion',
+  'personal',
+  'migratedDebt',
+  // v0.7：政府借款、垫付转借款与居民消费贷款（权威账本在 city.government / householdFinance）。
+  'government',
+  'bondAdvance',
+  'householdConsumption',
+]);
+const LOAN_STATUSES = new Set(['active', 'repaid', 'defaulted', 'writtenOff']);
+const BANK_OWNER_KINDS = new Set(['player', 'household', 'company', 'investorGroup', 'government']);
+const HOLDER_TYPES = new Set(['player', 'company', 'investorGroup', 'city', 'operator', 'trust']);
 
 function validateBankOwner(
   value: unknown,
@@ -2253,4 +2329,551 @@ function isFiniteNumber(value: unknown): value is number {
 
 function isInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value);
+}
+
+// ---------------------------------------------------------------- v6 → v7 迁移（v0.7 财政契约）
+
+/** 旧档日志/通知按内容归类为 mayor 的财政关键词（DECISIONS v1.1 #14）。 */
+const LEGACY_MAYOR_KEYWORDS = [
+  '财政',
+  '赤字',
+  '负债',
+  '债券',
+  '国债',
+  '垫付',
+  '破产',
+  '预算',
+  '兑付',
+  '发债',
+  '债务',
+  '财政收入',
+  '财政支出',
+];
+
+/**
+ * 旧存档迁移时的可见性归类：含财政金额/财政操作关键词且能定位城市 → mayor，否则 public。
+ * 无法定位 cityId 的条目保守归 public（宁可少暴露给市长，也不把市长信息泄露给公众）。
+ */
+export function classifyLegacyVisibility(
+  message: string,
+  cityId: string | null,
+): FiscalVisibility {
+  if (cityId && LEGACY_MAYOR_KEYWORDS.some((keyword) => message.includes(keyword))) {
+    return { scope: 'mayor', cityId };
+  }
+  return { scope: 'public', cityId: null };
+}
+
+/**
+ * v6 → v7 迁移（v0.7 政府债务/债券/居民消费金融契约）。
+ *
+ * 迁移规则（冻结）：
+ * 1. 旧档负财政余额 → 等额转为该城政府银行贷款（purpose='government'），财政余额归零；
+ *    不额外发放现金、不改变任何其他资产/负债。
+ * 2. 新增 bonds / householdFinance / city.government / city.gdpWindow / city.gdpEstimate /
+ *    city.bankruptcy；空账本默认值。
+ * 3. GDP 判定窗口：优先真实 gdpHistory（按 tick 升序取最近 12 条，estimated=false），
+ *    不足 12 条用开局估计补齐并标 estimated=true（tick 为 -missing…-1）。
+ * 4. 日志/通知补 visibility：含财政关键词且能定位城市 → mayor，其余 public；
+ *    渲染期仍需按当前 mayorCityId 重新过滤。
+ * 5. 未知贷款状态兜底为 'active'（不猜测结清，避免凭空消债）。
+ * 6. 幂等：在已含 v7 字段的世界上重复执行不得重复迁移、不得再次转贷/归零。
+ */
+export function migrateWorldV6ToV7(raw: unknown): MigrationResult {
+  if (!isRecord(raw)) return { ok: false, error: '存档 world 不是对象' };
+  if (!Array.isArray(raw.cities) || raw.cities.length === 0) {
+    return { ok: false, error: 'v6 存档缺少城市数据，无法迁移' };
+  }
+  const world = deepClone(raw) as unknown as WorldState;
+
+  // 1. 债券与居民消费金融账本。
+  if (!isRecord(world.bonds) || !Array.isArray((world.bonds as unknown as Record<string, unknown>).issuances)) {
+    world.bonds = createEmptyBondState();
+  }
+  if (
+    !isRecord(world.householdFinance) ||
+    !Array.isArray((world.householdFinance as unknown as Record<string, unknown>).loans)
+  ) {
+    world.householdFinance = createEmptyHouseholdFinanceState();
+  }
+  const bonds = world.bonds as NonNullable<WorldState['bonds']>;
+  bonds.nextIssuanceNumber = isInteger(bonds.nextIssuanceNumber)
+    ? bonds.nextIssuanceNumber
+    : bonds.issuances.length + 1;
+  bonds.nextHoldingNumber = isInteger(bonds.nextHoldingNumber)
+    ? bonds.nextHoldingNumber
+    : bonds.holdings.length + 1;
+  bonds.nextPaymentNumber = isInteger(bonds.nextPaymentNumber)
+    ? bonds.nextPaymentNumber
+    : bonds.payments.length + 1;
+  // v1.4 #37：批次统计字段缺省补齐（幂等；旧 v6 档没有这些字段）。
+  for (const issuance of bonds.issuances) {
+    if (!isFiniteNumber(issuance.couponsPaid)) issuance.couponsPaid = 0;
+    if (!isFiniteNumber(issuance.principalRepaid)) issuance.principalRepaid = 0;
+    if (!isFiniteNumber(issuance.bankAdvancedAmount)) issuance.bankAdvancedAmount = 0;
+  }
+
+  const config = DEMO_CONFIG;
+  for (const city of world.cities) {
+    // 2. 政府状态默认值。
+    if (!isRecord(city.government)) {
+      city.government = createEmptyGovernmentState();
+    }
+    const government = city.government;
+    if (!Array.isArray(government.loans)) government.loans = [];
+    if (!Array.isArray(government.payables)) government.payables = [];
+    if (!Array.isArray(government.advances)) government.advances = [];
+    if (!Array.isArray(government.records)) government.records = [];
+    if (!Array.isArray(government.settledTicks)) government.settledTicks = [];
+    if (!isInteger(government.nextLoanNumber)) government.nextLoanNumber = government.loans.length + 1;
+    if (!isInteger(government.nextPayableNumber)) government.nextPayableNumber = government.payables.length + 1;
+    if (!isInteger(government.nextAdvanceNumber)) government.nextAdvanceNumber = government.advances.length + 1;
+    if (!isRecord(government.bankruptcy)) {
+      government.bankruptcy = { status: 'solvent', tick: null, recordId: null, debtRatio: null };
+    }
+    for (const loan of government.loans) {
+      if (!LOAN_STATUSES.has(String(loan.status))) loan.status = 'active';
+      if (typeof loan.bondIssuanceId !== 'string') loan.bondIssuanceId = null;
+    }
+
+    // 3. 负财政余额等额转政府银行贷款，财政余额归零（幂等：迁移后 treasury=0 不再触发）。
+    if (isFiniteNumber(city.treasury) && city.treasury < -0.005) {
+      const amount = round2(-city.treasury);
+      const termMonths = config.government.loan.termMonths;
+      const loan = {
+        id: `gloan-${city.id}-${government.nextLoanNumber}`,
+        cityId: city.id,
+        purpose: 'government' as const,
+        principal: amount,
+        outstanding: amount,
+        monthlyPrincipal: round2(amount / termMonths),
+        rateMonthly: config.government.loan.rateMonthly,
+        termMonths,
+        startTick: world.time.tick,
+        nextDueTick: world.time.tick + 1,
+        paidPrincipal: 0,
+        paidInterest: 0,
+        accruedInterest: 0,
+        arrearsPrincipal: 0,
+        arrearsInterest: 0,
+        missedPayments: 0,
+        status: 'active' as const,
+        payments: [],
+        bondIssuanceId: null,
+        note: 'v6→v7 迁移：旧存档负财政余额等额转为政府银行贷款（不额外发放现金），财政余额归零。',
+      };
+      government.loans.push(loan);
+      government.nextLoanNumber += 1;
+      city.treasury = 0;
+    }
+
+    // 4. GDP 判定窗口与估计值。
+    if (!Array.isArray(city.gdpWindow) || city.gdpWindow.length === 0) {
+      const realPoints = Array.isArray(city.gdpHistory)
+        ? city.gdpHistory.map((point) => ({
+            tick: point.tick,
+            value: point.value,
+            estimated: point.estimated === true,
+          }))
+        : [];
+      const { points, estimate } = buildGdpWindow(world, city, config, realPoints);
+      city.gdpWindow = points;
+      if (!isRecord(city.gdpEstimate)) city.gdpEstimate = estimate;
+    }
+    if (!isRecord(city.gdpEstimate)) {
+      const { estimate } = buildGdpWindow(world, city, config, []);
+      city.gdpEstimate = estimate;
+    }
+
+    // 5. 破产状态镜像。
+    const bankruptcy = government.bankruptcy as unknown as Record<string, unknown>;
+    if (!isRecord(city.bankruptcy)) {
+      city.bankruptcy = {
+        status: bankruptcy.status === 'bankrupt' ? 'bankrupt' : 'solvent',
+        tick: isInteger(bankruptcy.tick) ? (bankruptcy.tick as number) : null,
+        recordId: typeof bankruptcy.recordId === 'string' ? (bankruptcy.recordId as string) : null,
+        debtRatio: isFiniteNumber(bankruptcy.debtRatio) ? (bankruptcy.debtRatio as number) : null,
+      };
+    }
+    if (!isFiniteNumber(bankruptcy.debtRatio)) bankruptcy.debtRatio = null;
+  }
+
+  // 6. 旧贷款状态兜底。
+  const banking = world.banking as unknown as Record<string, unknown> | undefined;
+  if (banking && Array.isArray(banking.loans)) {
+    for (const loan of banking.loans as Record<string, unknown>[]) {
+      if (!LOAN_STATUSES.has(String(loan.status))) loan.status = 'active';
+    }
+  }
+
+  // 7. 日志与通知补可见性（只补缺失的，迁移幂等）。
+  for (const entry of world.log) {
+    if (!isRecord(entry.visibility)) {
+      entry.visibility = classifyLegacyVisibility(String(entry.message ?? ''), null);
+    }
+  }
+  for (const notice of world.notifications) {
+    if (!isRecord(notice.visibility)) {
+      const cityId = typeof notice.cityId === 'string' ? notice.cityId : null;
+      notice.visibility = classifyLegacyVisibility(
+        `${String(notice.title ?? '')} ${String(notice.body ?? '')}`,
+        cityId,
+      );
+    }
+  }
+
+  // 8. 迁移说明（public，不含任何财政金额）。
+  world.log.push({
+    tick: world.time.tick,
+    kind: 'system',
+    message:
+      '存档已从 v6 迁移到 v7：新增政府债务/债券/居民消费金融状态；旧档负财政余额等额转为政府银行贷款、财政余额归零；12 个月 GDP 判定窗口缺口语义为估计值。',
+    visibility: { scope: 'public', cityId: null },
+  });
+  return { ok: true, world };
+}
+
+// ---------------------------------------------------------------- v0.7 新增结构校验
+
+function validateGdpInfo(value: unknown, path: string): string | null {
+  if (value === null) return null;
+  if (!isRecord(value)) return `${path} 无效`;
+  for (const key of ['monthlyValue', 'annualValue', 'utilizationAssumption', 'minAnnualGdp']) {
+    if (!isFiniteNumber(value[key])) return `${path}.${key} 必须是有限数值`;
+  }
+  if (typeof value.method !== 'string' || typeof value.note !== 'string') {
+    return `${path} 文本字段无效`;
+  }
+  if (!isInteger(value.createdAtTick)) return `${path}.createdAtTick 无效`;
+  return null;
+}
+
+function validateGdpWindow(value: unknown, cityId: string): string | null {
+  if (!Array.isArray(value)) return `城市 ${cityId}.gdpWindow 必须是数组`;
+  if (value.length === 0) return null;
+  if (value.length > 12) return `城市 ${cityId}.gdpWindow 不能超过 12 条`;
+  const ticks = new Set<number>();
+  let lastTick = -Infinity;
+  for (let index = 0; index < value.length; index++) {
+    const point = value[index];
+    if (!isRecord(point)) return `城市 ${cityId}.gdpWindow[${index}] 不是对象`;
+    if (!isInteger(point.tick)) return `城市 ${cityId}.gdpWindow[${index}].tick 无效`;
+    if (!isFiniteNumber(point.value) || (point.value as number) < 0) {
+      return `城市 ${cityId}.gdpWindow[${index}].value 无效`;
+    }
+    if (typeof point.estimated !== 'boolean') {
+      return `城市 ${cityId}.gdpWindow[${index}].estimated 必须是布尔值`;
+    }
+    if (ticks.has(point.tick as number)) return `城市 ${cityId}.gdpWindow tick 重复：${point.tick}`;
+    if ((point.tick as number) <= lastTick) return `城市 ${cityId}.gdpWindow 必须按 tick 升序`;
+    ticks.add(point.tick as number);
+    lastTick = point.tick as number;
+  }
+  return null;
+}
+
+function validateCityGovernment(
+  value: unknown,
+  cityId: string,
+  issuanceIds: Set<string>,
+): string | null {
+  if (!isRecord(value)) return `城市 ${cityId}.government 无效`;
+  for (const key of ['loans', 'payables', 'advances', 'records', 'settledTicks']) {
+    if (!Array.isArray(value[key])) return `城市 ${cityId}.government.${key} 必须是数组`;
+  }
+  for (const key of ['nextLoanNumber', 'nextPayableNumber', 'nextAdvanceNumber']) {
+    if (!isInteger(value[key])) return `城市 ${cityId}.government.${key} 无效`;
+  }
+  const bankruptcy = value.bankruptcy;
+  if (!isRecord(bankruptcy)) return `城市 ${cityId}.government.bankruptcy 无效`;
+  if (bankruptcy.status !== 'solvent' && bankruptcy.status !== 'bankrupt') {
+    return `城市 ${cityId}.government.bankruptcy.status 无效`;
+  }
+  if (bankruptcy.tick !== null && !isInteger(bankruptcy.tick)) {
+    return `城市 ${cityId}.government.bankruptcy.tick 无效`;
+  }
+  if (bankruptcy.recordId !== null && typeof bankruptcy.recordId !== 'string') {
+    return `城市 ${cityId}.government.bankruptcy.recordId 无效`;
+  }
+  if (bankruptcy.debtRatio !== null && !isFiniteNumber(bankruptcy.debtRatio)) {
+    return `城市 ${cityId}.government.bankruptcy.debtRatio 无效`;
+  }
+  const loanIds = new Set<string>();
+  for (let index = 0; index < (value.loans as unknown[]).length; index++) {
+    const loan = (value.loans as unknown[])[index];
+    if (!isRecord(loan)) return `城市 ${cityId}.government.loans[${index}] 不是对象`;
+    if (typeof loan.id !== 'string' || loanIds.has(loan.id)) {
+      return `城市 ${cityId}.government.loans[${index}].id 无效或重复`;
+    }
+    loanIds.add(loan.id);
+    if (loan.purpose !== 'government' && loan.purpose !== 'bondAdvance') {
+      return `政府贷款 ${loan.id}.purpose 无效`;
+    }
+    for (const key of [
+      'principal', 'outstanding', 'monthlyPrincipal', 'rateMonthly', 'paidPrincipal',
+      'paidInterest', 'accruedInterest', 'arrearsPrincipal', 'arrearsInterest',
+    ]) {
+      if (!isFiniteNumber(loan[key])) return `政府贷款 ${loan.id}.${key} 无效`;
+    }
+    if (!isInteger(loan.termMonths) || (loan.termMonths as number) <= 0) {
+      return `政府贷款 ${loan.id}.termMonths 无效`;
+    }
+    if (loan.status !== 'active' && loan.status !== 'repaid' && loan.status !== 'writtenOff') {
+      return `政府贷款 ${loan.id}.status 无效`;
+    }
+    if (loan.bondIssuanceId !== null && !issuanceIds.has(loan.bondIssuanceId as string)) {
+      return `政府贷款 ${loan.id} 引用了不存在的债券批次`;
+    }
+  }
+  const payableKinds = new Set(['bondCoupon', 'bondPrincipal', 'loanInstalment']);
+  const payableStatuses = new Set(['pending', 'paid', 'paidByAdvance', 'arrears', 'writtenOff']);
+  for (let index = 0; index < (value.payables as unknown[]).length; index++) {
+    const payable = (value.payables as unknown[])[index];
+    if (!isRecord(payable)) return `城市 ${cityId}.government.payables[${index}] 不是对象`;
+    if (typeof payable.id !== 'string') return `应付项 ${index}.id 无效`;
+    if (!isInteger(payable.tick)) return `应付项 ${payable.id}.tick 无效`;
+    if (typeof payable.kind !== 'string' || !payableKinds.has(payable.kind)) {
+      return `应付项 ${payable.id}.kind 无效`;
+    }
+    if (typeof payable.status !== 'string' || !payableStatuses.has(payable.status)) {
+      return `应付项 ${payable.id}.status 无效`;
+    }
+    if (!isFiniteNumber(payable.principalDue) || !isFiniteNumber(payable.interestDue)) {
+      return `应付项 ${payable.id} 金额无效`;
+    }
+    if (payable.issuanceId !== null && !issuanceIds.has(payable.issuanceId as string)) {
+      return `应付项 ${payable.id} 引用了不存在的债券批次`;
+    }
+  }
+  for (let index = 0; index < (value.advances as unknown[]).length; index++) {
+    const advance = (value.advances as unknown[])[index];
+    if (!isRecord(advance)) return `城市 ${cityId}.government.advances[${index}] 不是对象`;
+    if (advance.purpose !== 'maturity' && advance.purpose !== 'bankruptcy') {
+      return `垫付记录 ${index}.purpose 无效`;
+    }
+    for (const key of ['principalAdvanced', 'interestAdvanced', 'totalAdvanced']) {
+      if (!isFiniteNumber(advance[key])) return `垫付记录 ${index}.${key} 无效`;
+    }
+    if (typeof advance.loanId !== 'string') return `垫付记录 ${index}.loanId 无效`;
+    if (!issuanceIds.has(advance.issuanceId as string)) {
+      return `垫付记录 ${index} 引用了不存在的债券批次`;
+    }
+  }
+  for (const tick of value.settledTicks as unknown[]) {
+    if (!isInteger(tick)) return `城市 ${cityId}.government.settledTicks 含非整数`;
+  }
+  const lastDebt = value.lastDebt;
+  if (lastDebt !== null) {
+    if (!isRecord(lastDebt)) return `城市 ${cityId}.government.lastDebt 无效`;
+    for (const key of [
+      'treasury', 'bankLoanPrincipal', 'bankAdvancePrincipal', 'bondPrincipalOutstanding',
+      'loanAccruedInterest', 'bondAccruedInterest', 'totalDebt', 'gdpWindowMonths',
+      'gdpWindowSum', 'gdpWindowEstimatedMonths', 'gdpJudgementValue', 'debtRatio',
+    ]) {
+      if (!isFiniteNumber(lastDebt[key])) {
+        return `城市 ${cityId}.government.lastDebt.${key} 无效`;
+      }
+    }
+    if (
+      lastDebt.riskLevel !== 'normal' &&
+      lastDebt.riskLevel !== 'watch' &&
+      lastDebt.riskLevel !== 'high' &&
+      lastDebt.riskLevel !== 'bankrupt'
+    ) {
+      return `城市 ${cityId}.government.lastDebt.riskLevel 无效`;
+    }
+    if (
+      lastDebt.riskTrend !== 'up' &&
+      lastDebt.riskTrend !== 'down' &&
+      lastDebt.riskTrend !== 'flat' &&
+      lastDebt.riskTrend !== 'unknown'
+    ) {
+      return `城市 ${cityId}.government.lastDebt.riskTrend 无效`;
+    }
+  }
+  return null;
+}
+
+/** 债券批次 id 集合（供政府贷款/应付项/垫付校验引用）。 */
+export function collectBondIssuanceIds(value: unknown): string[] {
+  if (!isRecord(value) || !Array.isArray(value.issuances)) return [];
+  return (value.issuances as Record<string, unknown>[])
+    .map((issuance) => issuance.id)
+    .filter((id): id is string => typeof id === 'string');
+}
+
+function validateBondHolder(
+  value: unknown,
+  path: string,
+  companyIds: Set<string>,
+  investorIds: Set<string>,
+): string | null {
+  if (!isRecord(value)) return `${path} 不是债券持有人对象`;
+  if (value.kind !== 'player' && value.kind !== 'investorGroup' && value.kind !== 'company') {
+    return `${path}.kind 无效（首版银行不得认购国债）`;
+  }
+  if (typeof value.id !== 'string' || value.id.length === 0) return `${path}.id 无效`;
+  if (value.kind === 'player' && value.id !== 'player') return `${path}.id 对玩家无效`;
+  if (value.kind === 'company' && !companyIds.has(value.id)) {
+    return `${path} 引用了不存在的企业 ${value.id}`;
+  }
+  if (value.kind === 'investorGroup' && !investorIds.has(value.id)) {
+    return `${path} 引用了不存在的居民投资实体 ${value.id}`;
+  }
+  return null;
+}
+
+function validateBonds(
+  value: unknown,
+  cityIds: Set<string>,
+  companyIds: Set<string>,
+  investorIds: Set<string>,
+): string | null {
+  if (!isRecord(value)) return 'world.bonds 无效';
+  for (const key of ['issuances', 'holdings', 'payments']) {
+    if (!Array.isArray(value[key])) return `bonds.${key} 必须是数组`;
+  }
+  for (const key of ['nextIssuanceNumber', 'nextHoldingNumber', 'nextPaymentNumber']) {
+    if (!isInteger(value[key])) return `bonds.${key} 无效`;
+  }
+  const issuanceIds = new Set<string>();
+  for (let index = 0; index < (value.issuances as unknown[]).length; index++) {
+    const issuance = (value.issuances as unknown[])[index] as Record<string, unknown>;
+    if (!isRecord(issuance)) return `bonds.issuances[${index}] 不是对象`;
+    if (typeof issuance.id !== 'string' || issuanceIds.has(issuance.id)) {
+      return `债券批次 ${index} id 无效或重复`;
+    }
+    issuanceIds.add(issuance.id);
+    if (typeof issuance.cityId !== 'string' || !cityIds.has(issuance.cityId)) {
+      return `债券批次 ${issuance.id} 引用了不存在的城市`;
+    }
+    for (const key of [
+      'faceValue',
+      'couponRateAnnual',
+      'principal',
+      'accruedInterest',
+      'interestPaid',
+      'arrearsInterest',
+      'couponsPaid',
+      'principalRepaid',
+      'bankAdvancedAmount',
+    ]) {
+      if (!isFiniteNumber(issuance[key])) return `债券批次 ${issuance.id}.${key} 无效`;
+    }
+    for (const key of ['planUnits', 'soldUnits', 'unsoldUnits', 'interestPeriodMonths', 'termMonths']) {
+      if (!isInteger(issuance[key])) return `债券批次 ${issuance.id}.${key} 必须是整数`;
+    }
+    if ((issuance.soldUnits as number) > (issuance.planUnits as number)) {
+      return `债券批次 ${issuance.id} 实售份数超过计划份数`;
+    }
+    if ((issuance.unsoldUnits as number) !== (issuance.planUnits as number) - (issuance.soldUnits as number)) {
+      return `债券批次 ${issuance.id} 未售份数不等于计划−实售`;
+    }
+    if (!['offering', 'active', 'redeemed'].includes(String(issuance.status))) {
+      return `债券批次 ${issuance.id}.status 无效`;
+    }
+  }
+  const holdingIds = new Set<string>();
+  for (let index = 0; index < (value.holdings as unknown[]).length; index++) {
+    const holding = (value.holdings as unknown[])[index] as Record<string, unknown>;
+    if (!isRecord(holding)) return `bonds.holdings[${index}] 不是对象`;
+    if (typeof holding.id !== 'string' || holdingIds.has(holding.id)) {
+      return `持债记录 ${index} id 无效或重复`;
+    }
+    holdingIds.add(holding.id);
+    if (!issuanceIds.has(holding.issuanceId as string)) {
+      return `持债记录 ${holding.id} 引用了不存在的债券批次`;
+    }
+    const holderError = validateBondHolder(holding.holder, `bonds.holdings[${index}].holder`, companyIds, investorIds);
+    if (holderError) return holderError;
+    for (const key of ['units', 'principal', 'accruedInterest', 'interestPaid']) {
+      if (!isFiniteNumber(holding[key])) return `持债记录 ${holding.id}.${key} 无效`;
+    }
+    if (!['active', 'redeemed'].includes(String(holding.status))) {
+      return `持债记录 ${holding.id}.status 无效`;
+    }
+  }
+  for (let index = 0; index < (value.payments as unknown[]).length; index++) {
+    const payment = (value.payments as unknown[])[index] as Record<string, unknown>;
+    if (!isRecord(payment)) return `bonds.payments[${index}] 不是对象`;
+    if (typeof payment.id !== 'string') return `债券兑付流水 ${index}.id 无效`;
+    if (!issuanceIds.has(payment.issuanceId as string)) {
+      return `债券兑付流水 ${payment.id} 引用了不存在的债券批次`;
+    }
+    if (!['coupon', 'principal', 'bankruptcyRedemption'].includes(String(payment.kind))) {
+      return `债券兑付流水 ${payment.id}.kind 无效`;
+    }
+    if (!isFiniteNumber(payment.principalPaid) || !isFiniteNumber(payment.interestPaid)) {
+      return `债券兑付流水 ${payment.id} 金额无效`;
+    }
+    if (typeof payment.fundedByBankAdvance !== 'boolean') {
+      return `债券兑付流水 ${payment.id}.fundedByBankAdvance 无效`;
+    }
+  }
+  return null;
+}
+
+function validateHouseholdFinance(
+  value: unknown,
+  cityIds: Set<string>,
+  groupIds: Set<string>,
+): string | null {
+  if (!isRecord(value)) return 'world.householdFinance 无效';
+  if (!Array.isArray(value.loans)) return 'householdFinance.loans 必须是数组';
+  if (!Array.isArray(value.budgets)) return 'householdFinance.budgets 必须是数组';
+  if (!isInteger(value.nextLoanNumber)) return 'householdFinance.nextLoanNumber 无效';
+  const loanIds = new Set<string>();
+  for (let index = 0; index < (value.loans as unknown[]).length; index++) {
+    const loan = (value.loans as unknown[])[index] as Record<string, unknown>;
+    if (!isRecord(loan)) return `householdFinance.loans[${index}] 不是对象`;
+    if (typeof loan.id !== 'string' || loanIds.has(loan.id)) {
+      return `居民消费贷款 ${index} id 无效或重复`;
+    }
+    loanIds.add(loan.id);
+    if (typeof loan.cityId !== 'string' || !cityIds.has(loan.cityId)) {
+      return `居民消费贷款 ${loan.id} 引用了不存在的城市`;
+    }
+    if (typeof loan.groupId !== 'string' || !groupIds.has(loan.groupId)) {
+      return `居民消费贷款 ${loan.id} 引用了不存在的居民群体`;
+    }
+    if (loan.purpose !== 'consumption') return `居民消费贷款 ${loan.id}.purpose 无效`;
+    if (!['active', 'repaid', 'defaulted', 'writtenOff'].includes(String(loan.status))) {
+      return `居民消费贷款 ${loan.id}.status 无效`;
+    }
+    for (const key of ['principal', 'outstanding', 'monthlyPrincipal', 'rateMonthly']) {
+      if (!isFiniteNumber(loan[key])) return `居民消费贷款 ${loan.id}.${key} 无效`;
+    }
+  }
+  for (let index = 0; index < (value.budgets as unknown[]).length; index++) {
+    const budget = (value.budgets as unknown[])[index] as Record<string, unknown>;
+    if (!isRecord(budget)) return `householdFinance.budgets[${index}] 不是对象`;
+    if (!isInteger(budget.tick)) return `消费预算快照 ${index}.tick 无效`;
+    if (typeof budget.groupId !== 'string' || !groupIds.has(budget.groupId)) {
+      return `消费预算快照 ${index} 引用了不存在的居民群体`;
+    }
+    for (const key of [
+      'lastMonthDisposableIncome', 'incomeComponent', 'cash', 'cashComponent',
+      'referenceSpend', 'cashBudget', 'loanAvailable', 'effectiveBudget',
+      'loanGranted', 'actualSpend', 'unmetByFunding',
+    ]) {
+      if (!isFiniteNumber(budget[key])) return `消费预算快照 ${index}.${key} 无效`;
+    }
+    if (typeof budget.depositsIncluded !== 'boolean') {
+      return `消费预算快照 ${index}.depositsIncluded 无效`;
+    }
+  }
+  return null;
+}
+
+function validateCityGovernments(
+  cities: unknown[],
+  cityIds: Set<string>,
+  issuanceIds: Set<string>,
+): string | null {
+  void cityIds;
+  for (const city of cities as Record<string, unknown>[]) {
+    const error = validateCityGovernment(city.government, city.id as string, issuanceIds);
+    if (error) return error;
+  }
+  return null;
 }
