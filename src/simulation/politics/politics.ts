@@ -281,6 +281,26 @@ function holdElection(
   return { ok: true, note: state.lastResult };
 }
 
+/**
+ * v0.7：破产判定当月立即举行一次 AI 选举（DECISIONS v1.2 #8、任务书 §四）。
+ * 玩家不参选（观战/参选入口仍走 runForMayor）；同一 tick 已有选举则不重复举行（幂等）。
+ */
+export function requestImmediateElection(
+  world: WorldState,
+  cityId: string,
+  config: DemoConfig,
+  log: LogEntry[] = [],
+): ActionResult {
+  const city = world.cities.find((entry) => entry.id === cityId);
+  if (!city) return { ok: false, error: '城市不存在' };
+  const state = cityPolitics(world, cityId);
+  if (!state) return { ok: false, error: '城市政治状态缺失' };
+  if (state.lastElectionTick === world.time.tick) {
+    return { ok: true, note: '本 tick 已举行过选举' };
+  }
+  return holdElection(world, city, config, log, false);
+}
+
 /** 公开命令：玩家支付演示参选费用并立即举行一次选举。 */
 export function runForMayor(
   world: WorldState,
