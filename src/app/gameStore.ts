@@ -90,8 +90,6 @@ import {
   deposit,
   depositAccountFor,
   loanLabel,
-  openLoan,
-  repayLoan,
   withdraw,
 } from '../simulation/banking/banking';
 import { bankLoansOf, creditEvaluation, sameOwner } from '../simulation/banking/credit';
@@ -103,6 +101,10 @@ import {
   operatorStyleLabel,
   termMonthsLeft,
 } from '../simulation/management/manager-pool';
+import {
+  playerOpenLoan,
+  playerRepayBankLoan,
+} from '../simulation/management/financing';
 import {
   canOperate,
   decideProposal,
@@ -1312,6 +1314,8 @@ export class GameStore {
           return {
             companyId: company.id,
             name: company.name,
+            /** 只有具备该企业经营权的玩家才能以企业名义借款/还款（持股不等于经营权）。 */
+            canOperate: canOperate(this.world, company.id),
             cash: company.cash,
             debt: company.debt,
             deposits: depositAccountFor(this.world, owner)?.balance ?? 0,
@@ -1345,17 +1349,25 @@ export class GameStore {
     purpose: 'workingCapital' | 'expansion' | 'personal',
     amount: number,
   ): boolean {
-    const result = openLoan(
+    const result = playerOpenLoan(
       this.world,
-      { owner: { kind: ownerKind, id: ownerId }, purpose, amount },
       DEMO_CONFIG,
       this.world.time.tick,
+      { kind: ownerKind, id: ownerKind === 'player' ? 'player' : ownerId },
+      purpose,
+      amount,
     );
     return this.finishAction(result, result.note ?? '贷款已放款。');
   }
 
   repayBankLoan(loanId: string, amount: number): boolean {
-    const result = repayLoan(this.world, loanId, amount, DEMO_CONFIG, this.world.time.tick);
+    const result = playerRepayBankLoan(
+      this.world,
+      loanId,
+      amount,
+      DEMO_CONFIG,
+      this.world.time.tick,
+    );
     return this.finishAction(result, result.note ?? '还款已入账。');
   }
 

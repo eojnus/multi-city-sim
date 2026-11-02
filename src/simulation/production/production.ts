@@ -2,14 +2,13 @@ import type { City, Company, ProductionRecord, WorldState, LogEntry } from '../c
 import type { DemoConfig } from '../../data/config';
 import { DEMO_CONFIG } from '../../data/config';
 import type { CityLedgers, WorldLedgers } from '../markets/markets';
-import { applyProducerPurchase, recordProducedSupply } from '../markets/markets';
+import { applyProducerPurchase, offeredStock, recordProducedSupply } from '../markets/markets';
 import { executeIntercityPurchase } from '../markets/intercity';
 import { GOOD_IDS } from '../companies/company';
 import { PRODUCTIVITY, RECIPES } from '../../data/demo-data';
 import { round2 } from '../core/math';
 import { monthlyWageBill } from '../companies/company';
-import { drawWorkingCapital } from '../banking/banking';
-import { availableCredit } from '../banking/credit';
+import { planCompanyWorkingCapital, drawPlannedWorkingCapital } from '../management/financing';
 import { workforceSkillMultiplier } from '../labor/workforce';
 import { leaderSectorMultiplier } from '../politics/politics';
 import { keyIndustryFocus } from '../policies/query';
@@ -101,14 +100,60 @@ export function runInputPurchasing(
     });
     if (shortages.every((entry) => entry.shortage <= 0)) continue;
 
-    const wage = monthlyWageBill(company);
+    const wage = monthlyWageBill(company, config);
     const wageReserve = wage * config.company.wageReserveMonths * 0.5;
     let budget = Math.max(0, company.cash - wageReserve);
     let purchaseSpend = 0;
 
+    // 验收问题 2/7：玩家经营企业的采购融资必须先过经营模式/授权/拒绝冷却；
+    // 获批额度在成交前放款（每笔独立合同），避免“采购已成交、借款却失败”的部分状态。
+    // 只按“本地可售库存 + 现金缺口”估算额度，不会在没有供应时凭空举债。
+    const estimatedSpend = shortages.reduce((total, entry) => {
+      const price = city.market[entry.input.good]?.price ?? 1;
+      return total + entry.shortage * Math.max(0, price);
+    }, 0);
+    const financing = planCompanyWorkingCapital(
+      world,
+      config,
+      world.time.tick,
+      company,
+      round2(Math.max(0, estimatedSpend - budget)),
+      '生产采购现金不足',
+    );
+    let creditRoom = financing.limit;
+    if (financing.denied && estimatedSpend > budget + 0.01) {
+      log.push({
+        tick: world.time.tick,
+        kind: 'warning',
+        message: `${company.name} 采购受可用现金限制：${financing.reason}`,
+      });
+    }
+
     for (const { input, shortage } of shortages) {
       if (shortage <= 0 || budget <= 0) continue;
       const price = city.market[input.good]?.price ?? 1;
+      // 本地没有可售库存时不融资（避免“借了钱却没有成交、凭空增加债务”）。
+      const localStock = world.companies.reduce(
+        (total, other) =>
+          other.cityId === city.id && other.id !== company.id
+            ? total + offeredStock(other, input.good)
+            : total,
+        0,
+      );
+      if (localStock > 0.01 && creditRoom > 0 && budget < shortage * price) {
+        const need = round2(Math.max(0, shortage * price - budget));
+        const drawn = drawPlannedWorkingCapital(
+          world,
+          config,
+          world.time.tick,
+          company,
+          round2(Math.min(need, creditRoom)),
+        );
+        if (drawn > 0) {
+          budget = round2(budget + drawn);
+          creditRoom = round2(Math.max(0, creditRoom - drawn));
+        }
+      }
       const affordable = Math.min(shortage, budget / Math.max(0.01, price));
       const result = applyProducerPurchase(
         world,
@@ -150,22 +195,6 @@ export function runInputPurchasing(
       }
     }
 
-    // 结算式采购融资：无成交时不改变现金和债务，借款只与实际成交金额挂钩。
-    if (purchaseSpend > 0) {
-      const cashGap = round2(Math.max(0, wage * 1.5 - company.cash));
-      // v0.4：采购融资走独立银行（形成贷款合同），不再直接增加无对手方债务。
-      const borrow = round2(
-        Math.min(
-          purchaseSpend,
-          cashGap,
-          availableCredit(world, { kind: 'company', id: company.id }, config),
-        ),
-      );
-      if (borrow > 0) {
-        // 并入该企业已有周转贷款（没有则新建），避免每笔采购都生成独立合同。
-        drawWorkingCapital(world, company, borrow, config, world.time.tick);
-      }
-    }
   }
 }
 

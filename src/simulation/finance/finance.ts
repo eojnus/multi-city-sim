@@ -2,7 +2,8 @@ import type { LogEntry, WorldState } from '../contracts/types';
 import type { DemoConfig } from '../../data/config';
 import { clamp, round2 } from '../core/math';
 import { monthlyWageBill } from '../companies/company';
-import { ensureCompanyLiquidity, serviceCompanyLoans } from '../banking/banking';
+import { serviceCompanyLoans } from '../banking/banking';
+import { requestCompanyWorkingCapital } from '../management/financing';
 import { distributeDividend, playerTotalShares } from '../securities/securities';
 
 export interface FinanceResult {
@@ -60,9 +61,27 @@ export function settleCompanyFinance(
     const city = world.cities.find((candidate) => candidate.id === company.cityId);
     if (!city) continue;
     const stats = company.lastMonth;
-    const owedWages = monthlyWageBill(company);
+    const owedWages = monthlyWageBill(company, config);
     // v0.4：现金不足时按银行授信自动借入周转贷款（旧的无对手方信贷已停用）。
-    ensureCompanyLiquidity(world, company, owedWages, config, world.time.tick);
+    // v0.4.1（验收问题 2）：玩家经营企业必须先过经营模式/授权，手动模式不得暗中举债；
+    // 被拒绝时工资按可用现金发放并留下欠薪，由调用方日志/通知解释，不得先借后报。
+    if (company.cash < owedWages) {
+      const financing = requestCompanyWorkingCapital(
+        world,
+        config,
+        world.time.tick,
+        company,
+        round2(owedWages - company.cash),
+        '发放工资时现金不足',
+      );
+      if (financing.denied && financing.reason) {
+        log.push({
+          tick: world.time.tick,
+          kind: 'warning',
+          message: `${company.name} 工资资金不足：${financing.reason}`,
+        });
+      }
+    }
     const paidWages = round2(Math.min(company.cash, owedWages));
     company.cash = round2(company.cash - paidWages);
     const arrears = round2(owedWages - paidWages);
@@ -97,7 +116,7 @@ export function settleCompanyFinance(
 
     const payoutRatio = clamp(company.dividendPayoutRatio, 0, 1);
     const dividendOwed = stats.profit > 0 ? round2(stats.profit * payoutRatio) : 0;
-    const reserve = monthlyWageBill(company) * 0.5;
+    const reserve = monthlyWageBill(company, config) * 0.5;
     const dividendPaid = round2(
       Math.min(company.cash, dividendOwed, Math.max(0, company.cash - reserve)),
     );

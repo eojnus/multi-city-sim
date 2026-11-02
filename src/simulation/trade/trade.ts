@@ -3,8 +3,7 @@ import type { DemoConfig } from '../../data/config';
 import { RECIPES } from '../../data/demo-data';
 import { round2 } from '../core/math';
 import { productionTarget } from '../production/production';
-import { drawWorkingCapital } from '../banking/banking';
-import { availableCredit } from '../banking/credit';
+import { planCompanyWorkingCapital, drawPlannedWorkingCapital } from '../management/financing';
 import { corridorKey, recordIntercitySale } from '../transport/network';
 
 /**
@@ -40,9 +39,25 @@ export function executeTradeRoutes(
     const price = toCity.market[route.good]?.price ?? 0;
     if (price <= 0) continue;
 
-    // 先计算“现金 + 可用信贷”能买到的数量。融资只在最终提交点发生，
-    // 因此资金不足导致交易不成立时不会留下债务或现金变化。
-    const creditRoom = availableCredit(world, { kind: 'company', id: importer.id }, config);
+    // 先计算“现金 + 已裁决的融资额度”能买到的数量。融资额度必须先过经营模式/授权
+    // （验收问题 2），且只在成交条件全部确认后放款（验收问题 7：不留部分状态）。
+    const financingNeed = round2(Math.max(0, route.monthlyTarget * price - importer.cash));
+    const financing = planCompanyWorkingCapital(
+      world,
+      config,
+      world.time.tick,
+      importer,
+      financingNeed,
+      '跨城进口现金不足',
+    );
+    if (financing.denied && financingNeed > 0.01) {
+      log.push({
+        tick: world.time.tick,
+        kind: 'warning',
+        message: `${importer.name} 跨城进口受可用现金限制：${financing.reason}`,
+      });
+    }
+    const creditRoom = financing.limit;
     const maxAffordableQty =
       price > 0
         ? Math.floor(((Math.max(0, importer.cash) + creditRoom) / price) * 100) / 100
@@ -66,9 +81,22 @@ export function executeTradeRoutes(
 
     // v0.4：进口融资走独立银行（形成贷款合同）；失败则放弃本笔交易，不留部分状态。
     if (borrowNeeded > 0) {
-      // 并入已有周转贷款（没有则新建），仍受同一授信额度限制。
-      const drawn = drawWorkingCapital(world, importer, borrowNeeded, config, world.time.tick);
-      if (drawn + 1e-6 < borrowNeeded) continue;
+      // 每笔借款独立合同（独立批次），仍受同一授信额度限制。
+      const drawn = drawPlannedWorkingCapital(
+        world,
+        config,
+        world.time.tick,
+        importer,
+        borrowNeeded,
+      );
+      if (drawn + 1e-6 < borrowNeeded) {
+        log.push({
+          tick: world.time.tick,
+          kind: 'warning',
+          message: `${importer.name} 进口融资放款不足（需 ${borrowNeeded.toFixed(2)}，实得 ${drawn.toFixed(2)}），本笔交易取消。`,
+        });
+        continue;
+      }
     }
     if (importer.cash + 1e-6 < value) continue;
 

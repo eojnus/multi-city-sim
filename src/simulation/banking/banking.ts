@@ -341,12 +341,17 @@ export function syncCompanyDebt(world: WorldState, companyId: string): void {
 }
 
 /**
- * 自动流动性融资（采购/进口/发薪补足）：优先**并入该企业已存在的 active 周转贷款**，
- * 没有时再新建合同。这样既保留“成交后才融资”的原子口径，又不会让每笔采购都生成一笔
- * 独立 24 个月合同（合同噪音会掩盖真实债务压力）。
+ * 自动流动性融资（采购/进口/发薪补足）：**每笔借款生成独立合同（独立批次）**。
  *
- * 口径不变：仍受同一授信额度限制、仍立即占用额度、仍按合同计息与还款；不是借新还旧。
- * 并入时按“本金 / 期限”重算等额本金月供，最后一期仍由结算函数处理尾差。
+ * 为什么不再并入旧合同（验收问题 3）：
+ * 旧实现把新借款并入同企业的 active 周转贷款，并重算 monthlyPrincipal，导致旧合同
+ * 最后一期会把新借款的本金一并作为“末期本金”要求偿还（第 23 期追加 2400，第 24 期
+ * 被要求还 2500），违背“新贷款从下个月开始、按约定期限分期”的规则。
+ * 现在每笔借款拥有自己的 startTick / nextDueTick / termMonths / principal，
+ * 不会因旧合同到期而提前收取新借款本金。
+ *
+ * 口径不变：仍受同一授信额度限制（availableCredit 已扣除全部未结清合同）、
+ * 借款立即占用额度、还款释放额度；利息按各合同未偿本金分别计算，不重复计息。
  * 返回实际借入金额。
  */
 export function drawWorkingCapital(
@@ -363,28 +368,17 @@ export function drawWorkingCapital(
   const draw = round2(Math.min(value, available));
   if (draw <= 0) return 0;
 
-  const banking = ensureBankingState(world, config);
-  const product = config.banking.products.workingCapital;
-  const existing = banking.loans.find(
-    (loan) =>
-      loan.status === 'active' &&
-      loan.purpose === 'workingCapital' &&
-      loan.termMonths === product.termMonths &&
-      sameOwner(loan.borrower, owner),
+  const result = issueLoan(
+    world,
+    { owner, purpose: 'workingCapital', amount: draw },
+    config,
+    tick,
+    false,
   );
-  if (existing) {
-    existing.principal = round2(existing.principal + draw);
-    existing.outstanding = round2(existing.outstanding + draw);
-    existing.monthlyPrincipal = round2(existing.principal / existing.termMonths);
-    existing.note = `${existing.note}；自动流动性并入 ${draw.toFixed(2)}（第 ${tick} 期）。`;
-    creditOwnerCash(world, owner, draw);
-    banking.lastMonth.principalIssued = round2(banking.lastMonth.principalIssued + draw);
-    syncCompanyDebt(world, company.id);
-    refreshBankingTotals(world);
-    return draw;
-  }
-  const result = issueLoan(world, { owner, purpose: 'workingCapital', amount: draw }, config, tick, false);
-  return result.ok ? round2(result.loan?.principal ?? draw) : 0;
+  if (!result.ok || !result.loan) return 0;
+  // 标注自动融资批次，便于界面与报告区分“玩家主动借款”与“系统补流动性”。
+  result.loan.note = `自动流动性批次（第 ${tick} 期）：${result.loan.note}`;
+  return round2(result.loan.principal);
 }
 
 /**

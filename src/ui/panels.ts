@@ -2507,7 +2507,11 @@ function bankCreditChips(credit: BankView['player']['credit']): string {
     </div>`;
 }
 
-function bankLoanCards(loans: BankLoanView[], emptyText: string): string {
+function bankLoanCards(
+  loans: BankLoanView[],
+  emptyText: string,
+  allowRepay = true,
+): string {
   if (loans.length === 0) return `<p class="fin-hint">${esc(emptyText)}</p>`;
   return `<ul class="bank-loans">${loans
     .map((loan) => {
@@ -2528,7 +2532,9 @@ function bankLoanCards(loans: BankLoanView[], emptyText: string): string {
             <span>欠款<b class="${arrears > 0 ? 'is-warn' : ''}">${money(arrears)}</b></span>
             <span>期限<b>${num(loan.termMonths)} 月</b></span>
           </div>
-          <div class="bank-loan-actions">
+          ${
+            allowRepay
+              ? `<div class="bank-loan-actions">
             <button
               type="button"
               class="ken-btn ken-btn--grey ken-btn--mini"
@@ -2539,7 +2545,9 @@ function bankLoanCards(loans: BankLoanView[], emptyText: string): string {
               ${repayable ? '' : 'disabled'}
               title="${repayable ? '提前偿还 1 万信用点本金；首版不收提前还款费' : '该合同已结清，无需还款'}"
             >提前还款 1 万</button>
-          </div>
+          </div>`
+              : ''
+          }
         </li>`;
     })
     .join('')}</ul>`;
@@ -2585,7 +2593,9 @@ function renderBankCompanyBlock(companyView: NonNullable<BankView['company']>): 
         <span>存款<b>${money(companyView.deposits)}</b></span>
       </div>
       ${bankCreditChips(companyView.credit)}
-      <div class="bank-actions" role="group" aria-label="企业贷款申请">
+      ${
+        companyView.canOperate
+          ? `<div class="bank-actions" role="group" aria-label="企业贷款申请">
         ${COMPANY_LOAN_PRODUCTS.map((product) =>
           bankLoanButton(
             {
@@ -2598,9 +2608,11 @@ function renderBankCompanyBlock(companyView: NonNullable<BankView['company']>): 
             available,
           ),
         ).join('')}
-      </div>
+      </div>`
+          : '<p class="fin-hint" data-testid="bank-company-no-operator">你没有该企业的经营权：不能以企业名义申请贷款或还款（持有股票不等于经营权）。</p>'
+      }
       <div class="gov-sub-head"><span>企业贷款</span><em>${companyView.loans.length} 笔</em></div>
-      ${bankLoanCards(companyView.loans, '该企业暂无银行贷款。')}
+      ${bankLoanCards(companyView.loans, '该企业暂无银行贷款。', companyView.canOperate)}
     </div>`;
 }
 

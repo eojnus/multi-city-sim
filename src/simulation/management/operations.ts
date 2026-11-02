@@ -379,6 +379,7 @@ export function generateProposals(
 function writePlanState(
   world: WorldState,
   company: Company,
+  config: DemoConfig,
   style: ReturnType<typeof currentStyle>,
   utilization: number,
   targetJobs: number,
@@ -391,7 +392,7 @@ function writePlanState(
     style,
     utilization,
     targetJobs,
-    expectedWageCost: round2(monthlyWageBill(company)),
+    expectedWageCost: round2(monthlyWageBill(company, config)),
     hiringSubsidyPerHire: 0,
     retentionSubsidyPerEmployee: 0,
     investment: round2(Math.max(0, investment)),
@@ -437,13 +438,22 @@ function planManualCompany(
       }
     }
 
-    const wageBill = monthlyWageBill(company);
+    const wageBill = monthlyWageBill(company, config);
     if (wageBill > 0 && company.cash < wageBill) {
       reasons.push('现金不足一个月工资，招聘可能受限（计划仍保留）');
     }
   }
 
-  writePlanState(world, company, currentStyle(world, company), company.utilization, company.jobDemand, investment, reasons);
+  writePlanState(
+    world,
+    company,
+    config,
+    currentStyle(world, company),
+    company.utilization,
+    company.jobDemand,
+    investment,
+    reasons,
+  );
 }
 
 /**
@@ -572,7 +582,7 @@ export function planPlayerOperatedCompany(
   // 避免生成一个注定被银行拒绝的提案（批准/执行时仍会再次走 openLoan 校验）。
   // 金额下限复用 config.banking.minLoanAmount 作为“提案业务下限”（银行侧对
   // workingCapital 已放开小额；这里保留一个配置驱动的下限，避免刷屏式小额提案）。
-  const wageBill = monthlyWageBill(company);
+  const wageBill = monthlyWageBill(company, config);
   if (wageBill > 0 && company.cash < wageBill * 0.75) {
     const need = round2(Math.max(config.banking.minLoanAmount, wageBill * 3));
     const credit = round2(
@@ -598,6 +608,9 @@ export function planPlayerOperatedCompany(
           config,
           tick,
         );
+        if (result.ok && result.loan) {
+          result.loan.note = `${result.loan.note}（来源：托管授权内自动）`;
+        }
         if (!result.ok) reasons.push(`自动贷款未执行：${result.error ?? '条件不满足'}`);
         else reasons.push(`自动周转贷款 ${amount.toFixed(0)} 已到账（可借额度内）`);
       } else {
@@ -639,6 +652,7 @@ export function planPlayerOperatedCompany(
   writePlanState(
     world,
     company,
+    config,
     currentStyle(world, company),
     company.utilization,
     company.jobDemand,
@@ -783,6 +797,9 @@ export function decideProposal(
         config,
         tick,
       );
+      if (result.ok && result.loan) {
+        result.loan.note = `${result.loan.note}（来源：玩家批准提案）`;
+      }
       if (!result.ok) {
         proposal.result = `批准未执行：${result.error ?? '银行拒绝放款'}`;
         return { ok: false, error: proposal.result };
@@ -827,6 +844,125 @@ export function decideProposal(
     body: `${company.name}「${proposal.title}」：${executedNote}`,
   });
   return { ok: true, note: executedNote };
+}
+
+/** 同一去重键在冷却期内是否已有被拒绝/过期的贷款提案（防止其他路径绕过玩家决定）。 */
+function hasRecentLoanRejection(
+  operation: PlayerCompanyOperation,
+  tick: number,
+  cooldownMonths: number,
+): boolean {
+  return operation.proposals.some(
+    (proposal) =>
+      proposal.kind === 'loan' &&
+      (proposal.status === 'rejected' || proposal.status === 'expired') &&
+      proposal.decidedTick !== null &&
+      tick - proposal.decidedTick < Math.max(1, cooldownMonths),
+  );
+}
+
+export interface AutomaticLoanDecision {
+  /** 是否允许在授权范围内自动放款。 */
+  allowed: boolean;
+  /** 允许时本次可自动借入的上限（调用方仍需受实时授信额度约束）。 */
+  limit: number;
+  /** 拒绝/允许的原因（用于日志与玩家提示）。 */
+  reason: string;
+  /** 是否因超出授权而生成/命中待批准提案。 */
+  proposed: boolean;
+}
+
+/**
+ * 玩家经营企业的“非计划内”自动借款统一裁决（发薪补流动性、生产采购、跨城进口等所有路径）。
+ *
+ * 规则（验收问题 2）：
+ * - 非玩家经营企业：不受此限制，按既有 AI 规则在额度内自动融资；
+ * - 全面手动：一律不自动举债（采购受限、工资不足照旧反映，并给出原因）；
+ * - 同一冷却期内玩家已拒绝/未批准贷款提案：不得从其他路径绕回；
+ * - AI 辅助：只有低于重大事项阈值的贷款可自动执行，否则生成待批准提案；
+ * - 高度托管：allowLoan 且金额不超过 maxLoanAmount 时可自动执行，否则生成提案；
+ * - 任何情况下都不得“先借后报”：先裁决、再放款。
+ */
+export function requestAutomaticLoan(
+  world: WorldState,
+  config: DemoConfig,
+  tick: number,
+  company: Company,
+  desiredAmount: number,
+  cause: string,
+): AutomaticLoanDecision {
+  const desired = round2(Math.max(0, desiredAmount));
+  if (!canOperate(world, company.id)) {
+    return {
+      allowed: true,
+      limit: desired,
+      reason: '非玩家经营企业：按 AI 既有规则自动融资。',
+      proposed: false,
+    };
+  }
+  const operation = ensureOperation(world, company.id, config);
+  if (operation.mode === 'manual') {
+    return {
+      allowed: false,
+      limit: 0,
+      reason: `全面手动模式不自动举债（${cause}），请先手动处理现金或改用其他模式。`,
+      proposed: false,
+    };
+  }
+  if (hasRecentLoanRejection(operation, tick, config.management.proposalCooldownMonths)) {
+    return {
+      allowed: false,
+      limit: 0,
+      reason: `玩家近期拒绝或未批准贷款提案，本期不再自动举债（${cause}）。`,
+      proposed: false,
+    };
+  }
+  const auth = operation.authorization;
+  if (!auth.allowLoan) {
+    return {
+      allowed: false,
+      limit: 0,
+      reason: `授权未开启企业贷款，不自动借款（${cause}）。`,
+      proposed: false,
+    };
+  }
+  const credit = round2(
+    Math.max(0, availableCredit(world, { kind: 'company', id: company.id }, config)),
+  );
+  const amount = round2(Math.min(desired, credit));
+  if (!(amount > 0)) {
+    return {
+      allowed: false,
+      limit: 0,
+      reason: `银行可借额度不足（${cause}）。`,
+      proposed: false,
+    };
+  }
+  const threshold = config.management.majorThresholds.loanAmount;
+  const autoLimit =
+    operation.mode === 'delegated' ? auth.maxLoanAmount : Math.max(0, round2(threshold - 0.01));
+  if (amount <= autoLimit + 1e-6) {
+    return {
+      allowed: true,
+      limit: amount,
+      reason: `${OPERATION_MODE_LABELS[operation.mode]}授权范围内自动融资：${cause}`,
+      proposed: false,
+    };
+  }
+  addProposal(world, config, tick, operation, company, {
+    kind: 'loan',
+    title: '申请周转贷款',
+    summary: `因${cause}，拟向银行申请 ${amount.toFixed(0)} 信用点周转贷款（用途 workingCapital），超出自动授权/重大事项阈值。`,
+    reasons: [cause],
+    params: { amount, purpose: 'workingCapital' },
+    amount,
+  });
+  return {
+    allowed: false,
+    limit: 0,
+    reason: `超出自动授权（可自动 ${autoLimit.toFixed(0)}，需要 ${amount.toFixed(0)}），已生成待批准提案：${cause}`,
+    proposed: true,
+  };
 }
 
 /** 只读副本：供 UI 展示（排序：新的在前）。 */
