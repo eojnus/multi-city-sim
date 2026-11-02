@@ -172,7 +172,8 @@ export function settleCityGovernmentDebt(
   // 步骤 15 之后 treasury 不应为负：先以普通政府借款补足到 0（赤字转银行贷款，DECISIONS #31 前置条件）。
   if (city.treasury < -0.005) {
     const deficit = round2(-city.treasury);
-    const borrow = borrowForGovernment(world, city, config, deficit, tick, logs);
+    // 赤字转贷必须精确补到 0，不受单笔最低借款额约束（否则会把 treasury 补成正数、平白多背债）。
+    const borrow = borrowForGovernment(world, city, config, deficit, tick, logs, { exact: true });
     if (!borrow.ok) {
       result.problems.push(`${city.name} 赤字 ${deficit} 无法转为政府借款：${borrow.error ?? '未知原因'}`);
     }
@@ -732,7 +733,11 @@ export function applyBankAdvance(
   return { ok: true, advance, loan, amountAdvanced: total };
 }
 
-/** 政府银行借款（普通借款；不包括垫付转借款，后者由 applyBankAdvance 创建）。 */
+/**
+ * 政府银行借款（普通借款；不包括垫付转借款，后者由 applyBankAdvance 创建）。
+ * `options.exact = true` 时按传入金额精确借款，不受 `loan.minAmount` 单笔最低额约束
+ * （用于结算时把负 treasury 精确补到 0）；默认仍按最低额取整。
+ */
 export function borrowForGovernment(
   world: WorldState,
   city: City,
@@ -740,6 +745,7 @@ export function borrowForGovernment(
   amount: number,
   tick: number,
   logs: LogEntry[],
+  options: { exact?: boolean } = {},
 ): { ok: boolean; loan: GovernmentLoanContract | null; error?: string } {
   const government = city.government;
   if (!government) return { ok: false, loan: null, error: `${city.name} 缺少政府财政状态` };
@@ -747,7 +753,7 @@ export function borrowForGovernment(
     return { ok: false, loan: null, error: '借款金额必须为正' };
   }
   const loanConfig = config.government.loan;
-  const borrowed = round2(Math.max(amount, loanConfig.minAmount));
+  const borrowed = options.exact ? round2(amount) : round2(Math.max(amount, loanConfig.minAmount));
   const loanNumber = government.nextLoanNumber;
   government.nextLoanNumber += 1;
   const loan: GovernmentLoanContract = {
