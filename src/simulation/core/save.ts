@@ -933,6 +933,10 @@ function validateCity(value: unknown, index: number): string | null {
   ]) {
     if (!isFiniteNumber(value[key])) return `城市 ${id}.${key} 必须是有限数值`;
   }
+  // v0.7（#42）：可选字段；缺省合法，存在则必须是有限数值。
+  if (value.fiscalExpenseBaseline !== undefined && !isFiniteNumber(value.fiscalExpenseBaseline)) {
+    return `城市 ${id}.fiscalExpenseBaseline 必须是有限数值`;
+  }
 
   const market = value.market;
   if (!isRecord(market)) return `城市 ${id} 缺少 market`;
