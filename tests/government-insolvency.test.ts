@@ -417,3 +417,30 @@ describe('破产判定、清算与股份转移', () => {
     }
   });
 });
+
+describe('debt：赤字转贷精确补足', () => {
+  it('debt：赤字 3,000 小于单笔最低借款额时，结算后 treasury 归零且贷款本金=3,000', () => {
+    const world = newWorld();
+    const city = mainCity(world);
+    world.time.tick = 1;
+    city.treasury = -3_000;
+
+    const result = settleCityGovernmentDebt(world, city, NO_AI, []);
+    expect(result.problems).toEqual([]);
+    expect(city.treasury).toBeCloseTo(0, 2);
+    const loan = city.government.loans.find((entry) => entry.purpose === 'government');
+    expect(loan).toBeDefined();
+    expect(loan!.principal).toBeCloseTo(3_000, 2);
+  });
+
+  it('debt：非结算路径（AI 主动借款）仍受单笔最低借款额约束', () => {
+    const world = newWorld();
+    const city = mainCity(world);
+    const treasuryBefore = city.treasury;
+
+    const result = borrowForGovernment(world, city, CONFIG, 5_000, 0, []);
+    expect(result.ok).toBe(true);
+    expect(result.loan!.principal).toBeCloseTo(10_000, 2);
+    expect(city.treasury).toBeCloseTo(treasuryBefore + 10_000, 2);
+  });
+});

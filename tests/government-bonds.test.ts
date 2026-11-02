@@ -473,6 +473,39 @@ describe('债券兑付：资金必须真正到持有人账上（货币守恒）'
     expect(world.player.cash).toBeCloseTo(round2(playerBefore + paid), 2);
   });
 
+  it('到期财政只够 88%、银行垫付 12%：财政段与垫付段合并为一条全额流水，持有人一次收满', () => {
+    const world = newWorld();
+    const { city, issuance } = setupSoldIssue(world, 0);
+    // 应兑付 11,200；财政只够 9,856（88%），其余 1,344 必须由银行垫付。
+    city.treasury = 9_856;
+    const playerBefore = world.player.cash;
+
+    world.time.tick = 36;
+    const result = settleBondMaturity(world, city, CONFIG, issuance.id, 36, world.log);
+    expect(result.ok).toBe(true);
+    expect(result.advancedByBank).toBeCloseTo(1_344, 2);
+
+    // 一条流水、金额=两段之和，不是被幂等键吞掉前半段。
+    expect(result.payments).toHaveLength(1);
+    expect(result.payments[0]!.kind).toBe('principal');
+    expect(result.payments[0]!.principalPaid).toBeCloseTo(10_000, 2);
+    expect(result.payments[0]!.interestPaid).toBeCloseTo(1_200, 2);
+    expect(result.payments[0]!.fundedByBankAdvance).toBe(true);
+    expect(round2(result.principalPaid + result.interestPaid)).toBe(11_200);
+    expect(world.player.cash).toBeCloseTo(round2(playerBefore + 11_200), 2);
+    expect(issuance.principalRepaid).toBeCloseTo(10_000, 2);
+    expect(city.treasury).toBe(0);
+    expect(checkInvariants(world)).toEqual([]);
+
+    // 同一 tick 重放：幂等，不重复支付、不重复垫付。
+    const paymentsBefore = (world.bonds?.payments ?? []).length;
+    const replay = settleBondMaturity(world, city, CONFIG, issuance.id, 36, world.log);
+    expect(replay.payments).toHaveLength(0);
+    expect((world.bonds?.payments ?? []).length).toBe(paymentsBefore);
+    expect(world.player.cash).toBeCloseTo(round2(playerBefore + 11_200), 2);
+    expect(issuance.principalRepaid).toBeCloseTo(10_000, 2);
+  });
+
   it('M12 票息：持有人现金增量 = interestPaid；同 tick 重放增量为 0', () => {
     const world = newWorld();
     const { city, issuance } = setupSoldIssue(world, 0);

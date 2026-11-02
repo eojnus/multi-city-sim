@@ -225,8 +225,10 @@ totalDebt = bankLoanPrincipal          // 普通政府贷款未偿本金
 | 4 | `feature/arch-foundation` | `b24afdd` | 契约追加 `BondPayment.holdingId`（幂等键） | ✓ | 42 文件 / 328 用例 ✓ | ✓ |
 | 5 | `feature/sim-fiscal` | `1d138a6` | 块1 债券状态机 + 块2 破产清算/月结六阶段/12 月 GDP 窗口 + holdingId 幂等补全 | ✓ | 44 文件 / 345 用例 ✓ | ✓ |
 | 10 | `feature/data-tuning` | `d637c27`（含 `9bf24d2`、`fd1da67`） | 块6 探针（36 月破产/重选/融资拆解）与报告脚本修复、B10.4 过期标注 | ✓ | 44 文件 / 345 用例 ✓ | ✓ |
+| 11 | `feature/sim-fiscal` | `08311cd`（含 `110ec41`、`2553cd1`） | 块3/4 居民消费预算与群体消费贷 + 债券兑付三点入账/应付项金额与笔数分字段/贷款欠付并入 | ✓ | 45 文件 / 362 用例 ✓ | ✓ |
+| 12 | `feature/data-tuning` | `316eff4`（含 `40a3c86`） | 破产后限贷已知限制与 D11 实测列 | ✓ | 45 文件 / 363 用例 ✓ | ✓ |
 
-- 当前集成分支 HEAD：`d637c27`（代码合并点；其后文档提交不改变用例数）。44 文件 / 345 用例（typecheck/build/vitest 三绿，核对日 2026-11-02）；后续 sim 修复提交将再追加一行。
+- 当前集成分支 HEAD：`316eff4`（代码合并点；其后文档提交不改变用例数）。45 文件 / 363 用例（typecheck/build/vitest 三绿，核对日 2026-11-02）；后续 sim 赤字转贷修复与 UI 走查后再追加。
 - 在途：sim 批次3 = 债券兑付入账修复（§11 #6，货币守恒）+ `payablesInArrears` 贷款欠付统计（§11 #4）+ `payablesPaid` 统计口径（§11 #2），合入后更新本表。
 - 用例数分阶段口径：块0 `1b1459c` 306 → #40–#43 `2983c2c` 315 → 债券第一批 `ee1a949` 328 → 数据/UI 合并 `da2dcaa`/`7c5edf7`/`b24afdd` 328 → 块2 `1d138a6` 345。
 - 数值段合并后核对：`aiGovernment` 保持 #43 新键名（`triggerBelowExpenseMonths`/`maxIssuesPerCityMonth`/`topUpToExpenseMonths`/`maxDebtRatioToIssue`），`maxPlanUnitsPerIssue 100_000`，无结构回退。
@@ -239,8 +241,9 @@ totalDebt = bankLoanPrincipal          // 普通政府贷款未偿本金
 | # | 现象 / 根因 | 处理 | 状态 |
 |---|---|---|---|
 | 1 | `economy-stability` 确定性用例在 index 6 红灯：AI 自动发债的认购序列含 `player`，导致玩家现金被被动扣光、后续投资失败 | sim 批次2 修复（`54e2d7f`）：`maybeAutoIssueGovernmentBond` 认购循环跳过 `holder.kind === 'player'`，玩家买债只能由玩家主动操作 | 已修，345 用例绿 |
-| 2 | `payablesPaid` 把“支付笔数”混入金额累加（`debt.ts:565/578/592/611`），`result.payablesPaid` 可大于 `payablesCreated`，月报统计失真 | 已指派 sim 批次3：金额与笔数分字段统计（详见 `docs/architecture/REVIEW_debt_batch2.md`） | 已指派 sim 批次3 |
+| 2 | `payablesPaid` 把“支付笔数”混入金额累加（`debt.ts:565/578/592/611`），`result.payablesPaid` 可大于 `payablesCreated`，月报统计失真 | sim 批次3 已修：金额与笔数分字段统计（详见 `docs/architecture/REVIEW_debt_batch2.md`） | 已修（`08311cd`/`316eff4`） |
 | 3 | `tests/economy-stability.test.ts` 120 月用例 30s 超时 | `74629d1` 放宽到 60s 并注明定性依据：2 核多 worktree 并行争用 36–40s，基线单跑 12–16s；单跑 3 用例 13.60s 通过 | 已修 |
-| 4 | 贷款分期欠付未计入 `payablesInArrears`：`payGovernmentPayables` 只统计债券两类（`debt.ts:504` 生成 `loanInstalment`；`debt.ts:864-872` 在 `serviceGovernmentLoans` 内回填状态，但其 `inArrears` 未并入 `GovernmentSettlementResult`），月报少计政府贷款欠付 | 已指派 sim 批次3：贷款欠付并入 `payablesInArrears`。注：复核确认 payable 状态有回填，不会“永远 pending” | 已指派 sim 批次3 |
+| 4 | 贷款分期欠付未计入 `payablesInArrears`：`payGovernmentPayables` 只统计债券两类（`debt.ts:504` 生成 `loanInstalment`；`debt.ts:864-872` 在 `serviceGovernmentLoans` 内回填状态，但其 `inArrears` 未并入 `GovernmentSettlementResult`），月报少计政府贷款欠付 | sim 批次3 已修：贷款欠付并入 `payablesInArrears`（`debt.ts:203-204` 合计）。注：复核确认 payable 状态有回填，不会“永远 pending” | 已修（`08311cd`/`316eff4`） |
 | 5 | `scripts/economy-balance-report.ts:68` 使用不存在的 `world.investorGroups`（应为 `world.investors`，见 `types.ts:1852`）；脚本不在 tsconfig 内故 typecheck 未拦住，交付分支上直接运行崩溃 | 数值岗工作区已修，待提交并合入交付分支 | 待修（待合入） |
-| 6 | **债券兑付未给持有人入账**：`payBondCoupon`/`settleBondMaturity`/`settleBondBankruptcyRedemption` 只写 `BondPayment`、扣财政、建 `bondAdvance` 贷款，未把兑付额记入持有人现金，货币净额凭空减少；QA AC-B12/B14 实测：财政充足到期净额 −11,200、垫付分支 −11,200、破产兑付 20 个月 −10,666.67。违反 Brief §4.1.3 与货币守恒 | 已指派 sim 批次3：修法 `banking/credit.ts:85 creditOwnerCash` 在三个兑付点各记一次（幂等命中不记、避免与 `debt.ts` 阶段③双记），并补三条货币守恒测试 | 已指派 sim 批次3 |
+| 6 | **债券兑付未给持有人入账**：`payBondCoupon`/`settleBondMaturity`/`settleBondBankruptcyRedemption` 只写 `BondPayment`、扣财政、建 `bondAdvance` 贷款，未把兑付额记入持有人现金，货币净额凭空减少；QA AC-B12/B14 实测：财政充足到期净额 −11,200、垫付分支 −11,200、破产兑付 20 个月 −10,666.67。违反 Brief §4.1.3 与货币守恒 | sim 批次3 已修：三个兑付点用 `banking/credit.ts:85 creditOwnerCash` 各记一次（幂等命中不记、避免与 `debt.ts` 阶段③双记），补三条货币守恒测试（`110ec41`） | 已修（`08311cd`/`316eff4`） |
+| 7 | 赤字转贷被 `minAmount` 抬高：`debt.ts:750` 对小于 10,000 的赤字强制借到 10,000，`treasury` 转正、凭空多背债多计息（违反“等额补足到 0”） | 已派 sim 用 `borrowForGovernment(..., { exact: true })` 修：赤字转贷精确补足到 0，AI 主动借款保留 10,000 下限，并补两条测试 | 修复中 |

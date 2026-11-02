@@ -665,15 +665,20 @@ export function settleBondMaturity(
   let totalPrincipalPaid = 0;
   let totalInterestPaid = 0;
 
-  const makePayment = (
+  /** 同一债权同一 tick 的财政段与垫付段必须合并为一条流水、一次入账（BondPayment 幂等键不含出资来源）。 */
+  const makeMergedPayment = (
     holdingId: string,
     holder: BondHolder,
-    principal: number,
-    interest: number,
-    fundedByBankAdvance: boolean,
+    principalTreasury: number,
+    interestTreasury: number,
+    principalAdvance: number,
+    interestAdvance: number,
   ): void => {
+    const principal = round2(principalTreasury + principalAdvance);
+    const interest = round2(interestTreasury + interestAdvance);
     if (principal <= 0.005 && interest <= 0.005) return;
     if (bondPaymentExists(ledger, issuance.id, holdingId, tick, 'principal')) return;
+    const fundedByBankAdvance = principalAdvance > 0.005 || interestAdvance > 0.005;
     const payment: BondPayment = {
       id: nextPaymentId(world, ledger, '到期兑付'),
       tick,
@@ -682,15 +687,20 @@ export function settleBondMaturity(
       holder,
       holdingId,
       kind: 'principal',
-      principalPaid: round2(principal),
-      interestPaid: round2(interest),
+      principalPaid: principal,
+      interestPaid: interest,
       fundedByBankAdvance,
       advanceLoanId: fundedByBankAdvance ? advanceLoanId : null,
-      note: fundedByBankAdvance ? '到期本息（银行垫付）' : '到期本息（财政支付）',
+      note:
+        fundedByBankAdvance && (principalTreasury > 0.005 || interestTreasury > 0.005)
+          ? '到期本息（财政支付 + 银行垫付合并）'
+          : fundedByBankAdvance
+            ? '到期本息（银行垫付）'
+            : '到期本息（财政支付）',
     };
     ledger.payments.push(payment);
     payments.push(payment);
-    // 到期本息必须真正到持有人账上（财政支付与银行垫付两段都要）。
+    // 合并金额一次入账，避免拆段后被幂等键吞掉。
     creditBondHolder(world, holder, principal + interest);
     totalPrincipalPaid = round2(totalPrincipalPaid + principal);
     totalInterestPaid = round2(totalInterestPaid + interest);
@@ -708,8 +718,7 @@ export function settleBondMaturity(
     remainingPrincipalTreasury = round2(remainingPrincipalTreasury - principalT);
     remainingPrincipalAdvance = round2(remainingPrincipalAdvance - principalA);
 
-    makePayment(holding.id, holding.holder, principalT, interestT, false);
-    makePayment(holding.id, holding.holder, principalA, interestA, true);
+    makeMergedPayment(holding.id, holding.holder, principalT, interestT, principalA, interestA);
 
     holding.accruedInterest = 0;
     holding.interestPaid = round2(holding.interestPaid + interestT + interestA);
