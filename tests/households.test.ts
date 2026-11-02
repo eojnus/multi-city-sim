@@ -386,16 +386,25 @@ describe('居民群体：收入、消费与储蓄入账', () => {
     expect(sawRefund).toBe(true);
   });
 
-  it('消费受现金约束：群体现金清零后推进，本月消费必须为 0（预算 = min(收入×倾向, 现金)）', () => {
+  it('消费受现金约束：群体现金清零后现金预算为 0，只能靠自有授信消费（贷款不计收入）', () => {
     const sim = Simulation.create();
     const city = cityOf(sim.state, 'lanport');
     for (const group of householdGroupsOfCity(sim.state, city.id)) group.cash = 0;
 
     const result = sim.tick();
     expect(result.ok, result.error).toBe(true);
+    // 现金预算严格为 0（#39：只用手头现金），贷款额度单列、不进入现金预算。
     expect(city.lastMonth.consumerBudget).toBe(0);
-    expect(city.lastMonth.consumerSpend).toBe(0);
-    // 收入在本月月末入账，所以下月才重新有购买力；本月不能靠“借钱消费”。
+    const groups = householdGroupsOfCity(sim.state, city.id);
+    const recordedConsumption = sumOf(groups, (group) => group.lastMonth.consumption);
+    expect(city.lastMonth.consumerSpend).toBeCloseTo(recordedConsumption, 2);
+    const loanDrawn = sumOf(groups, (group) => group.lastMonth.loanDrawn ?? 0);
+    if (city.lastMonth.consumerSpend > 0) {
+      // 有成交就必须有同月消费贷支撑（真实债务），且贷款不得进收入口径。
+      expect(loanDrawn).toBeGreaterThan(0);
+    }
+    expect(loanDrawn).toBeGreaterThanOrEqual(0);
+    // 收入在本月月末入账；贷款只是负债，现金增加不来自收入口径。
     expect(cityHouseholdCash(sim.state, city.id)).toBeGreaterThan(0);
   });
 
@@ -456,8 +465,17 @@ describe('居民群体：收入、消费与储蓄入账', () => {
 
     const cashChange = cityHouseholdCash(sim.state, city.id) - cashBefore;
     const netCashChange = sumOf(groups, (group) => group.lastMonth.netCashChange);
-    // 统计口径应与实际现金变动闭合（收入 − 消费 − 储蓄）。
-    expect(netCashChange).toBeCloseTo(cashChange, 2);
+    // 统计口径应与实际现金变动闭合：现金变动 = 收入 − 消费 − 储蓄 + 本月新借 − 本月还本付息。
+    const loop = (sim.state.householdFinance?.loans ?? []).filter(
+      (loan) => loan.cityId === city.id,
+    );
+    const loanDrawn = sumOf(loop, (loan) => Math.max(0, loan.principal));
+    const repaidThisTick = sumOf(loop, (loan) =>
+      loan.payments
+        .filter((payment) => payment.tick === sim.state.time.tick)
+        .reduce((total, payment) => total + payment.principalPaid + payment.interestPaid, 0),
+    );
+    expect(netCashChange + loanDrawn - repaidThisTick).toBeCloseTo(cashChange, 2);
   });
 });
 
