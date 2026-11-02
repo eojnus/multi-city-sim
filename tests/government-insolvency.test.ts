@@ -194,6 +194,69 @@ describe('月结：票息与到期垫付', () => {
   });
 });
 
+describe('debt：政府应付项计数与贷款分期结清', () => {
+  it('debt：payablesPaid 为笔数且同 tick 重复结算不重复计数（票息场景）', () => {
+    const world = newWorld();
+    const { city, issuance } = sellIssue(world, 0);
+    expect(issuance.cityId).toBe(city.id);
+
+    world.time.tick = 12;
+    const first = settleCityGovernmentDebt(world, city, NO_AI, []);
+    expect(first.payablesCreated).toBe(1);
+    expect(first.payablesPaid).toBe(1);
+    expect(first.payablesInArrears).toBe(0);
+
+    city.government!.settledTicks = city.government!.settledTicks.filter((tick) => tick !== 12);
+    const second = settleCityGovernmentDebt(world, city, NO_AI, []);
+    expect(second.payablesCreated).toBe(0);
+    expect(second.payablesPaid).toBe(0);
+    expect(second.payablesInArrears).toBe(0);
+  });
+
+  it('debt：M36 到期两笔应付项（票息 + 本金）各计 1 次，不按付款流水重复累加', () => {
+    const world = newWorld();
+    const { city } = sellIssue(world, 0);
+    city.treasury = 0;
+
+    world.time.tick = 36;
+    const result = settleCityGovernmentDebt(world, city, NO_AI, []);
+    expect(result.payablesCreated).toBe(2);
+    expect(result.payablesPaid).toBe(2);
+    expect(result.payablesInArrears).toBe(0);
+  });
+
+  it('debt：贷款分期财政不足时应付项转 arrears 且 payablesInArrears 计 1 笔', () => {
+    const world = newWorld();
+    const city = mainCity(world);
+    city.treasury = 0;
+    expect(borrowForGovernment(world, city, CONFIG, 12_000, 0, []).ok).toBe(true);
+    city.treasury = 0;
+
+    world.time.tick = 1;
+    const result = settleCityGovernmentDebt(world, city, NO_AI, []);
+
+    const instalment = city.government!.payables.find((entry) => entry.kind === 'loanInstalment');
+    expect(instalment).toBeDefined();
+    expect(instalment!.status).toBe('arrears');
+    expect(instalment!.paidTick).toBe(1);
+    expect(result.payablesInArrears).toBe(1);
+  });
+
+  it('debt：贷款分期按时还清时应付项转 paid 且 payablesPaid 计 1 笔', () => {
+    const world = newWorld();
+    const city = mainCity(world);
+    city.treasury = 0;
+    expect(borrowForGovernment(world, city, CONFIG, 12_000, 0, []).ok).toBe(true);
+
+    world.time.tick = 1;
+    const result = settleCityGovernmentDebt(world, city, NO_AI, []);
+
+    const instalment = city.government!.payables.find((entry) => entry.kind === 'loanInstalment');
+    expect(instalment!.status).toBe('paid');
+    expect(result.payablesPaid).toBe(1);
+  });
+});
+
 describe('破产判定、清算与股份转移', () => {
   it('总负债≥12 月 GDP 的 100% 时当月破产：垫付兑付、债务勾销、当月重选', () => {
     const world = newWorld();

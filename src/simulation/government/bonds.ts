@@ -15,6 +15,8 @@
  * 同一 tick 重复调用不会重复计提；计息明细 BondHolding.accruedInterest 是权威，
  * BondIssuance.accruedInterest 只是对账汇总（不变量要求二者一致）。
  */
+import { creditOwnerCash } from '../banking/credit';
+import type { BankOwner } from '../contracts/types';
 import type {
   BondHolder,
   BondHolding,
@@ -475,6 +477,13 @@ function bondPaymentExists(
   );
 }
 
+
+/** 债券兑付资金必须真正记到持有人账上：银行/财政支出后 credit 持有人现金（BankOwner 是 BondHolder 超集）。 */
+function creditBondHolder(world: WorldState, holder: BondHolder, amount: number): void {
+  if (amount <= 0.005) return;
+  creditOwnerCash(world, { kind: holder.kind, id: holder.id } as BankOwner, amount);
+}
+
 function nextPaymentId(world: WorldState, ledger: BondLedger, note: string): string {
   const id = `bondpayment-${ledger.nextPaymentNumber}`;
   ledger.nextPaymentNumber += 1;
@@ -526,13 +535,17 @@ export function payBondCoupon(
   let remainingCash = paid;
   const payments: BondPayment[] = [];
   for (const holding of holdings) {
+    // 幂等守卫必须在任何扣减之前：同 tick 重试时不重复扣利息、不重复建流水。
+    if (bondPaymentExists(ledger, issuance.id, holding.id, tick, 'coupon')) {
+      holding.lastCouponTick = tick;
+      continue;
+    }
     const interest = round2(Math.min(holding.accruedInterest, remainingCash));
     holding.lastCouponTick = tick;
     if (interest > 0) {
       holding.accruedInterest = round2(holding.accruedInterest - interest);
       holding.interestPaid = round2(holding.interestPaid + interest);
       remainingCash = round2(remainingCash - interest);
-      if (bondPaymentExists(ledger, issuance.id, holding.id, tick, 'coupon')) continue;
       const payment: BondPayment = {
         id: nextPaymentId(world, ledger, '票息'),
         tick,
@@ -549,6 +562,8 @@ export function payBondCoupon(
       };
       ledger.payments.push(payment);
       payments.push(payment);
+      // 票息必须真正到持有人账上：财政支出/垫付后 credit 持有人现金。
+      creditBondHolder(world, holding.holder, payment.principalPaid + payment.interestPaid);
     }
   }
   issuance.lastCouponTick = tick;
@@ -675,6 +690,8 @@ export function settleBondMaturity(
     };
     ledger.payments.push(payment);
     payments.push(payment);
+    // 到期本息必须真正到持有人账上（财政支付与银行垫付两段都要）。
+    creditBondHolder(world, holder, principal + interest);
     totalPrincipalPaid = round2(totalPrincipalPaid + principal);
     totalInterestPaid = round2(totalInterestPaid + interest);
   };
@@ -801,6 +818,8 @@ export function settleBondBankruptcyRedemption(
       };
       ledger.payments.push(payment);
       payments.push(payment);
+      // 破产兑付＝未到期本金 + 已计提未付利息，银行垫付后必须记到持有人账上。
+      creditBondHolder(world, holding.holder, holding.principal + holding.accruedInterest);
       totalPrincipal = round2(totalPrincipal + holding.principal);
       totalInterest = round2(totalInterest + holding.accruedInterest);
       holding.interestPaid = round2(holding.interestPaid + holding.accruedInterest);

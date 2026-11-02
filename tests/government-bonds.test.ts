@@ -425,3 +425,97 @@ describe('政府债券：票息、到期与银行垫付', () => {
     expect(checkInvariants(restored)).toEqual([]);
   });
 });
+
+describe('债券兑付：资金必须真正到持有人账上（货币守恒）', () => {
+  it('到期财政充足：持有人现金增量 = 本息支付额', () => {
+    const world = newWorld();
+    const { city, issuance } = setupSoldIssue(world, 0);
+    city.treasury = 20_000;
+    const playerBefore = world.player.cash;
+    const treasuryBefore = city.treasury;
+
+    world.time.tick = 36;
+    const result = settleBondMaturity(world, city, CONFIG, issuance.id, 36, world.log);
+    expect(result.ok).toBe(true);
+    expect(result.advancedByBank).toBe(0);
+
+    const paid = round2(result.principalPaid + result.interestPaid);
+    expect(paid).toBe(11_200);
+    expect(world.player.cash).toBeCloseTo(round2(playerBefore + paid), 2);
+    expect(city.treasury).toBeCloseTo(round2(treasuryBefore - paid), 2);
+
+    // 同 tick 重放：幂等，不再给钱。
+    const replay = settleBondMaturity(world, city, CONFIG, issuance.id, 36, world.log);
+    expect(replay.payments).toHaveLength(0);
+    expect(world.player.cash).toBeCloseTo(round2(playerBefore + paid), 2);
+  });
+
+  it('到期财政为 0：银行垫付的钱进持有人、政府欠银行的钱进垫付贷款，两边都有', () => {
+    const world = newWorld();
+    const { city, issuance } = setupSoldIssue(world, 0);
+    city.treasury = 0;
+    const playerBefore = world.player.cash;
+
+    world.time.tick = 36;
+    const result = settleBondMaturity(world, city, CONFIG, issuance.id, 36, world.log);
+    expect(result.ok).toBe(true);
+    expect(result.advancedByBank).toBe(11_200);
+
+    const paid = round2(result.principalPaid + result.interestPaid);
+    expect(world.player.cash).toBeCloseTo(round2(playerBefore + paid), 2);
+    expect(city.treasury).toBe(0);
+    const advanceLoans = city.government.loans.filter((loan) => loan.purpose === 'bondAdvance');
+    expect(round2(advanceLoans.reduce((total, loan) => total + loan.outstanding, 0))).toBe(11_200);
+
+    // 重放：不重复垫付、不重复给持有人钱。
+    const replay = settleBondMaturity(world, city, CONFIG, issuance.id, 36, world.log);
+    expect(replay.payments).toHaveLength(0);
+    expect(world.player.cash).toBeCloseTo(round2(playerBefore + paid), 2);
+  });
+
+  it('M12 票息：持有人现金增量 = interestPaid；同 tick 重放增量为 0', () => {
+    const world = newWorld();
+    const { city, issuance } = setupSoldIssue(world, 0);
+    city.treasury = 5_000;
+    const playerBefore = world.player.cash;
+
+    world.time.tick = 12;
+    const result = payBondCoupon(world, city, CONFIG, issuance.id, 12, world.log);
+    expect(result.ok).toBe(true);
+    expect(result.interestPaid).toBe(400);
+    expect(world.player.cash).toBeCloseTo(round2(playerBefore + result.interestPaid), 2);
+
+    const replay = payBondCoupon(world, city, CONFIG, issuance.id, 12, world.log);
+    expect(replay.interestPaid).toBe(0);
+    expect(world.player.cash).toBeCloseTo(round2(playerBefore + 400), 2);
+  });
+
+  it('破产兑付：持有人现金增量 = 未到期本金 + 已计提未付利息；重放增量为 0', () => {
+    const world = newWorld();
+    const { city, issuance } = setupSoldIssue(world, 0);
+    const playerBefore = world.player.cash;
+
+    world.time.tick = 18;
+    const result = settleBondBankruptcyRedemption(world, city, CONFIG, 18, world.log);
+    expect(result.ok).toBe(true);
+    const expectedInterest = 600; // 10,000 × 4% × 18/12
+    expect(result.principalPaid).toBe(10_000);
+    expect(result.interestPaid).toBe(expectedInterest);
+    expect(world.player.cash).toBeCloseTo(
+      round2(playerBefore + 10_000 + expectedInterest),
+      2,
+    );
+
+    const replay = settleBondBankruptcyRedemption(world, city, CONFIG, 18, world.log);
+    expect(replay.payments).toHaveLength(0);
+    expect(world.player.cash).toBeCloseTo(
+      round2(playerBefore + 10_000 + expectedInterest),
+      2,
+    );
+    // 已兑付批次不再保留 active 持债，且不变量自洽。
+    expect(holdingsOf(world, issuance.id).every((holding) => holding.status === 'redeemed')).toBe(
+      true,
+    );
+    expect(checkInvariants(world)).toEqual([]);
+  });
+});
