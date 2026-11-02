@@ -228,7 +228,7 @@ totalDebt = bankLoanPrincipal          // 普通政府贷款未偿本金
 | 11 | `feature/sim-fiscal` | `08311cd`（含 `110ec41`、`2553cd1`） | 块3/4 居民消费预算与群体消费贷 + 债券兑付三点入账/应付项金额与笔数分字段/贷款欠付并入 | ✓ | 45 文件 / 362 用例 ✓ | ✓ |
 | 12 | `feature/data-tuning` | `316eff4`（含 `40a3c86`） | 破产后限贷已知限制与 D11 实测列 | ✓ | 45 文件 / 363 用例 ✓ | ✓ |
 
-- 当前集成分支 HEAD：`316eff4`（代码合并点；其后文档提交不改变用例数）。45 文件 / 363 用例（typecheck/build/vitest 三绿，核对日 2026-11-02）；后续 sim 赤字转贷修复与 UI 走查后再追加。
+- 当前集成分支 HEAD：`bacc158`（代码合并点；其后文档提交不改变用例数）。#8 拆分歧义修复合入后会再变；后续 UI 走查后再追加。核对日 2026-11-02。
 - 在途：sim 批次3 = 债券兑付入账修复（§11 #6，货币守恒）+ `payablesInArrears` 贷款欠付统计（§11 #4）+ `payablesPaid` 统计口径（§11 #2），合入后更新本表。
 - 用例数分阶段口径：块0 `1b1459c` 306 → #40–#43 `2983c2c` 315 → 债券第一批 `ee1a949` 328 → 数据/UI 合并 `da2dcaa`/`7c5edf7`/`b24afdd` 328 → 块2 `1d138a6` 345。
 - 数值段合并后核对：`aiGovernment` 保持 #43 新键名（`triggerBelowExpenseMonths`/`maxIssuesPerCityMonth`/`topUpToExpenseMonths`/`maxDebtRatioToIssue`），`maxPlanUnitsPerIssue 100_000`，无结构回退。
@@ -246,4 +246,5 @@ totalDebt = bankLoanPrincipal          // 普通政府贷款未偿本金
 | 4 | 贷款分期欠付未计入 `payablesInArrears`：`payGovernmentPayables` 只统计债券两类（`debt.ts:504` 生成 `loanInstalment`；`debt.ts:864-872` 在 `serviceGovernmentLoans` 内回填状态，但其 `inArrears` 未并入 `GovernmentSettlementResult`），月报少计政府贷款欠付 | sim 批次3 已修：贷款欠付并入 `payablesInArrears`（`debt.ts:203-204` 合计）。注：复核确认 payable 状态有回填，不会“永远 pending” | 已修（`08311cd`/`316eff4`） |
 | 5 | `scripts/economy-balance-report.ts:68` 使用不存在的 `world.investorGroups`（应为 `world.investors`，见 `types.ts:1852`）；脚本不在 tsconfig 内故 typecheck 未拦住，交付分支上直接运行崩溃 | 数值岗工作区已修，待提交并合入交付分支 | 待修（待合入） |
 | 6 | **债券兑付未给持有人入账**：`payBondCoupon`/`settleBondMaturity`/`settleBondBankruptcyRedemption` 只写 `BondPayment`、扣财政、建 `bondAdvance` 贷款，未把兑付额记入持有人现金，货币净额凭空减少；QA AC-B12/B14 实测：财政充足到期净额 −11,200、垫付分支 −11,200、破产兑付 20 个月 −10,666.67。违反 Brief §4.1.3 与货币守恒 | sim 批次3 已修：三个兑付点用 `banking/credit.ts:85 creditOwnerCash` 各记一次（幂等命中不记、避免与 `debt.ts` 阶段③双记），补三条货币守恒测试（`110ec41`） | 已修（`08311cd`/`316eff4`） |
-| 7 | 赤字转贷被 `minAmount` 抬高：`debt.ts:750` 对小于 10,000 的赤字强制借到 10,000，`treasury` 转正、凭空多背债多计息（违反“等额补足到 0”） | 已派 sim 用 `borrowForGovernment(..., { exact: true })` 修：赤字转贷精确补足到 0，AI 主动借款保留 10,000 下限，并补两条测试 | 修复中 |
+| 7 | 赤字转贷被 `minAmount` 抬高：`debt.ts:750` 对小于 10,000 的赤字强制借到 10,000，`treasury` 转正、凭空多背债多计息（违反“等额补足到 0”） | sim 已修（`6d4b240`）：`borrowForGovernment(..., { exact: true })` 赤字精确补足到 0，AI 主动借款保留 10,000 下限，并补两条测试 | 已修（`947eed5`，交付分支） |
+| 8 | **同月“到期+破产”拆分支付被幂等键吞掉**：兑付分两段出资（财政段/垫付段）支付时幂等键不含出资来源，第二段命中 `bondPaymentExists`；`bonds.ts:672` 的 `makePayment((issuanceId,holdingId,tick,'principal'))` 使流水少记 1,200、`issuance.principalRepaid` 少 1,200（8,800 vs 10,000）、持有人少收 1,200（QA 第五轮 AC-F08） | 已派 sim：优先“多段出资合并为一次支付+一次入账”，或幂等键加入 fundingSource；补“拆分守恒 + 同 tick 重放”两条测试 | 修复中 |
