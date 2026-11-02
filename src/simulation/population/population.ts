@@ -3,6 +3,7 @@ import type { DemoConfig } from '../../data/config';
 import { clamp, round2 } from '../core/math';
 import type { DeterministicRng } from '../core/rng';
 import { rebalanceHouseholdWealthForMigration } from './household-groups';
+import { transferHouseholdDebtsForMigration } from './household-finance';
 
 export function setCityPopulation(
   city: City,
@@ -180,6 +181,16 @@ export function applyMigration(
       people,
       laborForceMoved,
       config,
+      world.time.tick,
+    );
+    // 消费贷款随人口迁移：迁移者按人均带走自己那部分未偿债务，两城合计债务守恒。
+    transferHouseholdDebtsForMigration(
+      world,
+      config,
+      source.id,
+      destination.id,
+      people,
+      laborForceMoved,
       world.time.tick,
     );
 

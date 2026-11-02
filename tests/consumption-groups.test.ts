@@ -119,25 +119,32 @@ describe('居民消费：逐群体独立预算', () => {
     for (const group of groups) {
       const entry = byGroup[group.id]!;
       expect(entry, `缺少群体结果：${group.id}`).toBeDefined();
-      // 群体现金的实际减少额必须等于该群体记账的消费额。
-      expect(entry.spend).toBeCloseTo((cashBefore.get(group.id) ?? 0) - group.cash, 2);
+      // v1.5 #38：消费贷是真实债务，现金变化 = 期初现金 + 本月新借 - 本月总消费支出。
+      const cashSpent = round2(entry.spend - (entry.loanFinanced ?? 0));
+      expect(group.cash).toBeCloseTo(
+        round2((cashBefore.get(group.id) ?? 0) + (group.lastMonth.loanDrawn ?? 0) - entry.spend),
+        2,
+      );
       if (group.id === rich.id) continue;
+      // 现金为 0 的群体没有现金预算，只能靠自有授信消费，不能挪用其他群体的现金。
       expect(entry.budget).toBe(0);
-      expect(entry.spend).toBe(0);
-      expect(group.cash).toBe(0);
-      if (group.people > 0) {
-        expect(sumOf(CONSUMER_GOODS, (good) => entry.unmet[good.id] ?? 0)).toBeGreaterThan(0);
-      }
+      expect(cashSpent).toBeCloseTo(0, 2);
+      expect(entry.spend).toBeCloseTo(entry.loanFinanced ?? 0, 2);
     }
 
     const richEntry = byGroup[rich.id]!;
     expect(richEntry.budget).toBeCloseTo(
-      Math.min(rich.lastMonth.income * DEMO_CONFIG.consumer.propensity, 50_000),
+      Math.min(50_000, 0.8 * rich.lastMonth.income + 0.05 * 50_000),
       2,
     );
     expect(richEntry.spend).toBeGreaterThan(0);
-    expect(richEntry.spend).toBeLessThanOrEqual(richEntry.budget + AMOUNT_TOLERANCE);
-    expect(rich.cash).toBeCloseTo(50_000 - richEntry.spend, 2);
+    // 现金自付不超过现金预算；超出部分只能来自消费贷（真实债务，不计收入）。
+    const richCashSpent = round2(richEntry.spend - (richEntry.loanFinanced ?? 0));
+    expect(richCashSpent).toBeLessThanOrEqual(richEntry.budget + AMOUNT_TOLERANCE);
+    expect(rich.cash).toBeCloseTo(
+      round2(50_000 + (rich.lastMonth.loanDrawn ?? 0) - richEntry.spend),
+      2,
+    );
 
     // 全城汇总 = 各群体之和；现金总减少额 = 全城消费支出。
     expect(result.budget).toBeCloseTo(
@@ -152,7 +159,8 @@ describe('居民消费：逐群体独立预算', () => {
       groups,
       (group) => (cashBefore.get(group.id) ?? 0) - group.cash,
     );
-    expect(totalCashDrop).toBeCloseTo(result.spend, 2);
+    const totalLoanDrawn = sumOf(groups, (group) => group.lastMonth.loanDrawn ?? 0);
+    expect(round2(totalCashDrop + totalLoanDrawn)).toBeCloseTo(result.spend, 1);
   });
 
   it('群体现金低于收入×消费倾向时，预算与支出以该群体现金为上限', () => {
@@ -174,13 +182,19 @@ describe('居民消费：逐群体独立预算', () => {
 
     expect(entry.budget).toBeCloseTo(1_200, 2);
     expect(entry.spend).toBeGreaterThan(0);
-    expect(entry.spend).toBeLessThanOrEqual(1_200 + AMOUNT_TOLERANCE);
+    expect(entry.spend).toBeGreaterThan(entry.budget);
+    // 超出 1200 现金预算的部分只能来自消费贷（真实债务，不计收入）。
+    expect(entry.loanFinanced ?? 0).toBeGreaterThan(0);
     expect(limited.cash).toBeGreaterThanOrEqual(0);
-    expect(limited.cash).toBeCloseTo(round2(1_200 - entry.spend), 2);
+    expect(limited.cash).toBeCloseTo(
+      round2(1_200 + (limited.lastMonth.loanDrawn ?? 0) - entry.spend),
+      2,
+    );
     for (const group of groups) {
       if (group.id === limited.id) continue;
-      expect(group.cash).toBe(0);
-      expect(result.byGroup![group.id]!.spend).toBe(0);
+      // 其他群体没有现金预算；若发生消费只能是它们自己的消费贷，不动用他人现金。
+      const other = result.byGroup![group.id]!;
+      expect(round2(other.spend - (other.loanFinanced ?? 0))).toBeCloseTo(0, 2);
     }
   });
 

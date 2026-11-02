@@ -67,7 +67,9 @@ export interface GovernmentSettlementResult {
   tick: number;
   cityId: string;
   payablesCreated: number;
+  /** 本月已结清应付项**笔数**（含 paidByAdvance；不是金额）。 */
   payablesPaid: number;
+  /** 本月转为欠付的应付项**笔数**（票息欠付 + 贷款分期欠付）。 */
   payablesInArrears: number;
   advancedByBank: number;
   bankrupted: boolean;
@@ -196,6 +198,10 @@ export function settleCityGovernmentDebt(
 
   // ③ 政府银行贷款分期还款（票息/到期兑付之后，不足转欠付、不罚息、不垫付）。
   serviceGovernmentLoans(world, city, config, tick, logs);
+  // ③a 回填贷款分期应付项：否则 loanInstalment 会永远停在 pending，欠付笔数也统计不到。
+  const loanPayables = backfillLoanInstalmentPayables(city, payables, tick);
+  result.payablesPaid += loanPayables.paid;
+  result.payablesInArrears += loanPayables.inArrears;
 
   // ④ 债务汇总与破产判定。
   const summary = computeGovernmentDebtSummary(world, city, config, tick);
@@ -516,9 +522,29 @@ export function buildGovernmentPayables(
 }
 
 /**
- * 阶段③④：按“票息 → 到期本息 → 贷款分期”顺序结清应付项；不足部分转欠付或银行垫付。
- * 债券兑付仍由 bonds.ts 的权威实现完成（保证每笔债权只付一次），这里负责应付项状态与统计。
+ * 统计「贷款分期」应付项：serviceGovernmentLoans 会在还款时回填 paid/arrears，
+ * 这里只做**计数**（笔数），并把仍停在 pending 的（例如贷款被跳过）标为欠付。
  */
+function backfillLoanInstalmentPayables(
+  city: City,
+  payables: GovernmentPayable[],
+  tick: number,
+): { paid: number; inArrears: number } {
+  let paid = 0;
+  let inArrears = 0;
+  for (const payable of payables) {
+    if (payable.kind !== 'loanInstalment' || payable.tick !== tick) continue;
+    if (payable.status === 'writtenOff') continue;
+    if (payable.status === 'pending') {
+      payable.status = 'arrears';
+      payable.paidTick = tick;
+    }
+    if (payable.status === 'arrears') inArrears += 1;
+    else paid += 1;
+  }
+  return { paid, inArrears };
+}
+
 export function payGovernmentPayables(
   world: WorldState,
   city: City,
@@ -562,7 +588,6 @@ export function payGovernmentPayables(
       });
       continue;
     }
-    paid = round2(paid + redemption.payments.length);
     advanced = round2(advanced + redemption.advancedByBank);
   }
   for (const issuanceId of [...principalIssuances].sort()) {
@@ -575,7 +600,6 @@ export function payGovernmentPayables(
       });
       continue;
     }
-    paid = round2(paid + redemption.payments.length);
     advanced = round2(advanced + redemption.advancedByBank);
   }
 
