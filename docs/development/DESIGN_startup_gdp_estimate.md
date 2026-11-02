@@ -74,7 +74,7 @@ q̂ = min(company.capacity, laborCapacity(company, city, config, world)) × gdp.
 | 城市归属 | `Company.cityId` |
 | 估计系数 | `gdp.startupEstimateUtilization`（新键） |
 | 填充月数 | `gdp.startupEstimateMonths`（新键） |
-| 判定兜底 | `gdpEstimate.minAnnualGdpForRatio = 1`（新键） |
+| 判定兜底 | `government.fiscalRisk.minAnnualGdp = 1`（v0.7 冻结键位） |
 
 ## A4. 参数键与默认值（数值段，结构由架构师定）
 
@@ -83,11 +83,11 @@ q̂ = min(company.capacity, laborCapacity(company, city, config, world)) × gdp.
 ```ts
 gdpEstimate: {
   /** 估算产量 / 理论可生产量。首版假设（补充指令 §6 已定），非模拟校准结果。 */
-  startupUtilizationFactor: 0.8,      // 比例，单位：倍
+  utilizationAssumption: 0.8,      // 比例，单位：倍（v0.7 冻结键名，位于 government.gdpEstimate）
   /** 开局填充的估计月数（= 破产判定窗口）。 */
   startupEstimateMonths: 12,           // 月
   /** 最小年 GDP 判定值：最近 12 月合计低于该值时，比率与破产判定按该值计算。 */
-  minAnnualGdpForRatio: 1,             // 信用点/年
+  // 最小年 GDP 判定值 1 信用点：v0.7 冻结后位于 government.fiscalRisk.minAnnualGdp
 },
 ```
 
@@ -109,7 +109,7 @@ gdpEstimate: {
 2. **逐月替换**：`src/simulation/economy/gdp.ts` 的 `computeCityGdp`：push 真实条目之前，若存在 `estimated` 条目，
    删除最早的一条（`shift`），再 push 真实条目；保持 60 条裁剪逻辑不变。12 个月后估计条目自然清零。
 3. **12 月判定合计**：新增 `recent12MonthGdp(city, config)`（放 `economy/gdp.ts`，由游戏程序实现、报告与破产判定共用）：
-   `sum = Σ 最近 12 条 gdpHistory.value`，分母 = `max(config.gdpEstimate.minAnnualGdpForRatio, sum)`。
+   `sum = Σ 最近 12 条 gdpHistory.value`，分母 = `max(config.government.fiscalRisk.minAnnualGdp, sum)`。
    比率 = 总负债 / 分母；破产判定按冻结的 100% 阈值（另见 B 稿参数表）。
 4. **旧档迁移**：`src/simulation/core/save.ts` v6→v7（架构师块 0）：加载后若 `city.gdpHistory.length < 12`，
    用同口径公式（基于加载时的企业/城市/价格状态）补 `12 − 已有真实月数` 条估计条目，**前置**到历史数组最前，

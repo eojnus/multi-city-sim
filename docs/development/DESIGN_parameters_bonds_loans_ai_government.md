@@ -113,10 +113,10 @@ householdCredit: {
   enabled: true,
   rateMonthly: 0.006,        // 0.6%/月（名义年化 7.2%）
   termMonths: 24,            // 等额本金，次月起还
-  limitRate: 0.5,            // 额度 = 可核验资产 × 50%（口径见下）
-  unsecuredEnabled: false,   // 无资产无抵押信用默认关闭（任务书要求"作为待定开关报告"）
-  freezeOnDefault: true,     // 冻结新授信：存在未结清违约合同
-  freezeAfterMissedPayments: 2, // 连续欠付 ≥2 个月（= 宽限 1 个月后仍欠）
+  creditLimitRate: 0.5,          // 额度 = 可核验资产 × 50%（v0.7 冻结键名）
+  allowUnsecuredNoAsset: false,  // 无资产无抵押信用默认关闭（任务书要求"作为待定开关报告"）
+  denyWhenDefaulted: true,       // 冻结新授信：存在未结清违约合同
+  denyWhenArrearsMonthsAtLeast: 2, // 连续欠付 ≥2 个月（= 宽限 1 个月后仍欠）
 }
 // graceMonths / 罚息 / 违约标记沿用 banking 现有键，不重复定义
 ```
@@ -131,7 +131,7 @@ householdCredit: {
 1. 任务书 §5.2 要求"以现有个人贷款规则为基础提出可配置首版"；0.6%/24 月与 `products.personal` 完全一致，居民与企业/玩家同一利率层级，避免为群体另设歧视性利率。
 2. 额度 50% 与已冻结的 `banking.creditLimitRate` 一致（任务书重点：贷款额度 50%）；用现有资产口径，避免"财产重复计价"。
 3. 存款 1.2%/年 → 贷款利率 7.2%/年，利差 6 个点；银行无限资金、不倒闭，利差只影响居民负担与银行统计，不制造风险。首版无罚息，违约核销 `writtenOff`（#22/#28），不没收存款/股票（#28）。
-4. `unsecuredEnabled: false` 落实"居民借款受个人财产约束，不得无限信用"；无资产群体额度为 0，不因"穷人不能贷款"而隐藏——报告为待定开关。
+4. `allowUnsecuredNoAsset: false` 落实"居民借款受个人财产约束，不得无限信用"；无资产群体额度为 0，不因"穷人不能贷款"而隐藏——报告为待定开关。
 
 ### 影响面（初始条件实测）
 
@@ -151,11 +151,11 @@ householdCredit: {
 建议判定：该借款主体存在任一未结清合同满足
 `status === 'defaulted'` 或 `missedPayments ≥ 2` → 新授信可用额度 = 0（冻结）；
 欠款清零/合同结清后，下月授信快照恢复。冻结只影响新放款，不影响已有合同计息与还款。
-若秘书处/模拟对"冻结"另有口径，以他们为准；本岗只给数值（`freezeAfterMissedPayments: 2` 与现有"宽限 1 个月、第 2 个月违约"一致）。
+若秘书处/模拟对"冻结"另有口径，以他们为准；本岗只给数值（`denyWhenArrearsMonthsAtLeast: 2` 与现有"宽限 1 个月、第 2 个月违约"一致）。
 
 ### 边界用例
 
-1. 无资产群体（旧档迁移、人口清零）：额度 0；`unsecuredEnabled=false` 时不得放款。
+1. 无资产群体（旧档迁移、人口清零）：额度 0；`allowUnsecuredNoAsset=false` 时不得放款。
 2. 资产含股票权益：股票市值下跌 → 下月额度下降；已放款不追缴、不强制平仓。
 3. 群体迁移/死亡：债务归属与守恒由模拟处理；报告要求债务不静默消失（任务书 §5.2）。
 4. 供给不足：不得借出无法成交的资金；贷款金额 ≤ min(现金缺口, 该笔供给所需, 剩余额度)。
@@ -240,9 +240,9 @@ bondMarket: {
 
 ```ts
 gdpEstimate: {
-  startupUtilizationFactor: 0.8, // 补充指令 §6 已定：估算产量 = 理论可生产量 × 80%
+  utilizationAssumption: 0.8, // 补充指令 §6 已定：估算产量 = 理论可生产量 × 80%（v0.7 冻结键名）
   startupEstimateMonths: 12,     // 12 个月估计值
-  minAnnualGdpForRatio: 1,       // 最小年 GDP 判定值 1 信用点（防除零兜底）
+  // 最小年 GDP 判定值 1 信用点在冻结结构中位于 government.fiscalRisk.minAnnualGdp（v0.7 §10）
 }
 ```
 
@@ -343,3 +343,15 @@ gdpEstimate: {
 2. **`maxPlanUnitsPerIssue` 100,000 份是 sanity cap**：若后续城市支出规模或面额改变，需按"3–5 个月支出/面额"重算。
 3. **真实 GDP 替换仍为块 1 TODO**（`pushRealGdpPoint` 空实现）：在块 1 合入前，所有债务率/预警都按开局估计窗口（岚港 2.54B 等）计算，前期显著稀释；UI 必须显示估计月数（#12），报告里我同时给真实口径与判定口径两个数（B10.4）。
 4. `householdCredit.minLoanAmount=100` 是按"群体最小可贷单位"估的 sanity 值；若 UI 出现个位数群体的碎片合同，再下调到 1。
+
+## C9. DECISIONS v1.5（#37–#41）确认记录（2026-11-02，秘书处评审通过）
+
+| # | 内容 | 与本文档的关系 |
+| --- | --- | --- |
+| #37 | 企业购债保留额 `{wageMonths:1, interestMonths:1}`；可认购额向下取整到 1000 面额整数份，不足 1 份=0；兜底用 max 方案；欠薪/违约 0；不得申贷/透支 | 与 C1 完全一致，已落地 `government.companyPurchaseReserve`；config 已填值 |
+| #38 | 群体贷款 0.006/24、`creditLimitRate 0.5`、无资产默认关、单笔最低 100、每群体每月 ≤1 笔；资产基准=现金+存款+按人数分摊 cityInvestorEquity（不重复计价）；冻结/解冻条件采纳 | 与 C2 一致；键名按 v0.7 冻结（`denyWhenDefaulted`/`denyWhenArrearsMonthsAtLeast`/`allowUnsecuredNoAsset`），无同名新键 |
+| #39 | 消费预算：先扣当月还款，再 `min(扣款后现金, 0.8×上月可支配收入 + 0.05×扣款后现金)`；**收入基数不扣还款**（避免双重扣减） | 取代 C2 中"先扣还款再算预算"的文字歧义；实现归块 3，参数在 `households.consumerBudget` |
+| #40 | `HouseholdMonthlyStats` 四个字段（预算/新贷/贷款融资消费/资金缺口）批准做追加式契约变更 | 等架构师 SHA 后再引用，本岗不自行改 `types.ts`；报告脚本当前只用既有字段 |
+| #41 | 键名以 `config.ts` 冻结为准：`creditLimitRate` / `allowUnsecuredNoAsset` / `denyWhenDefaulted` / `denyWhenArrearsMonthsAtLeast` / `utilizationAssumption` / `fiscalRisk.minAnnualGdp` | 已核对：config.ts 与脚本均用冻结键名；设计稿中旧提案键名已同步替换（保留"建议值"原意） |
+
+**落地状态**：全部数值已进 `src/data/config.ts`（SHA `bb46ff6`）；`scripts/economy-balance-report.ts` 已用冻结键名与契约函数跑通 36 月基线并存档 `docs/development/reports/economy-baseline-36m-v07.{json,csv}`。`HouseholdMonthlyStats` 四字段待架构师契约变更 SHA 后接入（不阻塞当前基线）。

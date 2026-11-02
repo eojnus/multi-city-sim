@@ -110,10 +110,10 @@
 
 | 指标 | 口径 | 来源 |
 | --- | --- | --- |
-| 群体消费预算 | `min(手头现金, max(0, 80%×上月可支配收入 + 5%×手头现金))` | 🔧 新公式（sim 实现）；报告校验字段 |
+| 群体消费预算 | `min(扣款后现金, max(0, 80%×上月可支配收入 + 5%×扣款后现金))`；收入基数不扣还款（#39，避免双重扣减） | 🔧 新公式（sim 实现）；报告校验字段 |
 | 实际消费 | `group.lastMonth.consumption` 合计 | ✅ |
 | 期望消费成本 | `desiredConsumption` 合计 | ✅ |
-| 资金缺口/供给缺口 | 预算 vs 期望 vs 实际 | 🔧 建议显式 `unmetFunding`/`unmetSupply` 字段，否则报告按差额推断并标注 |
+| 资金缺口/供给缺口 | 预算 vs 期望 vs 实际 | 🔧 建议显式 `unmetFunding`/`unmetSupply` 字段；`HouseholdMonthlyStats` 四字段已批（#40），等架构师契约 SHA 后引用 |
 | 当前消费贷发放 | 按 borrower.kind='household' 汇总发放本金 | 🔧 `LoanPurpose + 'householdConsumption'`（#22） |
 | 消费贷余额 / 逾期/违约 | 未偿合计、missedPayments/arrears/defaulted 计数 | ✅（合同字段） |
 | 居民收入/存款/现金 | `income`、`deposits`、`cash` | ✅ |
@@ -189,6 +189,8 @@
 
 ## B6. 需要的契约字段（请转架构师；与 DECISIONS #22 对齐）
 
+> v1.5 更新（2026-11-02）：`City.gdpHistory[*].estimated`、`City.gdpWindow`、`City.gdpEstimate`、`City.government`、`WorldState.bonds`、`SAVE_FORMAT_VERSION 7`、`householdCredit` 段与 `cityDebt()/recent12MonthGdp()/assessCityFiscalRisk()` 已由架构师块 0 落地（`18e2617`），本报告脚本已接入；`HouseholdMonthlyStats` 四字段（预算/新贷/贷款融资消费/资金缺口）已批为追加式变更（#40），等架构师 SHA 后再引用。剩余待块 1/3：债券与政府贷款账本、消费贷、破产清算业务实现。
+
 1. `BankOwnerKind + 'government'`（#22 已定）；`LoanPurpose + 'government' | 'bondAdvance' | 'householdConsumption'`；`LoanStatus + 'writtenOff'`。
 2. `WorldState.bonds?`：发行计划（cityId、plannedUnits、faceValue 1000、couponRateAnnual 0.04、termMonths 36、issuedTick、maturityTick、status）、
    认购成交（holder、units、amount、tick）、票息/还本/垫付记录（tick、units、amount、payer、bankAdvance 标记）、未售出份数。
@@ -203,33 +205,35 @@
    `CityMonthlyReport`：`consumerLoanDrawn`、`consumerLoanRepaid`、`consumerUnmetFunding`、`consumerUnmetSupply`。
 9. 通知/日志 audience（#14）不用于报告，但报告若引用事件需注意 mayor 信息不越权（报告是开发工具，不面向玩家，仍标注）。
 
-## B7. 参数键（B 相关，数值段；结构由架构师定）
+## B7. 参数键（B 相关，数值段；键名以 `IMPLEMENTATION_v0.7` §10 冻结为准）
 
-段名按秘书处给定；键名最终由架构师冻结，本岗只给值。详细提案见 C 稿。
+本表已按 v0.7 冻结键名对齐（v1.5 #37–#41 复核）；本岗只给值，结构归架构师。详细提案见 C 稿、落地对账见 C 稿 C8。
 
-| 段.键（建议） | 默认值 | 说明 | 出处 |
+| 段.键（已冻结） | 首版值 | 说明 | 出处 |
 | --- | --- | --- | --- |
-| `households.consumptionIncomeShare` | 0.8 | 上月实际可支配收入 × 该比例 | 任务书 §5.1 |
-| `households.consumptionCashShare` | 0.05 | 手头现金 × 该比例 | 任务书 §5.1 |
+| `households.consumerBudget.lastIncomeShare` | 0.8 | 上月实际可支配收入 × 该比例 | 任务书 §5.1 / #39 |
+| `households.consumerBudget.cashShare` | 0.05 | 扣款后手头现金 × 该比例 | 任务书 §5.1 / #39 |
+| `households.consumerBudget.depositsIncluded` | false | 存款不计入手头现金预算 | #39 |
 | `consumer.propensity` / `households.consumptionPropensity` | 现有 0.96 → **标记废弃** | 新公式取代；保留会双口径 | 需架构师定删除策略 |
-| `gdpEstimate.startupUtilizationFactor` | 0.8 | 开局估计（补充指令 §6 已定） | A 稿 |
-| `gdpEstimate.startupEstimateMonths` | 12 | 开局估计月数 | A 稿 |
-| `gdpEstimate.minAnnualGdpForRatio` | 1 | 最小年 GDP 判定值 | 补充指令 §6 |
-| `bondMarket.faceValue` | 1000 | 每份面额 | 补充指令 §4 |
-| `bondMarket.couponRateAnnual` | 0.04 | 票面年利率 4% | 补充指令 §4/任务书重点 |
-| `bondMarket.termMonths` | 36 | 期限 | 同上 |
-| `bondMarket.couponIntervalMonths` | 12 | 每 12 月付息 | DECISIONS #19 |
-| `bondMarket.companyPurchaseReserve` | `{ wageMonths: 1, interestMonths: 1 }` | 企业购债流动性保留 | DECISIONS #23 / C 稿 |
-| `aiGovernment.bondTriggerExpenseMonths` | 0.5 | 低于该倍数月支出触发发债 | DECISIONS #29 / C 稿 |
-| `aiGovernment.bondTopUpExpenseMonths` | 1.0 | 补足到该倍数月支出 | 同上 |
-| `aiGovernment.maxIssuesPerCityMonth` | 1 | 每城每月最多 1 期（已冻结） | DECISIONS #29 |
-| `householdCredit.rateMonthly` | 0.006 | 群体消费贷月利率 | DECISIONS #24 / C 稿 |
-| `householdCredit.termMonths` | 24 | 期限 | 同上 |
-| `householdCredit.limitRate` | 0.5 | 额度 = 资产 × 50% | 同上 |
-| `householdCredit.unsecuredEnabled` | false | 无资产无抵押信用默认关闭 | 任务书 §5.2 |
+| `government.gdpEstimate.utilizationAssumption` | 0.8 | 开局估计（补充指令 §6 已定） | A 稿 / #32 |
+| `government.gdpEstimate.windowMonths` | 12 | 开局估计月数 = 破产判定窗口 | A 稿 |
+| `government.fiscalRisk.minAnnualGdp` | 1 | 最小年 GDP 判定值 | 补充指令 §6 |
+| `government.bondMarket.faceValue` | 1000 | 每份面额 | 补充指令 §4 |
+| `government.bondMarket.couponRateAnnual` | 0.04 | 票面年利率 4% | 补充指令 §4/任务书重点 |
+| `government.bondMarket.termMonths` | 36 | 期限（第 36 月付第 3 期票息+本金） | #19 / #36 |
+| `government.bondMarket.interestPeriodMonths` | 12 | 每 12 月付息 | DECISIONS #19 |
+| `government.companyPurchaseReserve` | `{ wageMonths: 1, interestMonths: 1 }` | 企业购债流动性保留 | DECISIONS #23 / #37 |
+| `government.aiGovernment.autoIssueWhenTreasuryBelow` | 0.5（按上月支出倍数解释） | 低于该倍数月支出触发发债 | DECISIONS #29 / C 稿 |
+| `government.aiGovernment.autoIssuePlanUnits` | 1 | 每城每月最多 1 期 | DECISIONS #29 |
+| `government.aiGovernment.maxDebtRatioToIssue` | 1.0 | 债务/GDP ≥ 破产线后停发 | C 稿 |
+| `households.householdCredit.rateMonthly` | 0.006 | 群体消费贷月利率 | DECISIONS #24 / #38 |
+| `households.householdCredit.termMonths` | 24 | 期限 | 同上 |
+| `households.householdCredit.creditLimitRate` | 0.5 | 额度 = 财产基准 × 50% | 同上 |
+| `households.householdCredit.allowUnsecuredNoAsset` | false | 无资产无抵押信用默认关闭 | 任务书 §5.2 |
+| `households.householdCredit.denyWhenDefaulted` / `denyWhenArrearsMonthsAtLeast` | true / 2 | 冻结新授信条件 | #35/#38 |
 | `banking.creditLimitRate` | 0.5（现有） | 授信 = 基准 × 50% | 任务书重点 |
-| `fiscalRisk.warningThresholds` | `{ warning: 0.5, alert: 0.75 }` | 预警分档 50/75/100%（段名待架构师定） | 任务书重点 |
-| `fiscalRisk.bankruptcyDebtRatio` | 1.0 | 破产阈值 100% | 任务书重点 |
+| `government.fiscalRisk.normalBelow` / `watchBelow` / `bankruptAt` | 0.5 / 0.75 / 1.0 | 预警分档 50/75/100% | 任务书重点 |
+| `government.fiscalRisk.*`（破产阈值） | 1.0 | 破产阈值 100% | 任务书重点 |
 
 上述全部"首版暂定"，交付报告单列，不写成用户已确认。
 
