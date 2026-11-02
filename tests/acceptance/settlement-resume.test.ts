@@ -1,6 +1,6 @@
 // 验收 H08/H09：新档在到期月/破产月读档后，结算结果与不读档一致；重复读档不重复结算。
 // 只读 src/** 公开 API（save.parseSave/serializeSave、Simulation），不改产品代码。
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { DEMO_CONFIG } from '../../src/data/config';
 import { parseSave, serializeSave } from '../../src/simulation/core/save';
 import { Simulation } from '../../src/simulation/core/simulation';
@@ -68,11 +68,28 @@ describe('H08 到期月读档：结算结果与不读档一致', () => {
   });
 });
 
+/** 真实序列里首次政府破产的 tick（随数值调整自动发现，避免硬编码失效）。 */
+let bankruptTick = 0;
+beforeAll(() => {
+  const probe = Simulation.create();
+  for (let index = 0; index < 36; index += 1) {
+    probe.tick();
+    const ticks = probe.state.cities.flatMap((entry) =>
+      entry.government!.records.map((record) => record.tick),
+    );
+    if (ticks.length > 0) {
+      bankruptTick = Math.min(...ticks);
+      break;
+    }
+  }
+  expect(bankruptTick).toBeGreaterThan(0);
+}, 180_000);
+
 describe('H09 破产月读档：不重复结算/重复选举', () => {
   it('破产前存档 → 读档推进，两路径一致且破产记录/选举各一次', () => {
     const sim = Simulation.create();
-    for (let index = 0; index < 19; index += 1) sim.tick();
-    expect(sim.state.time.tick).toBe(19);
+    for (let index = 0; index < bankruptTick - 1; index += 1) sim.tick();
+    expect(sim.state.time.tick).toBe(bankruptTick - 1);
 
     const saveText = text(sim.state);
     const continued = sim.tick();
@@ -81,13 +98,14 @@ describe('H09 破产月读档：不重复结算/重复选举', () => {
     expect(resumed.tick().ok).toBe(true);
     expect(text(resumed.state)).toBe(text(sim.state));
 
-    // 岚港 t20 破产：记录 1 条、同 tick 选举 1 次、不重复。
-    expect(cityById(sim.state, 'lanport').government!.records.map((record) => record.tick)).toEqual([
-      20,
-    ]);
+    // 首个破产城市：记录 1 条、同 tick 选举 1 次、不重复。
+    const bankruptCity = sim.state.cities.find(
+      (entry) => entry.government!.records.length > 0,
+    )!;
+    expect(bankruptCity.government!.records.map((record) => record.tick)).toEqual([bankruptTick]);
     expect(
       sim.state.politics!.elections.filter(
-        (entry) => entry.cityId === 'lanport' && entry.tick === 20,
+        (entry) => entry.cityId === bankruptCity.id && entry.tick === bankruptTick,
       ),
     ).toHaveLength(1);
     // 同一份存档读两次再推进，结果仍一致（重复读档不重复结算）。
@@ -98,11 +116,15 @@ describe('H09 破产月读档：不重复结算/重复选举', () => {
 
   it('破产后存档 → 读档推进，不重复兑付/不重复建垫付贷款', () => {
     const sim = Simulation.create();
-    for (let index = 0; index < 20; index += 1) sim.tick();
-    const record = cityById(sim.state, 'lanport').government!.records[0]!;
-    expect(record.tick).toBe(20);
-    const bankPaymentsAt20 = sim.state.bonds!.payments.filter(
-      (payment) => payment.kind === 'bankruptcyRedemption' && payment.tick === 20,
+    for (let index = 0; index < bankruptTick; index += 1) sim.tick();
+    const bankruptCity = sim.state.cities.find(
+      (entry) => entry.government!.records.length > 0,
+    )!;
+    const record = bankruptCity.government!.records[0]!;
+    expect(record.tick).toBe(bankruptTick);
+    expect(record.bankAdvanceCreated).toBeGreaterThan(0);
+    const bankPaymentsAtTrigger = sim.state.bonds!.payments.filter(
+      (payment) => payment.kind === 'bankruptcyRedemption' && payment.tick === bankruptTick,
     ).length;
 
     const saveText = text(sim.state);
@@ -111,18 +133,18 @@ describe('H09 破产月读档：不重复结算/重复选举', () => {
     resumed.tick();
     expect(text(resumed.state)).toBe(text(sim.state));
 
-    // 读档后 21 月不再重放破产兑付流水，也不新建同 tick 垫付贷款。
+    // 读档后下一月不再重放破产兑付流水，也不新建同 tick 垫付贷款。
     expect(
       sim.state.bonds!.payments.filter(
-        (payment) => payment.kind === 'bankruptcyRedemption' && payment.tick === 21,
+        (payment) =>
+          payment.kind === 'bankruptcyRedemption' && payment.tick === bankruptTick + 1,
       ),
     ).toHaveLength(0);
     expect(
       sim.state.bonds!.payments.filter(
-        (payment) => payment.kind === 'bankruptcyRedemption' && payment.tick === 20,
+        (payment) => payment.kind === 'bankruptcyRedemption' && payment.tick === bankruptTick,
       ).length,
-    ).toBe(bankPaymentsAt20);
-    expect(cityById(sim.state, 'lanport').government!.records).toHaveLength(1);
-    expect(record.bankAdvanceCreated).toBeGreaterThan(0);
+    ).toBe(bankPaymentsAtTrigger);
+    expect(bankruptCity.government!.records).toHaveLength(1);
   });
 });

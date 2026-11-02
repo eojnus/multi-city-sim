@@ -2,19 +2,19 @@
 
 这些用例属于独立验收，全部由验收员维护；开发不要改这里的断言来“修绿”，要改实现后由验收员复跑核销。
 
-## 本轮状态（第四轮，集成 `1d138a6` / 文档 tip `7000db0`，merge `f8af0ed`）
+## 本轮状态（第五轮，交付分支 `316eff4` 合入 = qa `65c4c28`）
 
-- 84 用例：**80 绿 / 4 红**。
-- 已绿：A05–A07、B01–B11/B13、C01–C05、F01–F07/F09–F14、F-R1–R8（真实 36 月破产样本）、G01–G08、H01–H09、I01–I09（含泄漏回归 7 条）。
-- 余红（全部为已定位实现缺陷，已报秘书处）：
-  - B12、B14 ×2：债券兑付只写流水/扣财政/建垫付贷款，**未把款项记入持有人现金**（货币净额凭空减少）；块1/块2 均未修，等 sim 修 `creditOwnerCash` 后复跑。
-  - F08：同月“财政 8800 + 垫付 1200”两段兑付，第二段被 `makePayment` 幂等键 `(issuanceId,holdingId,tick,'principal')` 吞掉，`issuance.principalRepaid` 少记 1200。
-- 真实样本：`Simulation.create()`（种子 20261101）+ 36 次 `tick()`，玩家无操作；岚港 t20、铁谷 t30 破产，垫付合计 788,239,136.64，24 期债券 100% 成交且全部破产兑付（见矩阵 §1.5）。
+- **101 用例：100 绿 / 1 红**。
+- 已绿：A01–A07、B01–B14、C01–C05、D01–D09（新）、E01–E08（新）、F01–F07/F09–F14、F-R1–R8、G01–G08、H01–H09、I01–I09（含泄漏回归 7 条）。
+- 余红（1 条，已 file:line 定位并报秘书处）：
+  - F08：同月“财政 8,800 + 垫付 1,200”两段兑付，第二段被 `src/simulation/government/bonds.ts:672` 的 `makePayment` 幂等键 `(issuanceId,holdingId,tick,'principal')` 吞掉，`principalRepaid` 少记 1,200、持有人少收 1,200。需把出资来源纳入幂等键或合并为单次支付后一次入账。
+- 真实样本（块3/4 后重测）：`Simulation.create()`（种子 20261101）+ 36 次 `tick()`，玩家无操作；仅岚港 t27 破产（t36 负债率 32.2%），垫付合计 485,295,713.34，24 期债券计划=成交 739,973 份（12 期破产兑付、12 期存续）。旧样本（岚港 t20/铁谷 t30、788,239,136.64）已作废，见矩阵 §1.6。
+- 本轮同时修正 4 处验收脚本自身口径问题（B14 净额、D06 多商品、D07 收入 0 预算、D09 跨城待结算），非产品缺陷，详见矩阵 §1.6。
 
 ## 跑法
 
 ```bash
-npx vitest run tests/acceptance                              # 验收全组（84 条）
+npx vitest run tests/acceptance                              # 验收全组（101 条）
 npx vitest run tests/acceptance/migration-v7.test.ts         # H 组：存档迁移 v1–v7
 npx vitest run tests/acceptance/settlement-resume.test.ts    # H08/H09：读档重放幂等
 npx vitest run tests/acceptance/gdp-estimate.test.ts         # G 组：开局 GDP 估计
@@ -24,6 +24,8 @@ npx vitest run tests/acceptance/company-bond-subscription.test.ts  # C 组：企
 npx vitest run tests/acceptance/bankruptcy.test.ts           # F 组：破产/清算/分股（夹具）
 npx vitest run tests/acceptance/bankruptcy-real-run.test.ts  # F 组：真实 36 月样本
 npx vitest run tests/acceptance/baseline-a.test.ts           # A 组：36 月基线已知限制
+npx vitest run tests/acceptance/household-consumption.test.ts # D 组：居民消费
+npx vitest run tests/acceptance/household-loans.test.ts       # E 组：居民消费贷
 ```
 
 ## 约定

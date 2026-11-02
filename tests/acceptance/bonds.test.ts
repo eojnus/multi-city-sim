@@ -461,6 +461,7 @@ describe('AC-B14 债券总账守恒', () => {
     accrueUntil(world, city, 1, 36);
     const beforeMaturity = netMoney(world, city);
     const treasuryBefore = city.treasury;
+    const playerCashBefore = world.player.cash;
     const maturity = settleBondMaturity(world, city, CONFIG, issuance.id, 36, []);
     expect(maturity.ok).toBe(true);
     // 财政充足（开局 6,000 万）：本金 10,000 + 利息 1,200 全部由财政支付，不产生垫付。
@@ -470,7 +471,8 @@ describe('AC-B14 债券总账守恒', () => {
     expect(city.treasury).toBeCloseTo(treasuryBefore - 11_200, 2);
     // 守恒：财政支出 11,200 必须变成持有人现金 11,200。
     expect(netMoney(world, city)).toBeCloseTo(beforeMaturity, 2);
-    expect(world.player.cash).toBeCloseTo(11_200, 2);
+    // 持有人在到期前已持有 10,000 现金（20,000 认购 10 份后剩余），到期实得 +11,200。
+    expect(world.player.cash).toBeCloseTo(playerCashBefore + 11_200, 2);
     expect(outstandingBondPrincipal(world)).toBe(0);
     expect(checkInvariants(world)).toEqual([]);
   });
