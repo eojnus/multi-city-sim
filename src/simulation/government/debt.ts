@@ -317,6 +317,8 @@ export function maybeAutoIssueGovernmentBond(
   }
   let sold = 0;
   for (const holder of bondSubscriptionOrder(world, config, issue.issuance.id)) {
+    // AI 政府只代表非玩家主体自动认购；玩家是否买债必须由玩家自己决定，不能被动扣现金。
+    if (holder.kind === 'player') continue;
     const remaining = issue.issuance.planUnits - issue.issuance.soldUnits;
     if (remaining <= 0) break;
     const subscription = subscribeGovernmentBond(
