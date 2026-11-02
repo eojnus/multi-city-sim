@@ -8181,3 +8181,54 @@ kbd {
   background: rgba(79, 195, 247, 0.06);
   outline: none;
 }
+
+/* v0.7 公开破产事件（§7：破产事件公开，非市长可见；财政口径仍受限） */
+.bankruptcy-notice {
+  border-left: 2px solid var(--faint);
+}
+
+.bankruptcy-notice.is-active {
+  border-left-color: var(--danger, #d2564b);
+  background: rgba(210, 86, 75, 0.05);
+}
+
+.bankruptcy-lead {
+  margin: 4px 0;
+  color: var(--muted);
+  font-size: 7.4px;
+  line-height: 1.55;
+}
+
+.bankruptcy-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 2px 10px;
+  margin: 4px 0;
+}
+
+.bankruptcy-grid span {
+  display: flex;
+  flex-direction: column;
+  color: var(--faint);
+  font-size: 6.4px;
+}
+
+.bankruptcy-grid b {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 7.2px;
+  font-variant-numeric: tabular-nums;
+}
+
+.bankruptcy-note {
+  margin: 3px 0;
+  color: var(--faint);
+  font-size: 7px;
+  line-height: 1.55;
+}
+
+@media (max-width: 1180px) {
+  .bankruptcy-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
