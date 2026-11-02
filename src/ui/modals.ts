@@ -456,7 +456,7 @@ function renderReport(store: GameStore): string {
                 <th scope="col">GDP</th>
                 <th scope="col">人口</th>
                 <th scope="col">失业率</th>
-                <th scope="col">财政</th>
+                <th scope="col" title="财政余额仅该城市市长可见">财政</th>
                 <th scope="col">居民收入</th>
                 <th scope="col">迁移净额</th>
               </tr>
@@ -470,7 +470,12 @@ function renderReport(store: GameStore): string {
                     <td>${money(city.gdp)}</td>
                     <td>${num(city.population.total)}</td>
                     <td>${pct(city.population.laborForce > 0 ? city.population.unemployed / city.population.laborForce : 0)}</td>
-                    <td>${money(city.treasury)}</td>
+                    <td>${
+                      // 补充指令 §7：政府可用财政资金仅该城市市长可见。
+                      store.isMayorOf(city.id)
+                        ? money(city.treasury)
+                        : '<span class="is-restricted-inline" title="财政余额仅该城市市长可见">—</span>'
+                    }</td>
                     <td>${money(city.householdIncomeLastMonth)}</td>
                     <td class="${signClass(migration)}">${migration > 0 ? '+' : ''}${num(migration)}</td>
                   </tr>`;

@@ -6576,6 +6576,23 @@ kbd {
   font-size: 7.4px;
 }
 
+/* 权限受限占位：只说明"该项仅市长可见"，不附带任何数值（补充指令 §7）。 */
+.is-restricted-inline {
+  color: var(--faint);
+  font-size: 7.4px;
+}
+
+.fiscal-brief.is-restricted {
+  padding: 5px 7px;
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+}
+
+.fiscal-brief.is-restricted .fiscal-empty {
+  margin: 2px 0 0;
+  line-height: 1.5;
+}
+
 /* ---------------------------------------------------------------- v0.3：交通 */
 
 .transport-kpis {
