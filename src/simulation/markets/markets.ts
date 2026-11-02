@@ -28,14 +28,27 @@ export function offeredStock(company: Company, goodId: GoodId): number {
   return Math.max(0, round2(stock - reservedForProduction(company, goodId)));
 }
 
+/**
+ * 月度市场账本（只在当月结算中使用，最终写入 city.market 的 MarketState）。
+ *
+ * 企业采购的需求口径（验收复验）：
+ * - producerRequired：按生产计划需要采购的数量（资金不足前）；
+ * - producerDemand：形成有效购买需求的数量（计划需求中，自有采购预算 + 合法可用授信买得起的那部分）；
+ * - sold / intercityImported：实际成交（本地 + 跨城）；
+ * - unmetDemand：有效需求中因缺货/配送不足未成交的数量；
+ * - unmetFunding：计划需求中因资金不足未形成有效需求的数量。
+ * 三者关系：producerRequired − 实际成交 = unmetDemand + unmetFunding（舍入误差 ≤ 0.01/笔）。
+ */
 export interface MarketLedger {
   goodId: GoodId;
   supply: number;
   demand: number;
   consumerDemand: number;
+  producerRequired: number;
   producerDemand: number;
   sold: number;
   unmetDemand: number;
+  unmetFunding: number;
   intercityImported: number;
   externalExport: number;
   spend: number;
@@ -56,9 +69,11 @@ export function createLedger(goodId: GoodId): MarketLedger {
     supply: 0,
     demand: 0,
     consumerDemand: 0,
+    producerRequired: 0,
     producerDemand: 0,
     sold: 0,
     unmetDemand: 0,
+    unmetFunding: 0,
     intercityImported: 0,
     externalExport: 0,
     spend: 0,
@@ -238,6 +253,7 @@ export function applyProducerPurchase(
   const affordableQty = Math.max(0, maxSpend / Math.max(0.01, unitPrice));
   const effectiveDemand = Math.min(shortage, affordableQty);
   if (effectiveDemand > 0) {
+    ledger.producerRequired = round2(ledger.producerRequired + effectiveDemand);
     ledger.producerDemand = round2(ledger.producerDemand + effectiveDemand);
     ledger.demand = round2(ledger.demand + effectiveDemand);
   }
@@ -361,9 +377,11 @@ export function finalizeMarkets(
         supply: round2(ledger.supply),
         demand: round2(ledger.demand),
         consumerDemand: round2(ledger.consumerDemand),
+        producerRequired: round2(ledger.producerRequired),
         producerDemand: round2(ledger.producerDemand),
         sold: round2(ledger.sold),
         unmetDemand: round2(ledger.unmetDemand),
+        unmetFunding: round2(ledger.unmetFunding),
         intercityImported: round2(ledger.intercityImported),
         externalExport: round2(ledger.externalExport),
         closingStock,

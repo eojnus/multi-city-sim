@@ -19,7 +19,12 @@ import { round2 } from '../core/math';
 import type { LoanOpenResult, LoanRequest } from '../banking/types';
 import { drawWorkingCapital, openLoan, repayLoan } from '../banking/banking';
 import { availableCredit } from '../banking/credit';
-import { canOperate, requestAutomaticLoan } from './operations';
+import {
+  canOperate,
+  hasRecentLoanRejection,
+  playerOperationFor,
+  requestAutomaticLoan,
+} from './operations';
 
 export interface CompanyFinancingResult {
   /** 实际借入金额（0 表示未融资）。 */
@@ -89,6 +94,39 @@ export function planCompanyWorkingCapital(
     reason: decision.reason,
     proposed: false,
   };
+}
+
+/**
+ * 只读计算：该企业当月“合法可自动动用的授信额度”（不生成提案、不放款、不写状态）。
+ *
+ * 用于市场需求记账：企业有采购计划时，即使当前没有可售供应，也要按
+ * “自有采购预算 + 合法可用授信”判断它可以形成多少有效购买需求。
+ * - 非玩家经营企业：按银行可借额度；
+ * - 玩家经营企业：全面手动 / 未开启贷款授权 / 冷却期内被拒绝 → 0；
+ *   AI 辅助 / 高度托管 → 按授权额度上限与银行额度取小。
+ */
+export function legalWorkingCapitalRoom(
+  world: WorldState,
+  config: DemoConfig,
+  tick: number,
+  company: Company,
+): number {
+  const credit = round2(
+    Math.max(0, availableCredit(world, { kind: 'company', id: company.id }, config)),
+  );
+  if (!canOperate(world, company.id)) return credit;
+  const operation = playerOperationFor(world, company.id);
+  if (!operation) return credit;
+  if (operation.mode === 'manual') return 0;
+  if (!operation.authorization.allowLoan) return 0;
+  if (hasRecentLoanRejection(operation, tick, config.management.proposalCooldownMonths)) {
+    return 0;
+  }
+  const autoLimit =
+    operation.mode === 'delegated'
+      ? operation.authorization.maxLoanAmount
+      : Math.max(0, round2(config.management.majorThresholds.loanAmount - 0.01));
+  return round2(Math.min(credit, autoLimit));
 }
 
 /** 在已裁决的额度内放款（每笔独立合同）；返回实际借入金额。 */

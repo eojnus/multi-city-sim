@@ -2,8 +2,8 @@
 // 这些类型描述的是“演示方案 v0.2”的数据结构，不代表最终策划规则。
 // v0.2 新增证券/治理/居民投资/协议/通知数据；旧 v1 存档由 core/save.ts 迁移。
 
-export const SAVE_FORMAT_VERSION = 5;
-export const GAME_VERSION = '0.5.0';
+export const SAVE_FORMAT_VERSION = 6;
+export const GAME_VERSION = '0.6.0';
 
 export type GoodId =
   | 'grain'
@@ -143,9 +143,18 @@ export interface MarketState {
   supply: number;
   demand: number;
   consumerDemand: number;
+  /** 企业按生产计划需要的采购量（资金不足前），见 producerDemand 的说明。 */
+  producerRequired: number;
+  /** 企业形成有效购买需求的数量：计划需求中，用自有采购预算 + 合法可用授信买得起的那部分。 */
   producerDemand: number;
   sold: number;
+  /**
+   * 未满足需求（缺货口径）：有效需求中因可售供应/配送不足而没有成交的数量。
+   * 资金不足导致的未满足单独记在 unmetFunding，两者合计为计划需求减实际成交。
+   */
   unmetDemand: number;
+  /** 未满足需求（资金口径）：有计划需求、但自有预算 + 合法授信不足而没有形成有效需求的数量。 */
+  unmetFunding: number;
   intercityImported: number;
   externalExport: number;
   closingStock: number;

@@ -143,6 +143,14 @@ export function parseSave(text: string): ParseResult {
       worldValue = migration.world;
       if (migratedFrom === undefined) migratedFrom = 4;
     }
+    if (formatVersion <= 5) {
+      const migration = migrateWorldV5ToV6(worldValue);
+      if (!migration.ok || !migration.world) {
+        return { ok: false, error: migration.error ?? 'v5 存档迁移失败' };
+      }
+      worldValue = migration.world;
+      if (migratedFrom === undefined) migratedFrom = 5;
+    }
 
     const structureError = validateWorldStructure(worldValue);
     if (structureError) return { ok: false, error: structureError };
@@ -552,6 +560,32 @@ export function migrateWorldV4ToV5(raw: unknown): MigrationResult {
   return { ok: true, world: world as unknown as WorldState };
 }
 
+/**
+ * v5 → v6：市场账本新增“生产计划需求（producerRequired）”与
+ * “资金不足未满足（unmetFunding）”两个统计字段（v0.5 复验的需求记账修复）。
+ *
+ * 旧存档只有 producerDemand / unmetDemand：按“当月记录的需求都是有效需求”补齐——
+ * 计划需求 = 有效需求、资金不足 = 0。这是保守补 0 口径，不修改价格、成交、库存与资金。
+ */
+export function migrateWorldV5ToV6(raw: unknown): MigrationResult {
+  if (!isRecord(raw)) return { ok: false, error: '存档 world 不是对象' };
+  if (!Array.isArray(raw.cities) || raw.cities.length === 0) {
+    return { ok: false, error: 'v5 存档缺少城市数据，无法迁移' };
+  }
+  const world = deepClone(raw) as unknown as WorldState;
+  for (const city of world.cities) {
+    const market = city.market as unknown as Record<string, Record<string, unknown> | undefined>;
+    for (const goodId of Object.keys(market)) {
+      const entry = market[goodId];
+      if (!entry) continue;
+      const producerDemand = isFiniteNumber(entry.producerDemand) ? entry.producerDemand : 0;
+      if (!isFiniteNumber(entry.producerRequired)) entry.producerRequired = producerDemand;
+      if (!isFiniteNumber(entry.unmetFunding)) entry.unmetFunding = 0;
+    }
+  }
+  return { ok: true, world };
+}
+
 function snapshotVotingHolders(
   world: WorldState,  companyId: string,
 ): { holder: { type: 'player' | 'company' | 'investorGroup' | 'city'; id: string }; shares: number }[] {
@@ -957,9 +991,9 @@ function validateMarket(value: unknown, path: string): string | null {
   if (!isRecord(value)) return `${path} 缺失`;
   if (typeof value.goodId !== 'string') return `${path}.goodId 无效`;
   for (const key of [
-    'price', 'supply', 'demand', 'consumerDemand', 'producerDemand', 'sold',
-    'unmetDemand', 'intercityImported', 'externalExport', 'closingStock',
-    'lastPriceChangePct',
+    'price', 'supply', 'demand', 'consumerDemand', 'producerRequired', 'producerDemand',
+    'sold', 'unmetDemand', 'unmetFunding', 'intercityImported', 'externalExport',
+    'closingStock', 'lastPriceChangePct',
   ]) {
     if (!isFiniteNumber(value[key])) return `${path}.${key} 必须是有限数值`;
   }

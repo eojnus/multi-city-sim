@@ -847,7 +847,7 @@ export function decideProposal(
 }
 
 /** 同一去重键在冷却期内是否已有被拒绝/过期的贷款提案（防止其他路径绕过玩家决定）。 */
-function hasRecentLoanRejection(
+export function hasRecentLoanRejection(
   operation: PlayerCompanyOperation,
   tick: number,
   cooldownMonths: number,

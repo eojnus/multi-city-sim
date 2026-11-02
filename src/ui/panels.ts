@@ -1204,9 +1204,9 @@ function renderMarket(city: City, showAllGoods: boolean): string {
                     <b>${num(market.price, 1)}</b>
                     <em class="delta ${deltaClass(market.lastPriceChangePct)}">${signedPointPercent(market.lastPriceChangePct)}</em>
                   </td>
-                  <td title="居民需求 ${num(market.consumerDemand)} · 生产需求 ${num(market.producerDemand)}">${qty(market.demand)}</td>
+                  <td title="居民需求 ${num(market.consumerDemand)} · 生产有效需求 ${num(market.producerDemand)} · 企业计划采购 ${num(market.producerRequired)}">${qty(market.demand)}</td>
                   <td>${qty(market.sold)}</td>
-                  <td class="${market.unmetDemand > 0 ? 'is-hot' : ''}" title="未满足需求 ${num(market.unmetDemand, 1)}">${qty(market.unmetDemand)}</td>
+                  <td class="${market.unmetDemand > 0 ? 'is-hot' : ''}" title="缺货未满足 ${num(market.unmetDemand, 1)} · 资金不足未满足 ${num(market.unmetFunding, 1)}">${qty(market.unmetDemand)}</td>
                   <td>${qty(market.closingStock)}</td>
                   <td class="trade-cell" title="跨城进口 ${num(market.intercityImported, 1)} · 区域外出口 ${num(market.externalExport, 1)}">
                     <span>进 ${qty(market.intercityImported)}</span>
@@ -1218,7 +1218,7 @@ function renderMarket(city: City, showAllGoods: boolean): string {
           </tbody>
         </table>
       </div>
-      <p class="note">数量均为演示货品单位；需求含居民与生产需求，成交为上月结果，贸易列为跨城进口 / 区域外出口数量。</p>
+      <p class="note">数量均为演示货品单位；需求含居民与生产有效需求（企业计划采购中买得起的那部分），成交为上月结果，贸易列为跨城进口 / 区域外出口数量。未满足列是缺货/配送不足造成的未成交数量；企业因资金不足未形成有效需求的数量见悬停说明。</p>
     </section>`;
 }
 
