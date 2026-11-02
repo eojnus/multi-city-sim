@@ -6,7 +6,7 @@ import { DEMO_CONFIG } from '../src/data/config';
 import type { Company, LogEntry, PlayerOperationMode, WorldState } from '../src/simulation/contracts/types';
 import { round2 } from '../src/simulation/core/math';
 import { bankLoansOf } from '../src/simulation/banking/credit';
-import { monthlyWageBill, createEmptyInventory } from '../src/simulation/companies/company';
+import { createEmptyInventory } from '../src/simulation/companies/company';
 import { runInputPurchasing } from '../src/simulation/production/production';
 import { settleCompanyFinance } from '../src/simulation/finance/finance';
 import { createWorldLedgers } from '../src/simulation/markets/markets';
@@ -196,8 +196,8 @@ describe('自动融资的经营模式与授权约束（验收问题 2）', () =>
       company.inventory = createEmptyInventory();
     }
     buyer.utilization = DEMO_CONFIG.company.initialUtilization;
-    const wage = monthlyWageBill(buyer, DEMO_CONFIG);
-    buyer.cash = round2(wage * 0.6);
+    // 零现金：采购预算为 0，但本城有可售能源；手动模式不得自动举债，只记录采购受限。
+    buyer.cash = 0;
     buyer.debt = 0;
     seller.inventory.energy = 1_000_000;
     const logs: LogEntry[] = [];

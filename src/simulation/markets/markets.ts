@@ -111,6 +111,33 @@ export function recordProducedSupply(ledgers: CityLedgers, goodId: GoodId, qty: 
  * 从本城企业库存中买入。每个成交批次都先验证库存与预算，再整体提交。
  * 生产者购买进入企业库存；居民购买为最终消费，不再进入任何库存。
  */
+export interface LocalSeller {
+  company: Company;
+  unitPrice: number;
+}
+
+/** 城内可售卖家（按单价升序）；executePurchase / 报价 / 需求记录共用同一套排序。 */
+function localMarketSellers(
+  world: WorldState,
+  city: City,
+  goodId: GoodId,
+  excludeCompanyId?: string,
+): LocalSeller[] {
+  const marketPrice = city.market[goodId]?.price ?? 0;
+  return world.companies
+    .filter(
+      (company) =>
+        company.cityId === city.id &&
+        company.id !== excludeCompanyId &&
+        offeredStock(company, goodId) > 1e-9,
+    )
+    .map((company) => ({
+      company,
+      unitPrice: Math.max(0.01, round2(marketPrice * company.priceFactor)),
+    }))
+    .sort((a, b) => a.unitPrice - b.unitPrice || a.company.id.localeCompare(b.company.id));
+}
+
 export function executePurchase(
   world: WorldState,
   city: City,
@@ -126,23 +153,11 @@ export function executePurchase(
   // 城内交通：本月可配送量受上一期配送压力影响（容量不足时低于 1）。
   const deliveryEfficiency = clamp(intracityDeliveryEfficiency(world, city.id), 0, 1);
 
-  const marketPrice = city.market[goodId]?.price ?? 0;
   const buyer =
     options.buyerCompanyId === undefined
       ? undefined
       : world.companies.find((company) => company.id === options.buyerCompanyId);
-  const sellers = world.companies
-    .filter(
-      (company) =>
-        company.cityId === city.id &&
-        company.id !== options.buyerCompanyId &&
-        offeredStock(company, goodId) > 1e-9,
-    )
-    .map((company) => ({
-      company,
-      unitPrice: Math.max(0.01, round2(marketPrice * company.priceFactor)),
-    }))
-    .sort((a, b) => a.unitPrice - b.unitPrice || a.company.id.localeCompare(b.company.id));
+  const sellers = localMarketSellers(world, city, goodId, options.buyerCompanyId);
 
   let remainingQty = desiredQty;
   let remainingBudget = maxSpend;
@@ -215,7 +230,12 @@ export function applyProducerPurchase(
   const ledger = ledgers[goodId];
   if (!ledger) return { qty: 0, spend: 0 };
   const price = city.market[goodId]?.price ?? 1;
-  const affordableQty = Math.max(0, maxSpend / Math.max(0.01, price));
+  // 实际成交价按卖家价格系数浮动（可能低于市价）：用最低可售价估算可负担数量，
+  // 否则会把“买得起”的需求误记为买不起，留下未成交余量与多余借款。
+  const sellers = localMarketSellers(world, city, goodId, buyer.id);
+  const best = sellers[0];
+  const unitPrice = best ? Math.min(price, best.unitPrice) : price;
+  const affordableQty = Math.max(0, maxSpend / Math.max(0.01, unitPrice));
   const effectiveDemand = Math.min(shortage, affordableQty);
   if (effectiveDemand > 0) {
     ledger.producerDemand = round2(ledger.producerDemand + effectiveDemand);
@@ -227,6 +247,57 @@ export function applyProducerPurchase(
   const unmet = Math.max(0, effectiveDemand - result.qty);
   if (unmet > 0) ledger.unmetDemand = round2(ledger.unmetDemand + unmet);
   return result;
+}
+
+export interface LocalQuote {
+  /** 在给定预算内可成交的数量。 */
+  qty: number;
+  /** 成交所需金额（与 executePurchase 的计价、配送效率规则一致）。 */
+  cost: number;
+}
+
+/**
+ * 只报价、不成交：按城内真实成交规则（卖家价格系数、配送效率、预算）估算某数量需要多少钱。
+ * 企业采购在放款前用它与授信额度对齐，避免多借贷款、或借了却买不到货。
+ */
+export function quoteLocalPurchase(
+  world: WorldState,
+  city: City,
+  goodId: GoodId,
+  desiredQty: number,
+  maxSpend: number,
+  excludeCompanyId?: string,
+): LocalQuote {
+  if (desiredQty <= 0 || maxSpend <= 0) return { qty: 0, cost: 0 };
+  const deliveryEfficiency = clamp(intracityDeliveryEfficiency(world, city.id), 0, 1);
+  const sellers = localMarketSellers(world, city, goodId, excludeCompanyId);
+
+  let remainingQty = desiredQty;
+  let remainingBudget = maxSpend;
+  let qty = 0;
+  let cost = 0;
+  for (const seller of sellers) {
+    if (remainingQty <= 1e-9 || remainingBudget <= 0) break;
+    const available = round2(offeredStock(seller.company, goodId) * deliveryEfficiency);
+    if (available <= 0) continue;
+    const affordable = seller.unitPrice > 0 ? remainingBudget / seller.unitPrice : 0;
+    let buy = Math.min(remainingQty, available, affordable);
+    if (buy <= 1e-9) continue;
+    buy = Math.floor(buy * 100) / 100;
+    if (buy <= 0) continue;
+    let lineCost = round2(buy * seller.unitPrice);
+    if (lineCost > remainingBudget + 1e-6) {
+      buy = Math.floor((remainingBudget / seller.unitPrice) * 100) / 100;
+      if (buy <= 0) continue;
+      lineCost = round2(buy * seller.unitPrice);
+    }
+    if (lineCost > remainingBudget + 1e-6) continue;
+    qty = round2(qty + buy);
+    cost = round2(cost + lineCost);
+    remainingQty -= buy;
+    remainingBudget -= lineCost;
+  }
+  return { qty, cost };
 }
 
 export function applyConsumerDemand(

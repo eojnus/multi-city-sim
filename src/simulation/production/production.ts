@@ -2,8 +2,13 @@ import type { City, Company, ProductionRecord, WorldState, LogEntry } from '../c
 import type { DemoConfig } from '../../data/config';
 import { DEMO_CONFIG } from '../../data/config';
 import type { CityLedgers, WorldLedgers } from '../markets/markets';
-import { applyProducerPurchase, offeredStock, recordProducedSupply } from '../markets/markets';
-import { executeIntercityPurchase } from '../markets/intercity';
+import {
+  executePurchase,
+  offeredStock,
+  quoteLocalPurchase,
+  recordProducedSupply,
+} from '../markets/markets';
+import { executeIntercityPurchase, quoteIntercityPurchase } from '../markets/intercity';
 import { GOOD_IDS } from '../companies/company';
 import { PRODUCTIVITY, RECIPES } from '../../data/demo-data';
 import { round2 } from '../core/math';
@@ -54,14 +59,16 @@ export function laborCapacity(
 }
 
 /**
- * 企业先按配方缺口采购生产资料。采购只使用自有现金（保留 wageReserve），
- * 本地/跨城成交完成后再按实际成交金额补足现金，最多补到 wage * 1.5：
- * 借款上限 = min(本月实际采购支出, 补到 wage * 1.5 的现金缺口, 可用信贷额度)。
+ * 企业先按配方缺口采购生产资料。
  *
- * 这是【暂定行为】，对应 DEMO_CONFIG.company.purchaseCreditMode === 'on-settlement'。
- * 用户的待决问题“无供应时是否允许独立备资借款”仍未决定：
- * - 成交型融资不会让企业在没有供应时凭空增加债务，但没有成交时也不能提前囤积现金；
- * - 如果以后允许预借款，应新增独立配置项，而不是恢复旧的采购前 ensureLiquidity。
+ * 采购预算 = 自有现金扣除工资预留（wageReserveMonths × 月工资 × 0.5）后的余额；
+ * 预算不足时，按“可实际成交的数量 × 当前价格”向银行申请周转贷补足，
+ * 但必须先通过经营模式/玩家授权/提案/拒绝冷却的裁决（见 financing.ts）：
+ * - 全面手动模式不自动举债，采购只能花自有现金；
+ * - AI 辅助/高度托管模式在授权额度内自动放款，超出部分只生成待批准提案；
+ * - 没有可售供应（本地与跨城都没有）时不融资，避免凭空增加债务；
+ * - 融资失败或被拒绝时不成交，不会留下部分成交或无关贷款；
+ * - 跨城补货按真实报价（含运输加成）估算缺口，避免多借。
  *
  * 缺口写入市场未满足需求，不会凭空生成原料。
  */
@@ -105,13 +112,58 @@ export function runInputPurchasing(
     let budget = Math.max(0, company.cash - wageReserve);
     let purchaseSpend = 0;
 
-    // 验收问题 2/7：玩家经营企业的采购融资必须先过经营模式/授权/拒绝冷却；
+    // 验收问题 2/7 与复验：玩家经营企业的采购融资必须先过经营模式/授权/拒绝冷却；
     // 获批额度在成交前放款（每笔独立合同），避免“采购已成交、借款却失败”的部分状态。
-    // 只按“本地可售库存 + 现金缺口”估算额度，不会在没有供应时凭空举债。
-    const estimatedSpend = shortages.reduce((total, entry) => {
-      const price = city.market[entry.input.good]?.price ?? 1;
-      return total + entry.shortage * Math.max(0, price);
-    }, 0);
+    // 估算金额只按“可实际成交的数量 × 当前价格”，无供应时不融资。
+    const needs = shortages
+      .filter((entry) => entry.shortage > 0)
+      .map((entry) => {
+        const price = city.market[entry.input.good]?.price ?? 1;
+        const localStock = world.companies.reduce(
+          (total, other) =>
+            other.cityId === city.id && other.id !== company.id
+              ? total + offeredStock(other, entry.input.good)
+              : total,
+          0,
+        );
+        const intercitySupply = world.companies.reduce(
+          (total, other) =>
+            other.cityId !== city.id ? total + offeredStock(other, entry.input.good) : total,
+          0,
+        );
+        // 与真实成交规则一致的报价：授权裁决与放款金额都按它计算，
+        // 避免按市价粗略估算导致多借、或借了却买不到。
+        const localQuote = quoteLocalPurchase(
+          world,
+          city,
+          entry.input.good,
+          entry.shortage,
+          Number.MAX_SAFE_INTEGER,
+          company.id,
+        );
+        const remaining = round2(entry.shortage - localQuote.qty);
+        const intercityQuote =
+          remaining > 0.01
+            ? quoteIntercityPurchase(
+                world,
+                city,
+                entry.input.good,
+                remaining,
+                Number.MAX_SAFE_INTEGER,
+                config,
+                company.id,
+              )
+            : { qty: 0, cost: 0 };
+        const executable = round2(localQuote.qty + intercityQuote.qty);
+        const estimatedCost = round2(localQuote.cost + intercityQuote.cost);
+        return { ...entry, price, localStock, intercitySupply, executable, estimatedCost };
+      })
+      .filter((entry) => entry.executable > 0.01);
+    if (needs.length === 0) continue;
+
+    const estimatedSpend = round2(
+      needs.reduce((total, entry) => total + entry.estimatedCost, 0),
+    );
     const financing = planCompanyWorkingCapital(
       world,
       config,
@@ -129,68 +181,95 @@ export function runInputPurchasing(
       });
     }
 
-    for (const { input, shortage } of shortages) {
-      if (shortage <= 0 || budget <= 0) continue;
-      const price = city.market[input.good]?.price ?? 1;
-      // 本地没有可售库存时不融资（避免“借了钱却没有成交、凭空增加债务”）。
-      const localStock = world.companies.reduce(
-        (total, other) =>
-          other.cityId === city.id && other.id !== company.id
-            ? total + offeredStock(other, input.good)
-            : total,
-        0,
+    for (const { input, shortage, price, localStock, intercitySupply, executable } of needs) {
+
+      // 验收复验：采购预算为 0（例如现金全部被工资预留占用）时，
+      // 只要存在真实需求、可售供应与合法授信，仍应先在经营模式/授权内融资再采购。
+      // 借款金额按真实成交报价估算；融资失败或未获授权则不成交。
+      const localQuote = quoteLocalPurchase(
+        world,
+        city,
+        input.good,
+        shortage,
+        budget + creditRoom,
+        company.id,
       );
-      if (localStock > 0.01 && creditRoom > 0 && budget < shortage * price) {
-        const need = round2(Math.max(0, shortage * price - budget));
-        const drawn = drawPlannedWorkingCapital(
-          world,
-          config,
-          world.time.tick,
-          company,
-          round2(Math.min(need, creditRoom)),
-        );
+      if (localQuote.qty > 0 && budget < localQuote.cost - 0.01 && creditRoom > 0) {
+        const need = round2(Math.min(localQuote.cost - budget, creditRoom));
+        const drawn = drawPlannedWorkingCapital(world, config, world.time.tick, company, need);
         if (drawn > 0) {
           budget = round2(budget + drawn);
           creditRoom = round2(Math.max(0, creditRoom - drawn));
         }
       }
-      const affordable = Math.min(shortage, budget / Math.max(0.01, price));
-      const result = applyProducerPurchase(
-        world,
-        city,
-        cityLedgers,
-        company,
-        input.good,
-        shortage,
-        budget,
-      );
+
+      // 需求按“本月可供成交的数量”记账（含本地与跨城可售），
+      // 成交后把差额记入未满足需求；这样本地成交 + 跨城进口不会超过需求。
+      const ledger = cityLedgers[input.good];
+      if (ledger) {
+        ledger.producerDemand = round2(ledger.producerDemand + executable);
+        ledger.demand = round2(ledger.demand + executable);
+      }
+
+      const result = executePurchase(world, city, cityLedgers, input.good, executable, budget, {
+        buyerCompanyId: company.id,
+      });
       budget = Math.max(0, budget - result.spend);
       purchaseSpend = round2(purchaseSpend + result.spend);
-      if (result.qty < shortage - 0.01 && budget > 0) {
-        const remainingDemand = Math.max(0, affordable - result.qty);
-        if (remainingDemand <= 0) continue;
-        const imported = executeIntercityPurchase(
+      let bought = result.qty;
+
+      const remainingDemand = round2(executable - result.qty);
+      if (remainingDemand > 0.01 && intercitySupply > 0.01) {
+        // 跨城报价含运输加成：先按实际报价估算缺口再放款，避免多借或借了却买不到。
+        const quote = quoteIntercityPurchase(
           world,
           city,
-          cityLedgers,
           input.good,
           remainingDemand,
-          budget,
-          { buyerCompanyId: company.id },
+          budget + creditRoom,
           config,
+          company.id,
         );
-        budget = Math.max(0, budget - imported.spend);
-        purchaseSpend = round2(purchaseSpend + imported.spend);
-        const ledger = cityLedgers[input.good];
-        if (ledger) {
-          ledger.unmetDemand = round2(Math.max(0, ledger.unmetDemand - imported.qty));
+        const needed = round2(Math.max(0, quote.cost - budget));
+        if (needed > 0.01 && creditRoom > 0) {
+          const drawn = drawPlannedWorkingCapital(
+            world,
+            config,
+            world.time.tick,
+            company,
+            round2(Math.min(needed, creditRoom)),
+          );
+          if (drawn > 0) {
+            budget = round2(budget + drawn);
+            creditRoom = round2(Math.max(0, creditRoom - drawn));
+          }
+        }
+        if (budget > 0) {
+          const imported = executeIntercityPurchase(
+            world,
+            city,
+            cityLedgers,
+            input.good,
+            remainingDemand,
+            budget,
+            { buyerCompanyId: company.id },
+            config,
+          );
+          budget = Math.max(0, budget - imported.spend);
+          purchaseSpend = round2(purchaseSpend + imported.spend);
+          bought = round2(bought + imported.qty);
         }
       }
-      if (result.qty < affordable - 0.01) {
+
+      if (ledger) {
+        ledger.unmetDemand = round2(ledger.unmetDemand + Math.max(0, executable - bought));
+      }
+
+      if (bought < shortage - 0.01) {
         log.push({
           tick: world.time.tick,
           kind: 'market',
-          message: `${company.name} 未能足额采购 ${input.good}（需求 ${shortage.toFixed(0)}，成交 ${result.qty.toFixed(0)}）。`,
+          message: `${company.name} 未能足额采购 ${input.good}（需求 ${shortage.toFixed(0)}，成交 ${bought.toFixed(0)}）。`,
         });
       }
     }

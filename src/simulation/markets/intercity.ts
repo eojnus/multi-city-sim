@@ -1,5 +1,6 @@
 import type {
   City,
+  Company,
   GoodId,
   TradeFlow,
   WorldState,
@@ -14,6 +15,108 @@ function cityDistanceKm(a: City, b: City): number {
   const dx = a.region.x - b.region.x;
   const dy = a.region.y - b.region.y;
   return Math.sqrt(dx * dx + dy * dy) * 0.35;
+}
+
+export interface IntercityOffer {
+  company: Company;
+  city: City;
+  unitPrice: number;
+  markup: number;
+  km: number;
+  /** 该卖家当前可售数量（已扣除自身生产预留）。 */
+  available: number;
+}
+
+/** 可购买的其他城市卖家候选，按单价从低到高排序（供成交与报价共用）。 */
+function intercityOffers(
+  world: WorldState,
+  buyerCity: City,
+  goodId: GoodId,
+  config: DemoConfig,
+  excludeCompanyId?: string,
+): IntercityOffer[] {
+  return world.companies
+    .filter(
+      (company) =>
+        company.cityId !== buyerCity.id &&
+        company.id !== excludeCompanyId &&
+        offeredStock(company, goodId) > 1e-9,
+    )
+    .flatMap((company): IntercityOffer[] => {
+      const city = world.cities.find((candidate) => candidate.id === company.cityId);
+      if (!city) return [];
+      const basePrice = buyerCity.market[goodId]?.price ?? 0;
+      const km = cityDistanceKm(buyerCity, city);
+      const markup = clamp(
+        km * config.intercity.transportMarkupPerKm,
+        config.intercity.minMarkup,
+        config.intercity.maxMarkup,
+      );
+      return [
+        {
+          company,
+          city,
+          unitPrice: Math.max(0.01, round2(basePrice * company.priceFactor * (1 + markup))),
+          markup,
+          km,
+          available: offeredStock(company, goodId),
+        },
+      ];
+    })
+    .filter((entry) => entry.unitPrice > 0)
+    .sort(
+      (a, b) =>
+        a.unitPrice - b.unitPrice ||
+        a.company.cityId.localeCompare(b.company.cityId) ||
+        a.company.id.localeCompare(b.company.id),
+    );
+}
+
+export interface IntercityQuote {
+  /** 在给定预算内可成交的数量。 */
+  qty: number;
+  /** 成交所需金额。 */
+  cost: number;
+}
+
+/**
+ * 只报价、不成交：按真实成交规则（价格 + 运输加成 + 预算）估算某数量需要多少钱。
+ * 生产采购在放款前用它与授信额度对齐，避免多借贷款或借了却买不到货。
+ */
+export function quoteIntercityPurchase(
+  world: WorldState,
+  buyerCity: City,
+  goodId: GoodId,
+  desiredQty: number,
+  maxSpend: number,
+  config: DemoConfig,
+  excludeCompanyId?: string,
+): IntercityQuote {
+  if (!config.intercity.enabled || desiredQty <= 0 || maxSpend <= 0) {
+    return { qty: 0, cost: 0 };
+  }
+  let remainingQty = desiredQty;
+  let remainingBudget = maxSpend;
+  let qty = 0;
+  let cost = 0;
+  for (const seller of intercityOffers(world, buyerCity, goodId, config, excludeCompanyId)) {
+    if (remainingQty <= 1e-9 || remainingBudget <= 0) break;
+    let buy = Math.min(remainingQty, seller.available, remainingBudget / seller.unitPrice);
+    buy = Math.floor(buy * 100) / 100;
+    if (buy <= 0) continue;
+    let lineCost = round2(buy * seller.unitPrice);
+    if (lineCost > remainingBudget + 1e-6) {
+      buy = Math.floor((remainingBudget / seller.unitPrice) * 100) / 100;
+      if (buy <= 0) continue;
+      lineCost = round2(buy * seller.unitPrice);
+    }
+    if (lineCost > remainingBudget + 1e-6) continue;
+    qty = round2(qty + buy);
+    cost = round2(cost + lineCost);
+    remainingQty -= buy;
+    remainingBudget -= lineCost;
+  }
+  return { qty, cost };
 }
 
 /**
@@ -44,37 +147,7 @@ export function executeIntercityPurchase(
   // 只有卖方城市与买方所在城市不同时才算出口；居民跨城补货同样计入出口。
   const buyerCityId = buyer ? buyer.cityId : buyerCity.id;
 
-  const sellers = world.companies
-    .filter(
-      (company) =>
-        company.cityId !== buyerCity.id &&
-        company.id !== options.buyerCompanyId &&
-        offeredStock(company, goodId) > 1e-9,
-    )
-    .map((company) => {
-      const city = world.cities.find((candidate) => candidate.id === company.cityId);
-      const basePrice = buyerCity.market[goodId]?.price ?? 0;
-      const km = city ? cityDistanceKm(buyerCity, city) : 0;
-      const markup = clamp(
-        km * config.intercity.transportMarkupPerKm,
-        config.intercity.minMarkup,
-        config.intercity.maxMarkup,
-      );
-      return {
-        company,
-        city,
-        unitPrice: Math.max(0.01, round2(basePrice * company.priceFactor * (1 + markup))),
-        markup,
-        km,
-      };
-    })
-    .filter((entry) => entry.city !== undefined && entry.unitPrice > 0)
-    .sort(
-      (a, b) =>
-        a.unitPrice - b.unitPrice ||
-        a.company.cityId.localeCompare(b.company.cityId) ||
-        a.company.id.localeCompare(b.company.id),
-    );
+  const sellers = intercityOffers(world, buyerCity, goodId, config, options.buyerCompanyId);
 
   let remainingQty = desiredQty;
   let remainingBudget = maxSpend;
