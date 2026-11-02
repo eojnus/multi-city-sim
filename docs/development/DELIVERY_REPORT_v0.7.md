@@ -208,14 +208,20 @@ totalDebt = bankLoanPrincipal          // 普通政府贷款未偿本金
 - 债券：24 期全部成交（未售 0），持有人全部为 `investorGroup`，跨城持有覆盖三城；累计银行垫付与破产兑付金额一致（485,295,713.34）。
 - 该结果说明现有参数下破产在 36 月观察窗内真实触发，经济平衡需按“已发生”而非“理论上限”评估。
 
-## 9. 验收证据（由验收员补齐）
+## 9. 验收证据（验收员执行，秘书处核验）
 
-- [ ] 三件套实际输出（typecheck / vitest 文件与用例数 / build）
-- [ ] 存档矩阵：v1–v6 旧档 → v7 往返，不覆盖用户存档
-- [ ] 桌面走查截图：市长/非市长、跨城、发债、到期、垫付、破产、换任、空态
-- [ ] 泄漏回归：`panels.ts:346`、`RegionalScene.ts:266`、`panels.ts:761/945–1003` 修复前后证据
-- [ ] 验收用例清单与红/绿结果（90–110 条目标）
-- [ ] 每城开局 GDP 估计数值表与 36 月观察指标
+- 验收对象：最终 HEAD `3bd8020`（代码合并点 `b85cc0f`）；结论 **106 条全部通过（A–I 十组 + I10 公开破产面板，0 红）**。
+- 三件套：`npm run typecheck` 退出 0；`npx vitest run` **57 文件 / 472 用例全绿**（业务 45/366 + 验收 12/106）；`npm run build` 退出 0。
+- 逐组结果表与红条核销：`docs/development/ACCEPTANCE_RESULTS_v0.7.md`；逐条状态：`docs/development/ACCEPTANCE_MATRIX_v1.md`。
+- 存档矩阵：H 组 17 条（`migration-v7.test.ts` 14 + `settlement-resume.test.ts` 3）全绿，v1–v6 旧档 → v7 往返、不覆盖用户存档。
+- 桌面走查（Xvfb :99 + Electron 38.8.6，1440×900 窗口，headless）：
+  - `artifacts/qa-final/`：8 张 + `manifest.json`（sha256/city/身份/tick/DOM，consoleErrors=[]），市民受限态 vs 市长财政面板同城同 tick 对照；
+  - `artifacts/smoke-main.json` + `artifacts/smoke-*.png`：主交互 27 项（存读档 formatVersion=7、1100 宽无横向溢出、损坏自动存档安全降级）；
+  - `artifacts/ui-fiscal/`（20 张）与 `artifacts/ui-fiscal-bonds/`（9 张 + `NOTES.md`）：权限/债券市场/长周期 tick 22→23 岚港破产、公开破产面板（看守期/银行垫付/已勾销/股份托管）、12 期破产兑付。
+  - 注：`artifacts/` 被 `.gitignore` 忽略，证据随交付包 `screenshots/` 一并给出，不在仓库内。
+- 泄漏回归：`panels.ts:346`（城市卡片财政余额）、`RegionalScene.ts:266`（地图标签）、`panels.ts:761/945–1003`（政府章节流水）、`gameStore.ts` 命令层市长校验——I 组 13 条 + I10 5 条全绿，修复前证据见 `artifacts/qa-before/`、修后见 `artifacts/qa-final/`。
+- 开局 GDP 估计与 36 月观察：G 组 8 条全绿；36 月指标见 `docs/development/reports/economy-probe-block2.json|csv` 与 §8.1。
+- 已知限制与契约注释歧义 5 项见 `ACCEPTANCE_RESULTS_v0.7.md §5`（36 月归档夹具早于块3/4 待重出、破产后 AI 不再发债、企业清算/银行利差/分红结构、`effectiveBudget` 注释），不判红，已在 §8 披露。
 
 ## 10. 集成记录（秘书处/架构师填）
 
@@ -233,8 +239,15 @@ totalDebt = bankLoanPrincipal          // 普通政府贷款未偿本金
 | 10 | `feature/data-tuning` | `d637c27`（含 `9bf24d2`、`fd1da67`） | 块6 探针（36 月破产/重选/融资拆解）与报告脚本修复、B10.4 过期标注 | ✓ | 44 文件 / 345 用例 ✓ | ✓ |
 | 11 | `feature/sim-fiscal` | `08311cd`（含 `110ec41`、`2553cd1`） | 块3/4 居民消费预算与群体消费贷 + 债券兑付三点入账/应付项金额与笔数分字段/贷款欠付并入 | ✓ | 45 文件 / 362 用例 ✓ | ✓ |
 | 12 | `feature/data-tuning` | `316eff4`（含 `40a3c86`） | 破产后限贷已知限制与 D11 实测列 | ✓ | 45 文件 / 363 用例 ✓ | ✓ |
+| 13 | `feature/arch-foundation` | `bacc158`（含 `0415f64`） | 报告 §10/#2/#4/#6 状态与 §11 #7 缺陷行 | ✓ | 未单记（仅 docs） | ✓ |
+| 14 | `feature/sim-fiscal` | `947eed5`（含 `6d4b240`） | 赤字转贷按实际赤字精确补足（`exact: true`） | ✓ | 45 文件 / 365 用例 ✓ | ✓ |
+| 15 | `feature/data-tuning` | `f324d90`（含 `8f18e13`） | 块6 探针在 `316eff4` 重跑（兑付入账后口径、#44 勾销单列） | ✓ | 未单记（仅 docs+scripts） | ✓ |
+| 16 | `feature/sim-fiscal` | `21e699a`（含 `3d0d21b`） | AC-F08：到期兑付合并财政段与垫付段，避免幂等键吞段 | ✓ | 45 文件 / 366 用例 ✓ | ✓ |
+| 17 | `feature/ui-fiscal` | `b85cc0f`（含 `e49079d`） | 公开破产面板（看守期/银行垫付/已勾销/股份托管）+ 长周期债券走查取证 | ✓ | 45 文件 / 366 用例 ✓ | ✓ |
+| 18 | `feature/arch-foundation` | `b53730e`（含 `c98480a`） | §8.1 换用块6 新实测数字与三条观察 | ✓ | 未单记（仅 docs） | ✓ |
+| 19 | `qa/acceptance` | `3bd8020`（含 `62b2b47`） | 最终验收 106/106 全绿、公开破产面板 I10 回归、验收结果表 | ✓ | **57 文件 / 472 用例 ✓**（业务 45/366 + 验收 12/106） | ✓ |
 
-- 当前集成分支 HEAD：`b85cc0f`（代码合并点；其后文档提交不改变用例数）。后续 #8 验证与最终冻结后再更新。核对日 2026-11-02。
+- **最终集成分支 HEAD：`3bd8020`**（含全部 19 步集成；代码合并点 `b85cc0f`，其后为验收与文档提交）。冻结核对日 2026-11-02。
 - 在途：sim 批次3 = 债券兑付入账修复（§11 #6，货币守恒）+ `payablesInArrears` 贷款欠付统计（§11 #4）+ `payablesPaid` 统计口径（§11 #2），合入后更新本表。
 - 用例数分阶段口径：块0 `1b1459c` 306 → #40–#43 `2983c2c` 315 → 债券第一批 `ee1a949` 328 → 数据/UI 合并 `da2dcaa`/`7c5edf7`/`b24afdd` 328 → 块2 `1d138a6` 345。
 - 数值段合并后核对：`aiGovernment` 保持 #43 新键名（`triggerBelowExpenseMonths`/`maxIssuesPerCityMonth`/`topUpToExpenseMonths`/`maxDebtRatioToIssue`），`maxPlanUnitsPerIssue 100_000`，无结构回退。
@@ -250,7 +263,7 @@ totalDebt = bankLoanPrincipal          // 普通政府贷款未偿本金
 | 2 | `payablesPaid` 把“支付笔数”混入金额累加（`debt.ts:565/578/592/611`），`result.payablesPaid` 可大于 `payablesCreated`，月报统计失真 | sim 批次3 已修：金额与笔数分字段统计（详见 `docs/architecture/REVIEW_debt_batch2.md`） | 已修（`08311cd`/`316eff4`） |
 | 3 | `tests/economy-stability.test.ts` 120 月用例 30s 超时 | `74629d1` 放宽到 60s 并注明定性依据：2 核多 worktree 并行争用 36–40s，基线单跑 12–16s；单跑 3 用例 13.60s 通过 | 已修 |
 | 4 | 贷款分期欠付未计入 `payablesInArrears`：`payGovernmentPayables` 只统计债券两类（`debt.ts:504` 生成 `loanInstalment`；`debt.ts:864-872` 在 `serviceGovernmentLoans` 内回填状态，但其 `inArrears` 未并入 `GovernmentSettlementResult`），月报少计政府贷款欠付 | sim 批次3 已修：贷款欠付并入 `payablesInArrears`（`debt.ts:203-204` 合计）。注：复核确认 payable 状态有回填，不会“永远 pending” | 已修（`08311cd`/`316eff4`） |
-| 5 | `scripts/economy-balance-report.ts:68` 使用不存在的 `world.investorGroups`（应为 `world.investors`，见 `types.ts:1852`）；脚本不在 tsconfig 内故 typecheck 未拦住，交付分支上直接运行崩溃 | 数值岗工作区已修，待提交并合入交付分支 | 待修（待合入） |
+| 5 | `scripts/economy-balance-report.ts:68` 使用不存在的 `world.investorGroups`（应为 `world.investors`，见 `types.ts:1852`）；脚本不在 tsconfig 内故 typecheck 未拦住，交付分支上直接运行崩溃 | 数值岗已修（`9bf24d2`），已随 `d637c27`/`f324d90` 合入交付分支并在交付分支实跑 exit 0 | 已修 |
 | 6 | **债券兑付未给持有人入账**：`payBondCoupon`/`settleBondMaturity`/`settleBondBankruptcyRedemption` 只写 `BondPayment`、扣财政、建 `bondAdvance` 贷款，未把兑付额记入持有人现金，货币净额凭空减少；QA AC-B12/B14 实测：财政充足到期净额 −11,200、垫付分支 −11,200、破产兑付 20 个月 −10,666.67。违反 Brief §4.1.3 与货币守恒 | sim 批次3 已修：三个兑付点用 `banking/credit.ts:85 creditOwnerCash` 各记一次（幂等命中不记、避免与 `debt.ts` 阶段③双记），补三条货币守恒测试（`110ec41`） | 已修（`08311cd`/`316eff4`） |
 | 7 | 赤字转贷被 `minAmount` 抬高：`debt.ts:750` 对小于 10,000 的赤字强制借到 10,000，`treasury` 转正、凭空多背债多计息（违反“等额补足到 0”） | sim 已修（`6d4b240`）：`borrowForGovernment(..., { exact: true })` 赤字精确补足到 0，AI 主动借款保留 10,000 下限，并补两条测试 | 已修（`947eed5`，交付分支） |
-| 8 | **同月“到期+破产”拆分支付被幂等键吞掉**：兑付分两段出资（财政段/垫付段）支付时幂等键不含出资来源，第二段命中 `bondPaymentExists`；`bonds.ts:672` 的 `makePayment((issuanceId,holdingId,tick,'principal'))` 使流水少记 1,200、`issuance.principalRepaid` 少 1,200（8,800 vs 10,000）、持有人少收 1,200（QA 第五轮 AC-F08） | 已派 sim：优先“多段出资合并为一次支付+一次入账”，或幂等键加入 fundingSource；补“拆分守恒 + 同 tick 重放”两条测试 | 修复中 |
+| 8 | **同月“到期+破产”拆分支付被幂等键吞掉**：兑付分两段出资（财政段/垫付段）支付时幂等键不含出资来源，第二段命中 `bondPaymentExists`；`bonds.ts:672` 的 `makePayment((issuanceId,holdingId,tick,'principal'))` 使流水少记 1,200、`issuance.principalRepaid` 少 1,200（8,800 vs 10,000）、持有人少收 1,200（QA 第五轮 AC-F08） | 已派 sim：优先“多段出资合并为一次支付+一次入账”，或幂等键加入 fundingSource；补“拆分守恒 + 同 tick 重放”两条测试 | 已修（`3d0d21b`，合入 `21e699a`） |
