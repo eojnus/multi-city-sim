@@ -21,7 +21,7 @@ npm run sim:report     # 既有机制报告
 npx tsx scripts/v04-report.ts 36   # v0.4 代表性模拟报告（本报告第 8 节数据来源）
 ```
 
-存档槽位：`autosave`、`manual-1`、`manual-2`、`manual-3`；格式版本 `5`，游戏版本 `0.4.0`。
+存档槽位：`autosave`、`manual-1`、`manual-2`、`manual-3`；格式版本 `5`，游戏版本 `0.5.0`。
 
 ## 2. 三大系统实际完成的功能
 
@@ -94,11 +94,11 @@ npx tsx scripts/v04-report.ts 36   # v0.4 代表性模拟报告（本报告第 8
 | 授信 | 基准 × 50% − 未偿；个人 = 净资产，企业 = 非负账面股权 | 用户已确定；刻意保守的双重约束 |
 | 逾期 | 宽限 1 月，第 2 月违约，不罚息，不收提前还款费 | 用户已确定 |
 | 旧债务 | 迁移为 12 期承接贷款，利率 0.50%，本金 = 原 `company.debt` | 不重复计息、不清零 |
-| 自动流动性借款 | 企业现金不足发薪/采购时，按可借额度自动借入周转贷款，并**并入该企业已有周转合同**（避免每笔采购生成独立合同） | 仍受同一额度限制，不是借新还旧 |
+| 自动流动性借款（v0.5 起） | 企业现金不足发薪/采购时，按可借额度自动借入周转贷款；**每笔借款独立合同、独立期限与首期**，不再并入旧合同（避免旧合同到期提前收新本金） | 仍受同一额度限制，不是借新还旧；每笔可在贷款卡片中单独查看 |
 
 ## 5. 存档版本与迁移
 
-- `SAVE_FORMAT_VERSION = 5`、`GAME_VERSION = '0.4.0'`、`package.json 0.4.0`。
+- `SAVE_FORMAT_VERSION = 5`（v0.5 未改格式）、`GAME_VERSION = '0.5.0'`、`package.json 0.5.0`。v0.4.0 写出的存档可直接读取。
 - 迁移链 v1 → v2 → v3 → v4 → **v5** 全部保留；`parseSave` 按 `formatVersion` 逐跳迁移，`migratedFrom` 记录最老源版本。
 - v5 迁移内容：补齐 `world.households`（现金/存款为 0，不造钱）、`world.management`（确定性生成经营者，沿用原 `company.ai.style`）、`world.banking`（空账本 + 旧债务承接）、`CompanyControl` 新字段（`operatorId/termEndTick/basis='election'`）、`Motion.candidates`；迁移后重算阶层统计。
 - 校验：`validateWorldStructure` 新增 households/management/banking 校验（结构、引用、数值、枚举、候选人与选票一致性）；`checkInvariants` 新增三类检查（群体人数合计 = 城市人口、群体现金流闭合、经营者无双任职、贷款未偿 = 本金 − 已还、企业债务镜像 = 贷款未偿）。
@@ -120,6 +120,11 @@ npx tsx scripts/v04-report.ts 36   # v0.4 代表性模拟报告（本报告第 8
 | 8 | `./dev-desktop.sh smoke`（Xvfb + Electron `--no-sandbox`） | 退出码 0；生成 8 张截图到 `artifacts/`；自动存档暂停/恢复、旧存档迁移、小窗口溢出等既有断言通过；截图可见新「居民阶层与职业群体」区块 |
 | 9 | 桌面机制冒烟 `scripts/mechanisms-smoke.cjs`（Xvfb） | 退出码 0；4 张截图；存档格式断言读取真实文件得到 `fileFormatVersion 5`、`fileGameVersion 0.4.0`、`ok: true` |
 | 10 | `npx tsx scripts/v04-report.ts 36` | 完成 36 个月模拟，末期不变量通过（数据见第 7 节） |
+| 11 | v0.5 `npx tsc --noEmit` | 通过（0 错误） |
+| 12 | v0.5 `npm run build` | 通过（同上，仅既有 chunk 体积告警） |
+| 13 | v0.5 `npx vitest run` | **37 个测试文件 / 291 项全部通过**（2026-11-02 实测） |
+| 14 | v0.5 桌面逐项验收 `scripts/acceptance-desktop.cjs`（Xvfb + Electron，隔离 userData） | **18/18 项通过，0 条控制台错误**；截图 `artifacts/acceptance-*.png`，结果 JSON `artifacts/desktop-acceptance.json` |
+| 15 | v0.5 存档往返（桌面第 8 组 + `tests/save-validation.test.ts`） | 保存→推进→读取后时间/现金/存款/贷款/债务一致；运行数月后的存档（含已退出企业的终态协议记录）可正常读回 |
 
 **基线回归**：既有 26 个测试文件在本次改动后全部保持通过；其中 5 个既有测试按新口径更新了断言，原因均为本次机制变化（不是放宽断言）：
 - `tests/trade-atomic.test.ts`：旧“按工资额度”信贷 → 新“账面股权 50% − 未偿”银行授信；融资断言改为“存在 workingCapital 贷款合同且债务镜像一致”。
@@ -215,3 +220,155 @@ npx tsx scripts/v04-report.ts 36   # v0.4 代表性模拟报告（本报告第 8
 - 测试：`tests/households.test.ts`、`tests/migration-v5.test.ts`、`tests/banking.test.ts`、`tests/management.test.ts`、`tests/ui-panels.test.ts`
 - 界面入口：城市面板（居民阶层、人才市场、银行）、企业详情（经营者与经营模式）
 - 模拟报告脚本：`scripts/v04-report.ts`
+
+---
+
+# 12. v0.5 验收修复记录（2026-11-02）
+
+本节记录总架构师验收后的 7 项问题修复、第 9 节贷款压力复核、第 10 节 Electron 桌面逐项验证与第 11 节回归结果。基线为分支 `feature/population-management-banking` 的提交 `24365e32cf10d4d660e4484e1addca8aecf65e3f`（与远程同名分支一致，工作区干净）。
+
+## 12.1 修复前基线
+
+- 分支：`feature/population-management-banking`；基线提交：`24365e3`。
+- 问题复现与根因均在基线代码上确认，修复期间未合并 `main`、未 force push、未删除既有功能。
+
+## 12.2 逐项修复
+
+### 问题 1：经营权限（贷款/还款）
+
+- **根因**：`src/app/gameStore.ts` 的 `takeLoan`/`repayBankLoan` 直接调用银行 `openLoan`/`repayLoan`，没有任何经营权校验；实测无经营权的岚港食品厂可借 1000，债务 0 → 1000。
+- **修复**：
+  - 新建 `src/simulation/management/financing.ts`：`playerOpenLoan`（个人贷款仅限本人；企业贷款需 `canOperate`，持有股票不等于经营权；`migratedDebt` 不允许玩家发起）与 `playerRepayBankLoan`（企业贷款需经营权）。
+  - `gameStore.ts` 的命令改为调用上述领域入口，实现“命令层 + 领域入口”双重校验；失败时现金/贷款/债务/存档/通知零变化。
+  - `bankView()` 的 company 增加 `canOperate`；`panels.ts` 对无经营权企业显示 `bank-company-no-operator` 提示并隐藏企业贷款/还款按钮。UI 隐藏只是提示，业务校验仍在领域层。
+  - 银行内部 AI 企业的自动融资仍直接走 `drawWorkingCapital`，不受玩家命令校验影响（区分“系统内部合法决策”）。
+- **测试**：`tests/loan-permissions.test.ts`（6 项：无经营权借款/还款失败且世界序列化前后一致、授权后可借可还、个人贷款、AI 内部放款、主体类型错配拒绝）。
+
+### 问题 2：自动贷款绕过经营授权
+
+- **根因**：发薪（`finance.ts` 的 `ensureCompanyLiquidity`）、生产采购（`production.ts` 成交后补流动性）、跨城进口（`trade.ts`）直接 `drawWorkingCapital`，完全绕开玩家经营模式、授权额度与提案。
+- **修复**：
+  - `operations.ts` 新增 `requestAutomaticLoan`（`AutomaticLoanDecision`）统一裁决：非玩家经营企业直接允许；`manual` 一律拒绝（采购受限/欠薪照旧并写 warning 解释）；`!auth.allowLoan` 拒绝；近期拒绝/过期提案在冷却期（`proposalCooldownMonths`）内拒绝；额度 = min(需求, 实时可借)；自动上限在 `assisted` 为 `majorThresholds.loanAmount - 0.01`、`delegated` 为 `auth.maxLoanAmount`，超出则只生成待批准提案（不先借后报）。
+  - `financing.planCompanyWorkingCapital` 只裁决不放款，`drawPlannedWorkingCapital` 在成交前放款；`finance/production/trade` 全部改为“先裁决/先放款，再执行采购/进口”，避免部分成交与绕过。
+  - `decideProposal` 批准贷款后 `openLoan`，并在合同 note 标记来源（玩家指令/玩家批准提案/托管授权内自动/自动流动性批次）。
+- **测试**：`tests/loan-authorizations.test.ts`（8 项：manual 不举债、assisted 小额自动/超阈值提案、delegated 授权上限、allowLoan=false、拒绝后冷却、AI 自动融资、发薪/采购手动模式不举债且有解释日志）。
+
+### 问题 3：并入旧合同导致提前到期
+
+- **根因**：`banking.drawWorkingCapital` 把新借款并入同企业已有 `active` 周转合同，并重算 `monthlyPrincipal = principal / termMonths`；旧合同进入末期时按全部 `outstanding` 收款，导致第 23 期追加 2400 后第 24 期要求还 2500。
+- **修复**：`drawWorkingCapital` 改为每笔借款通过 `issueLoan` 生成**独立合同**（独立 `startTick/nextDueTick/termMonths/principal/monthlyPrincipal`，首期下月），note 前缀 `自动流动性批次（第 N 期）`；额度仍由同一 `availableCredit` 共享占用与释放，旧合同到期不会提前收新本金。
+- **测试**：`tests/loan-batches.test.ts`（4 项：旧贷第 23 期追加后两份合同各自期限、旧合同末期只收自身未偿、同月多次追加、提前还款不影响新合同、各笔按自身未偿计息且 Σ未偿 == `company.debt`）。
+
+### 问题 4：职业工资无差异
+
+- **根因**：`company.monthlyWageBill = round2(employees × wageRate)` 使用单一工资率；`splitCityHouseholdIncome` 按岗位人数等比分企业实发工资，同企业各职业人均工资相同。
+- **修复**：`config.labor.occupationWageMultipliers`（管理 1.6 / 研发 1.35 / 销售 1.15 / 生产 0.95，按初始岗位权重加权约 +4.6%，理由与口径写在 config 注释）；`company.ts` 新增 `WAGE_ROLES`、`occupationWageRate(company, occupation, config)`、`companyWageBill(company, config)`，`monthlyWageBill(company, config?)` 兼容旧调用；策略、授信、生命周期、初始化、投资实体的工资调用点全部传 config；工资成本、居民收入、个税与消费均随职业工资率变化。`splitCityHouseholdIncome` 第 1 段改为按“岗位人数 × 职业工资率”权重用最大余数法拆分实发工资（欠薪时按实发总额定比，舍入尾差可对账）。
+- **测试**：`tests/occupation-wages.test.ts`（4 项：同企业不同职业人均工资不同、企业实发 = 各职业实收之和、税与资金转移对账、公共部门/失业/非劳动力口径不变）。
+
+### 问题 5：全城统一消费预算
+
+- **根因**：`consumer.runConsumerMarket` 先用全城预算（`cityHouseholdBudget`）统一缩放购买，再在 `recordHouseholdConsumption` 按群体现金比例分摊支出，导致富群体替穷群体买单、每群体支出可能超过自身可用资金。
+- **修复**：逐群体结算——每个群体用自己的 `householdGroupBudget = min(月收入 × 消费倾向, 群体现金)`；按人均预算升序处理；逐商品先本地 `applyConsumerDemand`，不足再 `executeIntercityPurchase({ consumer: true, householdGroupId })`；每群体成交后用 `recordGroupConsumption` 只扣自身现金并记录消费/未满足需求；全城字段为各群体之和（`ConsumerResult.byGroup`）。退款链路：`PendingIntercitySale.householdGroupId` → 运输结算按群体聚合 `{total, byGroup}` → `applyHouseholdIncome` 按实际购买群体归属（无 groupId 的旧记录按人口兜底）。缺货时只按实际成交扣款。
+- **测试**：`tests/consumption-groups.test.ts`（6 项：零现金组隔离、预算/现金上限与账目闭合、缺货不扣款、退款归属、人口兜底、固定种子复现）；另更新 `tests/transport-refund.test.ts` 与 `tests/households.test.ts` 中与新口径不一致的旧断言（不是放宽，见 12.6）。
+
+### 问题 6：人才池超限删人
+
+- **根因**：`management/manager-pool.ts` 的 `pruneOperatorPool` 在 available 超过 `maxPoolPerCity` 时直接从 `state.operators` 过滤删除经营者档案，落选者无法再被聘用。
+- **修复**：不再删除任何档案与履历；超出建议规模时只写一条去重提示日志（“保留全部现有档案并暂停新增；落选者仍可被其他企业聘用”）。控量改为：`electionCandidates` 优先复用同城 available 池，排除在任/已用/他案提名，新建候选受 `maxNewPerElection` 与剩余容量限制；池满时允许候选人不足仍开选任（界面可见候选人数量）。
+- **测试**：`tests/pool-retention.test.ts`（7 项：超限不删人、落选者可参加后续选任、在任 AI 不作为空闲候选、选任期间候选人固定、池满仍可运行等）；`tests/management.test.ts` 对应断言同步更新。
+
+### 问题 7：迁移丢存款
+
+- **根因**：`household-groups.rebalanceHouseholdWealthForMigration` 直接从源群体扣现金与存款，但目标账户不存在时 `addDepositBalance` 静默 return，导致源扣款、目标不入账（复现：2,970,000 → 1,485,000）。
+- **修复**：新增 `ensureGroupDepositAccount`，迁移前先确保目标群体存款账户存在；`addDepositBalance` 返回 boolean；迁移采用“先建账户、再原子转出/转入”，任一失败则存款留在原群体（不销毁）。按迁移人口中 `laborForceMoved` 与非劳动力部分分别从源城的 unemployed / nonLabor 群体按人均资产转移，目标城对应群体入账（可解释的群体分配）。`syncHouseholdPeople` 的招聘/裁员/自然变化路径改为两阶段提交（先预建目标账户，失败则保留原群体）。迁移函数返回 `{cashMoved, depositMoved, transferred}` 供审计。
+- **测试**：`tests/migration-accounts.test.ts`（7 项：目标无账户时存款守恒、旧存档迁移、跨城现金+存款守恒、反复迁移、非劳动力分摊、sync 路径等）。股票权益：居民投资实体权益仍按本城人口比例归属，**不随迁移转移**（本轮未实现、也未假装实现，见 12.6）。
+
+### 补充修复：运行数月后的存档无法读回
+
+- **发现方式**：第 10 节桌面验证第 8 组“保存 → 推进 → 读取”实测 `loadSlot` 返回 false；用 `parseSave` 复现得到 `协议 agreement-3 的参与企业无效`。
+- **根因**：企业倒闭时协议被标记为 `declined`/`failed`/`fulfilled` 留作审计，但 `validateWorldStructure` 要求协议参与方与条目的企业 ID 必须仍然存在，导致有企业退出的存档无法读回（既有问题，v0.5 验收的存档往返会触发）。
+- **修复**：终态记录放宽——`participants[].decision === 'declined'` 与 `items[].status ∈ {fulfilled, failed, declined}` 允许引用已退出企业；未终结的引用仍然拒绝。历史审计保留，不清空。
+- **测试**：`tests/save-validation.test.ts` 新增 2 项（终态允许 + 未终结拒绝），并验证往返后记录仍在。
+
+## 12.3 存档与版本
+
+- `SAVE_FORMAT_VERSION = 5`（本轮未改结构）；`GAME_VERSION = '0.5.0'`；`package.json`/`package-lock.json` 0.5.0。
+- v0.4.0 的 v5 存档可直接读取（无迁移）；v4 及更早仍走 v4 → v5 迁移链，迁移规则未变。
+- 银行每笔自动流动性借款现在是独立合同，旧存档中的合并合同仍按原期限正常偿还（迁移不静默改旧本金）。
+
+## 12.4 第 10 节 Electron 桌面逐项验证（实际执行）
+
+执行环境：Linux 容器 + Xvfb `:99`（1600×1000）+ Electron 38（`--no-sandbox`），脚本 `scripts/acceptance-desktop.cjs` 使用隔离 `userData`（`artifacts/desktop-acceptance-user-data`），不触碰真实存档；真实 DOM 点击 + 同一命令层，结果写入 `artifacts/desktop-acceptance.json`。
+
+| # | 操作 | 结果 |
+| --- | --- | --- |
+| ① | 启动 → 区域 → 进入岚港 → 人口阶层区块 | 通过；`population-strata-section` 存在，含“阶层/职业” |
+| ② | 职业收入 / 阶层 / 消费数据 | 通过；7 个职业群体收入各不相同（管理 19,186,141 / 生产 109,429,472 / 销售 17,346,774 / 研发 12,173,742 / 公共 18,603,512 / 失业 2,391,162 / 非劳动力 15,531,219）；三档阶层 low 77,792 人 / middle 39,257 / high 2,980；岚港当月消费 106,339,563.71 |
+| ③ | 未经营企业不能贷款/还款 | 通过；界面显示“你没有该企业的经营权…”且无企业贷款/还款按钮；命令层调用失败，债务 0 → 0、贷款合同数不变，toast 含“经营权” |
+| ④ | 合法经营权企业切换三种模式 | 通过（测试前置授予经营权后）：manual / assisted / delegated 均通过界面按钮切换成功 |
+| ⑤ | 需授权的贷款提案：批准前不生效、批准后生效 | 通过；assisted 模式制造资金缺口后生成待批准提案 32,031,565.88，批准前债务 0、贷款 0；批准后债务 32,031,565.88 |
+| ⑥ | 经营者选任：候选人 / 登记参选 / 投票 / 计票 | 通过；界面显示 3 名 AI 候选人，玩家登记参选并投 500 股；投票期结束后议案 `passed`，结果“孙星河 当选（得票最多）…玩家 500 股”（测试前置：脚本按二级市场规则外注入 500 股，真实路径是在交易界面买入） |
+| ⑦ | 存款 / 取款 / 个人贷款 / 还款 | 通过；存 500,000 → 存款 500,000；取 200,000 → 存款 300,000；个人贷 100,000；提前还 50,000 后未偿 50,000、已还本金 50,000 |
+| ⑧ | 保存 → 推进 → 读取 | 通过；`manual-1` 保存后推进 1 月再读取，时间/现金/存款/贷款数/债务全部恢复一致 |
+| ⑨ | 控制台错误、按钮可达性、小窗口 | 通过；0 条控制台错误；54 个 `data-action` 元素均带有效动作、无零尺寸/隐藏按钮；1100×700 窗口无横向溢出 |
+
+截图：`artifacts/acceptance-01-region.png` … `acceptance-09-small-window.png`；JSON：`artifacts/desktop-acceptance.json`（18/18 项通过、0 错误）。
+
+说明：桌面脚本用“测试前置”直接写入经营权与 500 股投票权（选任获胜/二级市场买入不在本轮 7 项修复范围内），其余操作都通过真实命令层；脚本注释与结果 JSON 均标注了该前置。
+
+**Windows 桌面复验步骤**（本机为无显示容器，未在 Windows 上手工点击）：
+
+1. `npm install` → `npm run build` → `npm run start`（Windows 版入口 `npm run dist`/`package` 需联网下载 electron-builder 资源，本机未验证）。
+2. 区域视图点岚港 → 进入城市，右侧确认「居民阶层与职业群体」与「银行」区块。
+3. 点选未经营的企业（如岚港食品厂）→ 银行区块应提示无经营权且无企业贷款按钮；尝试通过控制台命令也不应改变债务。
+4. 通过选任获胜或交易界面取得经营权后，切换 manual/assisted/delegated，观察提案与贷款行为。
+5. 在 assisted 模式下把企业现金压低（或运行到资金紧张），确认出现“待批准”贷款提案；批准前债务不变，批准后生效。
+6. 观察选任议案候选人、登记参选与投票按钮、投票期结束后的结果日志。
+7. 银行区块做存款/取款/个人贷款/还款；保存到槽位后推进 1 个月再读取，确认状态一致；查看开发者工具 Console 是否报错。
+
+## 12.5 第 9 节贷款结构与偿债压力复核
+
+固定种子 20261101、36 个月（`npx tsx scripts/v04-report.ts 36`），v0.5 数据：
+
+| 指标 | v0.4.0（修复前口径） | v0.5（每笔独立合同） |
+| --- | --- | --- |
+| 贷款合同数 | 46 | 217（自动流动性批次 217；平均期限 24.0 月） |
+| 未偿本金 | 1.44 亿 | 1.664 亿 |
+| 未结清 | 41 | 210（active 72 + defaulted 138） |
+| 曾逾期/欠款 | 30 | 142 |
+| 借款人层面出现违约合同的企业 | 未单独统计 | 23 家（共 37 家）；违约合同未偿 1.046 亿，占全部未偿 62.9% |
+| 企业清算 | 未列 | 7 次；银行实收 2,575，减免 1.093 亿（减免未计入实收还款） |
+| 全部未结清合同下月应还本息 | 未列 | 约 3,975 万 |
+
+**口径说明**：合同数从 46 增至 217 主要是“每笔自动补缺都是独立合同”的计数放大（问题 3 要求的修复），不代表借款总量等比例增加；借款人层面（23/37 家企业有违约合同、62.9% 未偿属违约合同）更能反映压力。
+
+**原因分析（未改已确认规则）**：
+1. 自动流动性只补工资/采购缺口，不改善盈利；长期薄利企业持续以新合同滚动短期债务。
+2. 授信按账面权益（`companyEquityBase`）计算，亏损企业账面权益仍可能为正，额度未反映偿债能力。
+3. 用户尚未确定“贷款审批是否看偿债能力/现金流”，因此没有加入该规则（避免把暂定规则当已确认玩法）。
+4. 违约后合同继续计息并尝试收款，企业仍可在剩余额度内经营，违约状态更易累积。
+5. 清算减免计入 `paidPrincipal` 但不计入 `principalRepaid`，报告中单独列出，避免被误读为实收还款。
+
+**建议（需用户/架构师确认后再改规则）**：
+- 授信额度加入偿债能力系数（如利息覆盖倍数、连续亏损月数），或对已违约企业暂停新增自动流动性、只允许提案。
+- 更早触发经营者选任/重组，或引入明确的债务重组规则（当前不自动借新还旧）。
+- 若希望缓解“存款利息净增货币”，需引入央行/财政冲销（用户已确定银行资金无限，未扩展）。
+
+## 12.6 未解决项与已知边界
+
+- 偿债压力偏高（见 12.5），本轮只报告与建议，未修改用户未确认的审批规则。
+- 财富阶层按“群体人均财富”聚合，仍存在粗糙点（青原 middle 0 人、high 38.0%，因为该城群体人均分布集中）；这是统计口径问题，不是资金守恒问题。
+- 居民投资实体股票权益不随人口迁移转移（按本城人口比例归属），本轮如实报告，未假装实现。
+- 桌面验证在 Xvfb + 隔离 userData 下完成；Windows 真实 GUI 与打包（`npm run package`）未执行，需联网资源。
+- 选任/持股在桌面脚本中用测试前置；真实“赢得选任”路径需多数股权，未在桌面完整走通。
+- 市长选举、政党、政府贷款、央行、银行破产仍未实现（用户未确认，不做扩展）。
+- 更新了两个既有测试的口径（`transport-refund` 的下期预算改为 Σ 群体预算；`households` 的跨城退款由“第 3 个月必现”改为 12 个月窗口内出现一次），原因是逐群体预算使跨城补货规模下降，机制本身已被新测试覆盖，不是放宽断言。
+
+## 12.7 修复前后提交
+
+- 修复前基线：`24365e32cf10d4d660e4484e1addca8aecf65e3f`（远程同名分支一致）。
+- 问题 1/2/3：`c457614`。
+- 问题 4/5/6/7：`435bdf4`。
+- 存档终态记录修复 + 验证脚本：`b944b38`。
+- 文档与版本（本节）：见分支 `feature/population-management-banking` 的 HEAD 提交。
+- 推送：同一 feature 分支，未合并 `main`、未 force push。
