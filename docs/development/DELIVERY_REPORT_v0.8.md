@@ -284,7 +284,7 @@ DISPLAY=:99 node_modules/electron/dist/electron --no-sandbox \
 - 新增两类股份切换检查（列表行全部属于 `:non-voting` 类别；无真实成交时显示“暂无成交”，不伪造）；
 - 新增税收一致性检查：四税 + 加成 − 损耗的流水净额 = 税收月报最终入账，且市长面板收入 − 支出 = 流水净额；
 - 新增企业退出检查：删除一家有真实成交的企业后，窗口显示“已退出”历史、保留蜡烛、无下单表单、`tradeShares` 被拒；
-- **结果：42/42 通过、0 条控制台错误**；证据（13 张 PNG + JSON）已入仓 `docs/evidence_v0.8/`，关键截图：
+- **结果：42/42 通过、0 条控制台错误**；证据（17 张 PNG + JSON）已入仓 `docs/evidence_v0.8/`，关键截图：
   - `v08-06-stock-window-moved.png`：极限拖动后拖回屏幕内（1200×760 @ 16,16）；
   - `v08-07-stock-window-candles.png`：真实成交的完整 K 线与成交量；
   - `v08-11-stock-window-gap.png`：覆盖 9 个月、空档 2 个月的 K 线；
@@ -299,7 +299,7 @@ DISPLAY=:99 node_modules/electron/dist/electron --no-sandbox \
 | `npm run build` | 通过（`multi-city-sim@0.8.1`） |
 | `npx vitest run --maxWorkers=1` | **75 个测试文件 / 601 项全部通过** |
 | `node scripts/acceptance-v08.cjs`（Xvfb + Electron，隔离 userData） | **42/42 项通过、0 条控制台错误** |
-| 证据 | `docs/evidence_v0.8/`（13 张 PNG + `acceptance-v08.json`） |
+| 证据 | `docs/evidence_v0.8/`（17 张 PNG + `acceptance-v08.json`） |
 
 ## 17.6 仍存在的问题与已知限制
 
@@ -366,7 +366,7 @@ DISPLAY=:99 node_modules/electron/dist/electron --no-sandbox \
 
 - `node scripts/acceptance-v08.cjs`（Xvfb + Electron，隔离 userData）：**43/43 项通过、0 条控制台错误**。
 - 新增场景：在股票窗口切到「仅分红」类别，找到 AI 挂出的可成交卖单，玩家按卖价买入 10 股；断言 `lastTrade.buyer === 'player'`、玩家现金减少、持仓增加、K 线出现该笔真实成交。
-- 证据：`docs/evidence_v0.8/`（14 张 PNG + `acceptance-v08.json`），新增 `v08-14-nonvoting-trade.png`；同时重截了窗口内 K 线、空档 K 线与退出企业历史。
+- 证据：`docs/evidence_v0.8/`（18 张 PNG + `acceptance-v08.json`），新增 `v08-14-nonvoting-trade.png`；同时重截了窗口内 K 线、空档 K 线与退出企业历史。
 
 ## 18.6 市场效果（默认条件、12 个月实测）
 
@@ -388,4 +388,4 @@ DISPLAY=:99 node_modules/electron/dist/electron --no-sandbox \
 | `npm run build` | 通过（`multi-city-sim@0.8.2`） |
 | `npx vitest run --maxWorkers=1` | **76 个测试文件 / 608 项全部通过** |
 | `node scripts/acceptance-v08.cjs` | **43/43 项通过、0 条控制台错误** |
-| 证据 | `docs/evidence_v0.8/`（14 张 PNG + JSON） |
+| 证据 | `docs/evidence_v0.8/`（18 张 PNG + JSON） |

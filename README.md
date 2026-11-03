@@ -144,7 +144,7 @@ npm run package        # 生成 Windows NSIS 安装包（需联网）
 - `npm run typecheck`：通过（渲染层 + Electron 主进程，0 错误）。
 - `npx vitest run --maxWorkers=1`：**76 个测试文件 / 608 项全部通过**（新增股票行情、股票 AI（含仅分红股买卖路径）、订单号唯一性、消费税/股息税/交通系数、右栏标签与股票窗口、存档 v8 迁移、税收流水一致性、退出企业历史保留；既有银行/债券/破产/治理/交通/居民债务回归全部通过）。
 - `npm run build`：通过。
-- 桌面逐项验收 `node scripts/acceptance-v08.cjs`（Xvfb + Electron，隔离 userData）：**43/43 项通过、0 条控制台错误**（含玩家在股票窗口买入 AI 挂出的仅分红卖单）；截图 14 张与 JSON 已入仓 `docs/evidence_v0.8/`（不依赖 artifacts/）。
+- 桌面逐项验收 `node scripts/acceptance-v08.cjs`（Xvfb + Electron，隔离 userData）：**43/43 项通过、0 条控制台错误**（含玩家在股票窗口买入 AI 挂出的仅分红卖单）；截图 18 张与 JSON 已入仓 `docs/evidence_v0.8/`（不依赖 artifacts/）。
 - 主冒烟 `node scripts/smoke-main.cjs`：exit 0（已适配右栏“企业”标签）。
 - 36 个月固定种子集成观察 `npx tsx scripts/economy-balance-report.ts`：exit 0，末期不变量通过；数据与解读见 `docs/development/DELIVERY_REPORT_v0.8.md` 第 7 节；复验修复记录见第 17、18 节。
 - 详细记录见 `docs/development/DELIVERY_REPORT_v0.8.md`。
