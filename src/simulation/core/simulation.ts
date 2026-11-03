@@ -21,6 +21,7 @@ import { runExternalDemand } from '../trade/external';
 import { runConsumerMarket } from '../markets/consumer';
 import { settleCompanyFinance } from '../finance/finance';
 import { settleGovernment, recordMigrationReports } from '../government/fiscal';
+import { transportTaxFactors } from '../government/taxes';
 import { settleGovernmentDebt } from '../government/debt';
 import { pushRealGdpPoint } from '../government/gdp-window';
 import { computeCityGdp, playerNetWorth, investInCompany, trimLog } from '../economy/gdp';
@@ -296,6 +297,8 @@ export class Simulation {
       this.state.lastTick.externalExports = externalExports;
 
       // 11. 跨城运输结算：统一按城市对计算容量惩罚，卖方所得在此时入账。
+      // v0.8：税收系数必须用“上一完整月”的城内配送统计，因此在结算覆盖 lastMonth 之前取。
+      const taxFactors = transportTaxFactors(this.state, this.config);
       const householdRefunds = settleTransportMonth(this.state, this.config, logs, ledgers);
 
       // 12. 价格与市场统计
@@ -318,7 +321,7 @@ export class Simulation {
       openDividendPolicyMotion(this.state, this.config, this.state.time.tick);
 
       // 15. 城市财政与居民收入（供下一月消费）
-      settleGovernment(this.state, finance, this.config, logs, householdRefunds);
+      settleGovernment(this.state, finance, this.config, logs, householdRefunds, taxFactors);
       for (const city of this.state.cities) recordMigrationReports(this.state, city);
       this.collectMayorNotices(logs);
 

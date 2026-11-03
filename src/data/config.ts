@@ -107,6 +107,29 @@ export const DEMO_CONFIG = {
     minPriceFactor: 0.55,
     maxPriceFactor: 2.2,
   },
+  /**
+   * v0.8：消费税、股息税与城内交通税收系数。
+   * 全部为【首版暂定】工程参数；用户已确认：消费税 5% 含税标价、股息税 10%、
+   * 交通对四种税的系数范围 0.5–1.5（保障率 0→0.5、25%→0.75、50%→1.0、75%→1.25、100%→1.5）。
+   */
+  tax: {
+    /** 居民消费品实际含税成交额的 5%（卖方收入 = 成交额 − 消费税）。 */
+    consumptionTaxRate: 0.05,
+    /** 股东实际取得分红的 10%（玩家与居民投资实体缴纳；企业与政府股东首版不缴）。 */
+    dividendTaxRate: 0.1,
+    /** 交通税收系数：系数 = 0.5 + 保障率，保障率 = clamp(有效容量 / 需求, 0, 1)。 */
+    transport: {
+      /** 保障率下限/上限（用于防御异常数据）。 */
+      minGuarantee: 0,
+      maxGuarantee: 1,
+      /** 系数 = baseFactor + 保障率；baseFactor=0.5 时范围 0.5–1.5。 */
+      baseFactor: 0.5,
+      /** 城市当月无城内交通需求时使用的中性系数（避免空城获得满额加成）。 */
+      neutralFactorWhenNoDemand: 1,
+    },
+    /** 各城税收结算记录保留月数。 */
+    historyMonths: 12,
+  },
   intercity: {
     /** 区域市场补货的演示运输加成：按距离线性增加，最高 12%。 */
     transportMarkupPerKm: 0.00025,
@@ -327,6 +350,34 @@ export const DEMO_CONFIG = {
     orderTtlTicks: 2,
     /** 每个成交月的成交笔数上限，避免无限循环。 */
     maxTradesPerTick: 200,
+    /** v0.8：每类股份保留的月度 K 线数量（真实成交，不虚构历史）。 */
+    historyMonths: 36,
+    /** v0.8：成交明细保留条数（防止存档无限增长）。 */
+    tradeHistoryLimit: 400,
+    /** v0.8：AI 投资行为参数（居民投资实体与企业，均为可替换的演示值）。 */
+    ai: {
+      /** 关闭后不生成新的 AI 买卖订单（已有订单仍可撮合）。 */
+      enabled: true,
+      /** 估值参考的回看月数（用于 K 线收盘价趋势）。 */
+      lookbackMonths: 6,
+      /** 单个投资实体每月最多挂出的买单数量。 */
+      maxBuyOrdersPerGroup: 2,
+      /** 单个投资实体每月最多挂出的卖单数量。 */
+      maxSellOrdersPerGroup: 4,
+      /** 居民实体买入股票预算上限（相对可支配现金）。 */
+      groupBudgetShare: 0.35,
+      /** 企业购买其他企业股票的单月预算上限（信用点与现金比例取小）。 */
+      companyBudgetCap: 500_000,
+      companyBudgetShare: 0.05,
+      /** 企业只买投票权股份（已确认规则）；要求现金高于若干月工资才投资。 */
+      companyReserveWageMonths: 3,
+      /** 企业投资时对目标的要求：至少最近一个月利润非负。 */
+      requireNonNegativeProfit: true,
+      /** 卖出获利阈值：相对账面价上涨该比例时提高卖出意愿。 */
+      takeProfitRatio: 0.15,
+      /** 风险偏好权重：实体风险偏好越高，越愿意追涨并接受更高买价。 */
+      riskWeight: 0.6,
+    },
   },
   governance: {
     /** 【暂定】董事会席位数量与分配规则。 */

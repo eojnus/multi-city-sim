@@ -24,6 +24,7 @@ import {
   householdConsumerBudgetSnapshot,
 } from '../population/household-finance';
 import { clamp, round2 } from '../core/math';
+import { taxAccrualOf } from '../government/taxes';
 
 /** 单个居民群体的本月消费结果（四层口径：期望→资金有效→成交→缺口）。 */
 export interface ConsumerGroupResult {
@@ -102,7 +103,11 @@ interface StagedSalesSnapshot {
     spend: number;
     transactionCount: number;
     unmetDemand: number;
+    /** v0.8：本地消费产生的基准消费税（回滚时一并撤销）。 */
+    consumptionTax: number;
   }[];
+  /** v0.8：该城本月累计消费税，回滚时恢复，避免留下没有成交的税。 */
+  cityConsumptionTaxAccrual: number;
 }
 
 function captureStagedSales(
@@ -111,7 +116,11 @@ function captureStagedSales(
   ledgers: CityLedgers,
   goodIds: GoodId[],
 ): StagedSalesSnapshot {
-  const snapshot: StagedSalesSnapshot = { companies: [], ledgers: [] };
+  const snapshot: StagedSalesSnapshot = {
+    companies: [],
+    ledgers: [],
+    cityConsumptionTaxAccrual: taxAccrualOf(world, city.id).consumptionTax,
+  };
   for (const company of world.companies) {
     if (company.cityId !== city.id) continue;
     const inventory = new Map<GoodId, number>();
@@ -135,13 +144,19 @@ function captureStagedSales(
       spend: ledger.spend,
       transactionCount: ledger.transactionCount,
       unmetDemand: ledger.unmetDemand,
+      consumptionTax: ledger.consumptionTax,
     });
   }
   return snapshot;
 }
 
 /** 完整撤销 captureStagedSales 之后的所有城内成交变化（不放款时不得留下虚假成交）。 */
-function restoreStagedSales(snapshot: StagedSalesSnapshot, ledgers: CityLedgers): void {
+function restoreStagedSales(
+  snapshot: StagedSalesSnapshot,
+  world: WorldState,
+  city: City,
+  ledgers: CityLedgers,
+): void {
   for (const entry of snapshot.companies) {
     for (const [goodId, qty] of entry.inventory) entry.company.inventory[goodId] = qty;
     entry.company.cash = entry.cash;
@@ -157,7 +172,9 @@ function restoreStagedSales(snapshot: StagedSalesSnapshot, ledgers: CityLedgers)
     ledger.spend = entry.spend;
     ledger.transactionCount = entry.transactionCount;
     ledger.unmetDemand = entry.unmetDemand;
+    ledger.consumptionTax = entry.consumptionTax;
   }
+  taxAccrualOf(world, city.id).consumptionTax = snapshot.cityConsumptionTaxAccrual;
 }
 
 /**
@@ -243,7 +260,7 @@ export function runConsumerMarket(
         groupUnmet[good.id] = round2(effectiveQty);
         continue;
       }
-      const local = applyConsumerDemand(world, city, ledgers, good.id, qty);
+      const local = applyConsumerDemand(world, city, ledgers, good.id, qty, config);
       let boughtQty = local.qty;
       let spent = local.spend;
       const remainingForGood = Math.max(
@@ -335,6 +352,7 @@ export function runConsumerMarket(
               plan.qty,
               plan.cost,
               { consumer: true },
+              config,
             );
             if (ledger && bought.qty < plan.qty - 1e-6) {
               ledger.unmetDemand = round2(ledger.unmetDemand + (plan.qty - bought.qty));
@@ -358,7 +376,7 @@ export function runConsumerMarket(
               }
             } else {
               // 预检已通过，放款理论上不会失败；若失败则成交与放款一起回滚，不留部分状态。
-              restoreStagedSales(staged, ledgers);
+              restoreStagedSales(staged, world, city, ledgers);
               world.log.push({
                 tick,
                 kind: 'warning',
@@ -367,7 +385,7 @@ export function runConsumerMarket(
             }
           } else {
             // 实际成交额低于单笔最低贷款额（含舍入）：不得放款，也不得成交。
-            restoreStagedSales(staged, ledgers);
+            restoreStagedSales(staged, world, city, ledgers);
             world.log.push({
               tick,
               kind: 'warning',

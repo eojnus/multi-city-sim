@@ -112,11 +112,20 @@ describe('居民股息资金流（不得重复计入）', () => {
     expect(distributed).toBeGreaterThan(0);
 
     const retained = round2(gross - distributed);
+    // v0.8：居民投资实体按 10% 代扣股息税；留存现金 = 留存 − 代扣税。
+    const playerTaxInCity =
+      world.player.homeCityId === city.id ? (finance.playerDividendTax ?? 0) : 0;
+    const investorTax = round2(
+      (finance.dividendTaxByCity?.[city.id] ?? 0) - playerTaxInCity,
+    );
+    expect(investorTax).toBeCloseTo(round2(gross * DEMO_CONFIG.tax.dividendTaxRate), 0);
     const afterFinanceCash = groups.reduce(
       (total, group) => total + (group.cash - (groupCashBefore.get(group.id) ?? 0)),
       0,
     );
-    expect(afterFinanceCash).toBeCloseTo(retained, 2);
+    expect(afterFinanceCash).toBeCloseTo(round2(retained - investorTax), 2);
+    // 对账：实体现金留存 + 返还居民 + 代扣税 = 实收股息。
+    expect(round2(afterFinanceCash + distributed + investorTax)).toBeCloseTo(gross, 2);
 
     settleGovernment(world, finance, DEMO_CONFIG, []);
     const publicGross = round2(
@@ -145,7 +154,7 @@ describe('居民股息资金流（不得重复计入）', () => {
       (total, group) => total + (group.cash - (groupCashBefore.get(group.id) ?? 0)),
       0,
     );
-    expect(savingsGain).toBeCloseTo(retained + contribution, 2);
+    expect(savingsGain).toBeCloseTo(round2(retained - investorTax + contribution), 2);
     expect(checkInvariants(world)).toEqual([]);
   });
 

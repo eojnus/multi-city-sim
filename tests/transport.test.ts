@@ -9,6 +9,7 @@ import { executeTradeRoutes } from '../src/simulation/trade/trade';
 import { executeAgreements } from '../src/simulation/agreements/agreements';
 import { startPolicy } from '../src/simulation/policies/policies';
 import { settleTransportMonth } from '../src/simulation/transport/settlement';
+import { splitConsumptionTax } from '../src/simulation/government/taxes';
 import {
   advanceTransportConstruction,
   capacityPenalty,
@@ -272,9 +273,18 @@ describe('城际运输容量：不是成交上限，只减少卖方收益', () =
       expect(trade.penaltyRate).toBe(DEMO_CONFIG.transport.penalty.max);
     }
     // 买方付款与卖方所得分离：没有从卖方额外扣款。
+    // v0.8：居民消费（householdPurchase）的 5% 消费税从卖方所得中代扣，归买方城市，
+    // 因此卖方到账 = ΣsellerProceeds − Σ居民消费税额；企业间交易不扣税。
+    const householdTrades = trades.filter((trade) => trade.buyerCompanyId === 'households');
+    expect(householdTrades.length).toBeGreaterThan(0);
+    const consumptionTax = householdTrades.reduce(
+      (sum, trade) => sum + splitConsumptionTax(trade.sellerProceeds, DEMO_CONFIG).tax,
+      0,
+    );
+    expect(consumptionTax).toBeGreaterThan(0);
     const sellerCash = sellerA.cash + sellerB.cash;
     const sellerProceeds = trades.reduce((sum, trade) => sum + trade.sellerProceeds, 0);
-    expect(sellerCash).toBeCloseTo(sellerProceeds, 1);
+    expect(sellerCash).toBeCloseTo(sellerProceeds - consumptionTax, 1);
   });
   it('没有容量（零等级）也不禁止交易，只取最大惩罚', () => {
     const { world, buyer } = tradeSetup();

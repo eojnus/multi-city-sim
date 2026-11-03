@@ -138,6 +138,8 @@ describe('修复二：城市企业税率生效', () => {
     expect(company.cash).toBeGreaterThanOrEqual(0);
 
     // 财政实际入账与财务记录一致（不重复计收）。
+    // 注：本世界无上一期城内运输统计 → 交通税收系数中性 1.0，故入账=基准税额；
+    // 系数调整/加成损耗的分账口径由 tests/tax-transport.test.ts 唯一负责，避免重复权威。
     settleGovernment(world, poor, DEMO_CONFIG, []);
     const ledgerEntries = world.fiscal.ledger.filter(
       (entry) => entry.cityId === city.id && entry.kind === 'corporateTax',

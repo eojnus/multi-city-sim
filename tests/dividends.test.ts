@@ -5,6 +5,7 @@ import { DEMO_CONFIG } from '../src/data/config';
 import type { Company } from '../src/simulation/contracts/types';
 import { createShareStructure } from '../src/simulation/securities/securities';
 import { groupsOfCity, groupHolder } from '../src/simulation/investors/investors';
+import { round2 } from '../src/simulation/core/math';
 
 function blankStats(): Company['lastMonth'] {
   return {
@@ -90,21 +91,30 @@ describe('玩家分红', () => {
 
     const totalDividend = target.lastMonth.dividendsPaid;
     expect(totalDividend).toBeGreaterThan(0);
-    expect(result.playerDividends).toBeCloseTo(totalDividend * 0.5, 2);
+    // v0.8：玩家股息按 10% 代扣，playerDividends 为税后净额。
+    const withheldTax = result.playerDividendTax ?? 0;
+    expect(withheldTax).toBeGreaterThan(0);
+    expect(result.playerDividends).toBeCloseTo(totalDividend * 0.5 * 0.9, 2);
     expect(sim.state.player.cash).toBeCloseTo(beforeCash + result.playerDividends, 2);
     expect(sim.state.player.dividendsReceived).toBeCloseTo(result.playerDividends, 2);
-    expect(result.dividendsByCity[target.cityId]).toBeCloseTo(
-      totalDividend - result.playerDividends,
-      2,
+    expect(result.playerDividendsByCompany[target.id]).toBeCloseTo(result.playerDividends, 2);
+    // dividendsByCity 仍是居民股东收到的毛股息（返还居民前），税单独记录。
+    const investorGross = result.dividendsByCity[target.cityId] ?? 0;
+    expect(investorGross).toBeCloseTo(totalDividend * 0.5, 2);
+    // 守恒：玩家净额 + 居民股东净额 + 全部代扣税 = 企业支付总额。
+    const allWithheldTax = Object.values(result.dividendTaxByCity ?? {}).reduce(
+      (sum, amount) => sum + amount,
+      0,
     );
-    expect(result.playerDividends + (result.dividendsByCity[target.cityId] ?? 0)).toBeCloseTo(
-      totalDividend,
-      2,
-    );
+    const investorTax = round2(allWithheldTax - withheldTax);
+    expect(investorTax).toBeCloseTo(round2(investorGross * DEMO_CONFIG.tax.dividendTaxRate), 2);
+    expect(
+      result.playerDividends + (investorGross - investorTax) + allWithheldTax,
+    ).toBeCloseTo(totalDividend, 2);
     expect(log.some((entry) => entry.kind === 'player' && entry.message.includes('分红'))).toBe(true);
   });
 
-  it('非整除持股的四舍五入保持“玩家 + 其他股东 = 支付总额”', () => {
+  it('非整除持股的四舍五入保持“玩家净额 + 其他股东毛额 + 代扣税 = 支付总额”', () => {
     const split = splitDividend(100.01, 1, 3);
     expect(split.player).toBe(33.34);
     expect(split.other).toBe(66.67);
@@ -115,10 +125,15 @@ describe('玩家分红', () => {
     assignShares(sim.state, target, 3, 1);
     const result = settleCompanyFinance(sim.state, DEMO_CONFIG, []);
     const total = target.lastMonth.dividendsPaid;
-    expect(result.playerDividends + (result.dividendsByCity[target.cityId] ?? 0)).toBeCloseTo(
-      total,
-      2,
-    );
-    expect(result.playerDividends).toBeCloseTo(splitDividend(total, 1, 3).player, 2);
+    const grossPlayer = splitDividend(total, 1, 3).player;
+    const withheldTax = result.playerDividendTax ?? 0;
+    expect(withheldTax).toBeCloseTo(round2(grossPlayer * DEMO_CONFIG.tax.dividendTaxRate), 2);
+    expect(result.playerDividends).toBeCloseTo(grossPlayer - withheldTax, 2);
+    // 守恒：玩家税后净额 + 居民股东毛额 + 代扣税 = 企业支付总额。
+    expect(
+      result.playerDividends +
+        (result.dividendsByCity[target.cityId] ?? 0) +
+        withheldTax,
+    ).toBeCloseTo(total, 2);
   });
 });

@@ -5,6 +5,7 @@ import { monthlyWageBill } from '../companies/company';
 import { serviceCompanyLoans } from '../banking/banking';
 import { requestCompanyWorkingCapital } from '../management/financing';
 import { distributeDividend, playerTotalShares } from '../securities/securities';
+import { accrueDividendTax } from '../government/taxes';
 
 export interface FinanceResult {
   /** 居民投资实体本次实际收到的股息总额（按城市）。 */
@@ -20,6 +21,10 @@ export interface FinanceResult {
   corporateTaxByCity: Record<string, number>;
   privateWagesByCity: Record<string, number>;
   wageArrears: number;
+  /** v0.8：本月按城市汇总的代扣股息税（基准税额，交通系数在财政月结时应用）。 */
+  dividendTaxByCity?: Record<string, number>;
+  /** v0.8：其中玩家被代扣的股息税。 */
+  playerDividendTax?: number;
 }
 
 /**
@@ -56,6 +61,8 @@ export function settleCompanyFinance(
   const privateWagesByCity: Record<string, number> = {};
   let playerDividends = 0;
   let totalArrears = 0;
+  const dividendTaxByCity: Record<string, number> = {};
+  let playerDividendTax = 0;
 
   for (const company of [...world.companies].sort((a, b) => a.id.localeCompare(b.id))) {
     const city = world.cities.find((candidate) => candidate.id === company.cityId);
@@ -121,6 +128,12 @@ export function settleCompanyFinance(
       Math.min(company.cash, dividendOwed, Math.max(0, company.cash - reserve)),
     );
 
+    // v0.8 股息税：玩家与居民投资实体按实际分红代扣 10%（企业与政府股东首版不征）。
+    // 在 distributeDividend 前记录投资实体的当月累计，按增量得到各实体实际所得；
+    // 税从纳税人所得中扣除，企业分红支出不因税增加；实体返还居民的部分不再重复征。
+    const investorDividendBefore = new Map(
+      world.investors.map((group) => [group.id, group.lastDividend]),
+    );
     const distribution = distributeDividend(
       world,
       company,
@@ -132,15 +145,44 @@ export function settleCompanyFinance(
     const actualPaid = distribution.total;
     company.cash = round2(company.cash - actualPaid);
     stats.dividendsPaid = actualPaid;
+    const dividendTaxRate = clamp(config.tax.dividendTaxRate, 0, 1);
     if (distribution.player > 0) {
-      playerDividends = round2(playerDividends + distribution.player);
-      playerDividendsByCompany[company.id] = distribution.player;
+      const playerTax = round2(distribution.player * dividendTaxRate);
+      if (playerTax > 0) {
+        world.player.cash = round2(world.player.cash - playerTax);
+        world.player.lastDividend = round2(
+          Math.max(0, (world.player.lastDividend ?? 0) - playerTax),
+        );
+        world.player.dividendsReceived = round2(
+          Math.max(0, (world.player.dividendsReceived ?? 0) - playerTax),
+        );
+        playerDividendTax = round2(playerDividendTax + playerTax);
+        dividendTaxByCity[world.player.homeCityId] = round2(
+          (dividendTaxByCity[world.player.homeCityId] ?? 0) + playerTax,
+        );
+        accrueDividendTax(world, world.player.homeCityId, playerTax);
+      }
+      const playerNet = round2(distribution.player - playerTax);
+      playerDividends = round2(playerDividends + playerNet);
+      playerDividendsByCompany[company.id] = playerNet;
       const stake = company.totalShares > 0 ? playerTotalShares(world, company.id) / company.totalShares : 0;
       log.push({
         tick: world.time.tick,
         kind: 'player',
-        message: `${company.name} 分红 ${actualPaid.toFixed(2)}；玩家按 ${(stake * 100).toFixed(2)}% 持股获得 ${distribution.player.toFixed(2)} 信用点。`,
+        message: `${company.name} 分红 ${actualPaid.toFixed(2)}；玩家按 ${(stake * 100).toFixed(2)}% 持股获得 ${playerNet.toFixed(2)} 信用点${playerTax > 0 ? `（代扣股息税 ${playerTax.toFixed(2)}）` : ''}。`,
       });
+    }
+    // 居民投资实体：按本月实际所得（lastDividend 增量）代扣税，现金与统计按净额。
+    for (const group of world.investors) {
+      const dividendGain = round2(group.lastDividend - (investorDividendBefore.get(group.id) ?? 0));
+      if (dividendGain <= 0) continue;
+      const tax = round2(dividendGain * dividendTaxRate);
+      if (tax <= 0) continue;
+      group.cash = round2(group.cash - tax);
+      group.lastDividend = round2(Math.max(0, group.lastDividend - tax));
+      group.dividendsReceived = round2(Math.max(0, group.dividendsReceived - tax));
+      dividendTaxByCity[group.cityId] = round2((dividendTaxByCity[group.cityId] ?? 0) + tax);
+      accrueDividendTax(world, group.cityId, tax);
     }
     if (actualPaid !== dividendPaid && dividendPaid > 0) {
       log.push({
@@ -211,5 +253,7 @@ export function settleCompanyFinance(
     corporateTaxByCity,
     privateWagesByCity,
     wageArrears: round2(totalArrears),
+    dividendTaxByCity,
+    playerDividendTax,
   };
 }

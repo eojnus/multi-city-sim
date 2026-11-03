@@ -27,6 +27,7 @@ import {
 } from '../population/household-groups';
 import { createInitialManagement } from '../management/manager-pool';
 import { createInitialBanking, migrateLegacyCompanyDebt } from '../banking/banking';
+import { createEmptyTaxState } from '../government/taxes';
 
 export interface ParseResult {
   ok: boolean;
@@ -166,6 +167,14 @@ export function parseSave(text: string): ParseResult {
       worldValue = migration.world;
       if (migratedFrom === undefined) migratedFrom = 6;
     }
+    if (formatVersion <= 7) {
+      const migration = migrateWorldV7ToV8(worldValue);
+      if (!migration.ok || !migration.world) {
+        return { ok: false, error: migration.error ?? 'v7 存档迁移失败' };
+      }
+      worldValue = migration.world;
+      if (migratedFrom === undefined) migratedFrom = 7;
+    }
 
     const structureError = validateWorldStructure(worldValue);
     if (structureError) return { ok: false, error: structureError };
@@ -290,7 +299,7 @@ export function migrateWorldV1(raw: unknown): MigrationResult {
     );
   }
 
-  world.securities = { classes: [], holdings: [], orders: [], lastTrades: [], offers: [] };
+  world.securities = { classes: [], holdings: [], orders: [], lastTrades: [], offers: [], history: [] };
   for (const company of [...world.companies].sort((a, b) => a.id.localeCompare(b.id))) {
     const playerShares = playerSharesByCompany.get(company.id) ?? 0;
     if (playerShares > company.totalShares + 1e-6) {
@@ -753,6 +762,9 @@ export function validateWorldStructure(world: unknown): string | null {
   const bankingError = validateBanking(world.banking, cityIds, companyIds, investorIds);
   if (bankingError) return bankingError;
 
+  const taxesError = validateTaxes(world.taxes, cityIds);
+  if (taxesError) return taxesError;
+
   // v0.7：债券、政府债务与居民消费金融（迁移后必定存在）。
   const bondsError = validateBonds(world.bonds, cityIds, companyIds, investorIds);
   if (bondsError) return bondsError;
@@ -1040,6 +1052,8 @@ function validateMarket(value: unknown, path: string): string | null {
     'price', 'supply', 'demand', 'consumerDemand', 'producerRequired', 'producerDemand',
     'sold', 'unmetDemand', 'unmetFunding', 'intercityImported', 'externalExport',
     'closingStock', 'lastPriceChangePct',
+    // v0.8：本月消费成交额内的消费税（基准税额口径）。
+    'consumptionTax',
   ]) {
     if (!isFiniteNumber(value[key])) return `${path}.${key} 必须是有限数值`;
   }
@@ -1197,6 +1211,7 @@ function validateSecurities(
   if (!Array.isArray(value.orders)) return 'securities.orders 必须是数组';
   if (!Array.isArray(value.lastTrades)) return 'securities.lastTrades 必须是数组';
   if (!Array.isArray(value.offers)) return 'securities.offers 必须是数组';
+  if (!Array.isArray(value.history)) return 'securities.history 必须是数组';
 
   const classById = new Map<string, { companyId: string; kind: string }>();
   const kindsByCompany = new Map<string, Set<string>>();
@@ -1331,6 +1346,48 @@ function validateSecurities(
       return `融资要约 ${offer.id}.status 无效`;
     }
     if (typeof offer.note !== 'string') return `融资要约 ${offer.id}.note 无效`;
+  }
+
+  for (let index = 0; index < value.history.length; index++) {
+    const history = value.history[index];
+    const path = `securities.history[${index}]`;
+    if (!isRecord(history)) return `${path} 不是对象`;
+    if (typeof history.shareClassId !== 'string' || !classById.has(history.shareClassId)) {
+      return `${path}.shareClassId 无效`;
+    }
+    const shareClass = classById.get(history.shareClassId)!;
+    if (history.companyId !== shareClass.companyId) return `${path}.companyId 与股份类别不一致`;
+    if (history.kind !== shareClass.kind) return `${path}.kind 与股份类别不一致`;
+    if (!Array.isArray(history.candles)) return `${path}.candles 必须是数组`;
+    let previousTick = -Infinity;
+    for (let candleIndex = 0; candleIndex < history.candles.length; candleIndex++) {
+      const candle = history.candles[candleIndex];
+      const candlePath = `${path}.candles[${candleIndex}]`;
+      if (!isRecord(candle)) return `${candlePath} 不是对象`;
+      if (!isInteger(candle.tick) || candle.tick <= previousTick) {
+        return `${candlePath}.tick 必须递增`;
+      }
+      previousTick = candle.tick;
+      for (const key of ['open', 'high', 'low', 'close', 'volume', 'trades']) {
+        if (!isFiniteNumber(candle[key])) return `${candlePath}.${key} 必须是有限数值`;
+      }
+      const high = candle.high as number;
+      const low = candle.low as number;
+      if (high + 1e-9 < low) return `${candlePath} 的最高价低于最低价`;
+      for (const key of ['open', 'close'] as const) {
+        const price = candle[key] as number;
+        if (price > high + 1e-9 || price < low - 1e-9) return `${candlePath}.${key} 超出高低价区间`;
+      }
+      if ((candle.volume as number) < 0 || (candle.trades as number) < 0) {
+        return `${candlePath} 成交量/笔数不能为负`;
+      }
+    }
+    if (history.lastTrade !== undefined) {
+      if (!isRecord(history.lastTrade)) return `${path}.lastTrade 无效`;
+      for (const key of ['tick', 'price', 'shares']) {
+        if (!isFiniteNumber(history.lastTrade[key])) return `${path}.lastTrade.${key} 必须是有限数值`;
+      }
+    }
   }
 
   return null;
@@ -2537,6 +2594,59 @@ export function migrateWorldV6ToV7(raw: unknown): MigrationResult {
   return { ok: true, world };
 }
 
+/**
+ * v7 → v8 迁移（v0.8 股票行情、消费税/股息税与交通税收状态）。
+ *
+ * 迁移规则（冻结）：
+ * 1. 新增 world.taxes（本月累计 + 各城月度税收记录），空账本默认值；不补记过去税额。
+ * 2. 新增 securities.history（按股份类别的月度 K 线）；旧档为空数组，界面按“暂无数据”显示，
+ *    不根据 lastTrades 或账面价反推虚构历史。
+ * 3. city.market 各商品补 consumptionTax=0；city.lastMonth 补税收可选字段 0。
+ * 4. 不改变任何现金、股份、债务、价格、存量与游戏进度；不清空既有成交明细。
+ * 5. 幂等：在已含 v8 字段的世界上重复执行不重复追加日志、不覆盖已有 K 线。
+ */
+export function migrateWorldV7ToV8(raw: unknown): MigrationResult {
+  if (!isRecord(raw)) return { ok: false, error: '存档 world 不是对象' };
+  if (!Array.isArray(raw.cities) || raw.cities.length === 0) {
+    return { ok: false, error: 'v7 存档缺少城市数据，无法迁移' };
+  }
+  const world = deepClone(raw) as unknown as WorldState;
+
+  // 1. 税收状态。
+  if (!isRecord((world as unknown as Record<string, unknown>).taxes)) {
+    world.taxes = createEmptyTaxState() as WorldState['taxes'];
+  }
+  if (!isRecord(world.taxes.accrualByCity)) world.taxes.accrualByCity = {};
+  if (!isRecord(world.taxes.historyByCity)) world.taxes.historyByCity = {};
+
+  // 2. 证券行情历史（旧档无成交历史 → 空数组，不虚构）。
+  if (!Array.isArray(world.securities.history)) world.securities.history = [];
+
+  // 3. 城市市场与月度报告的新字段。
+  for (const city of world.cities) {
+    for (const goodId of GOOD_IDS) {
+      const entry = city.market[goodId] as unknown as Record<string, unknown> | undefined;
+      if (!entry) continue;
+      if (!isFiniteNumber(entry.consumptionTax)) entry.consumptionTax = 0;
+    }
+    if (!isFiniteNumber(city.lastMonth.consumptionTax)) city.lastMonth.consumptionTax = 0;
+    if (!isFiniteNumber(city.lastMonth.dividendTax)) city.lastMonth.dividendTax = 0;
+    if (!isFiniteNumber(city.lastMonth.transportTaxFactor)) city.lastMonth.transportTaxFactor = 1;
+    if (!isFiniteNumber(city.lastMonth.transportTaxBonus)) city.lastMonth.transportTaxBonus = 0;
+    if (!isFiniteNumber(city.lastMonth.transportTaxLoss)) city.lastMonth.transportTaxLoss = 0;
+  }
+
+  // 4. 迁移说明（public，不含任何财政金额）。
+  world.log.push({
+    tick: world.time.tick,
+    kind: 'system',
+    message:
+      '存档已从 v7 迁移到 v8：新增股票月度行情（旧档标记为暂无数据，不虚构历史）、消费税与股息税账目、城内交通税收系数状态；未改变任何现金、股份与债务。',
+    visibility: { scope: 'public', cityId: null },
+  });
+  return { ok: true, world };
+}
+
 // ---------------------------------------------------------------- v0.7 新增结构校验
 
 function validateGdpInfo(value: unknown, path: string): string | null {
@@ -2723,6 +2833,57 @@ function validateBondHolder(
   }
   if (value.kind === 'investorGroup' && !investorIds.has(value.id)) {
     return `${path} 引用了不存在的居民投资实体 ${value.id}`;
+  }
+  return null;
+}
+
+/**
+ * v0.8：税收状态校验。
+ * - accrualByCity：城市 ID 必须有效，金额为非负有限数；
+ * - historyByCity：按 tick 严格递增、字段完整、系数在 0.5–1.5 之间、加成/损耗非负。
+ */
+function validateTaxes(value: unknown, cityIds: Set<string>): string | null {
+  if (!isRecord(value)) return 'world.taxes 无效';
+  const accrual = value.accrualByCity;
+  if (!isRecord(accrual)) return 'world.taxes.accrualByCity 必须是对象';
+  for (const [cityId, entry] of Object.entries(accrual)) {
+    if (!cityIds.has(cityId)) return `world.taxes.accrualByCity 引用了不存在的城市 ${cityId}`;
+    if (!isRecord(entry)) return `taxes.accrualByCity.${cityId} 无效`;
+    for (const key of ['consumptionTax', 'dividendTax']) {
+      if (!isFiniteNumber(entry[key]) || (entry[key] as number) < 0) {
+        return `taxes.accrualByCity.${cityId}.${key} 必须是非负有限数`;
+      }
+    }
+  }
+  const history = value.historyByCity;
+  if (!isRecord(history)) return 'world.taxes.historyByCity 必须是对象';
+  for (const [cityId, months] of Object.entries(history)) {
+    if (!cityIds.has(cityId)) return `world.taxes.historyByCity 引用了不存在的城市 ${cityId}`;
+    if (!Array.isArray(months)) return `taxes.historyByCity.${cityId} 必须是数组`;
+    let previousTick = -Infinity;
+    for (let index = 0; index < months.length; index++) {
+      const month = months[index];
+      const path = `taxes.historyByCity.${cityId}[${index}]`;
+      if (!isRecord(month)) return `${path} 不是对象`;
+      if (!isInteger(month.tick) || month.tick <= previousTick) return `${path}.tick 必须递增`;
+      previousTick = month.tick;
+      for (const key of [
+        'incomeTaxBase', 'corporateTaxBase', 'consumptionTaxBase', 'dividendTaxBase',
+        'transportGuarantee', 'transportFactor', 'incomeTaxRevenue', 'corporateTaxRevenue',
+        'consumptionTaxRevenue', 'dividendTaxRevenue', 'transportBonus', 'transportLoss',
+        'totalBase', 'totalRevenue',
+      ]) {
+        if (!isFiniteNumber(month[key]) || (month[key] as number) < 0) {
+          return `${path}.${key} 必须是非负有限数`;
+        }
+      }
+      const factor = month.transportFactor as number;
+      if (factor < 0.5 - 1e-9 || factor > 1.5 + 1e-9) {
+        return `${path}.transportFactor 必须在 0.5–1.5 之间`;
+      }
+      const guarantee = month.transportGuarantee as number;
+      if (guarantee < 0 || guarantee > 1) return `${path}.transportGuarantee 必须在 0–1 之间`;
+    }
   }
   return null;
 }

@@ -26,6 +26,7 @@ import { cityMarketPrices } from '../markets/markets';
 import { companySharePrice } from '../companies/company';
 import { allocateProportionally, round2 } from '../core/math';
 import { recordFiscal } from '../government/treasury';
+import { ensureStockHistory, recordStockTrade } from './history';
 
 export function shareClassId(companyId: string, kind: ShareKind): string {
   return `${companyId}:${kind === 'voting' ? 'voting' : 'non-voting'}`;
@@ -734,7 +735,14 @@ export function placeOrder(world: WorldState, input: OrderInput): { ok: boolean;
     const holding = findHolding(world, input.shareClassId, input.holder);
     if (!holding || holding.shares + 1e-6 < shares) return { ok: false, error: '卖方持股不足' };
   }
-  const id = `order-${input.tick}-${input.companyId}-${input.side}-${world.securities.orders.length + 1}`;
+  // 订单号必须全局唯一：同一 tick 内先有 AI 挂单、随后有成交撤单，再用 orders.length+1
+  // 编号会复用已存在的号段，导致玩家撤单时 findIndex 命中别人的同号订单。
+  let sequence = world.securities.orders.length + 1;
+  let id = `order-${input.tick}-${input.companyId}-${input.side}-${sequence}`;
+  while (world.securities.orders.some((entry) => entry.id === id)) {
+    sequence += 1;
+    id = `order-${input.tick}-${input.companyId}-${input.side}-${sequence}`;
+  }
   world.securities.orders.push({
     id,
     companyId: input.companyId,
@@ -749,6 +757,33 @@ export function placeOrder(world: WorldState, input: OrderInput): { ok: boolean;
   return { ok: true, orderId: id };
 }
 
+/**
+ * 撤销二级市场挂单（供玩家撤单入口使用）。
+ *
+ * 约束：只有订单持有人可以撤单。签名按契约只接收 (world, orderId, tick)，因此默认调用方
+ * 是玩家本人——未显式传入 requester 时只允许撤销玩家自己的订单；AI/企业订单若需要
+ * 撤销必须显式传 requester（用于内部测试或未来的管理界面）。
+ * 撤单只移除订单，不改变任何现金或持股（挂单本来就不冻结资金/股份）。
+ */
+export function cancelOrder(
+  world: WorldState,
+  orderId: string,
+  tick: number,
+  requester?: HolderRef,
+): { ok: boolean; error?: string } {
+  void tick;
+  const index = world.securities.orders.findIndex((order) => order.id === orderId);
+  if (index < 0) return { ok: false, error: '订单不存在或已成交/过期' };
+  const order = world.securities.orders[index]!;
+  if (order.shares <= 0) return { ok: false, error: '订单已无剩余股数' };
+  const owner: HolderRef = requester ?? { type: 'player', id: 'player' };
+  if (!sameHolder(order.holder, owner)) {
+    return { ok: false, error: '只有订单持有人可以撤单' };
+  }
+  world.securities.orders.splice(index, 1);
+  return { ok: true };
+}
+
 function purgeStaleOrders(world: WorldState, tick: number, config: DemoConfig): void {
   world.securities.orders = world.securities.orders.filter(
     (order) => order.shares > 0 && tick - order.createdTick <= config.securities.orderTtlTicks,
@@ -760,6 +795,8 @@ function purgeStaleOrders(world: WorldState, tick: number, config: DemoConfig): 
  * 每笔成交都在提交前校验买方现金与卖方持股；不足则缩减数量或跳过，不产生部分扣款。
  */
 export function matchOrders(world: WorldState, tick: number, config: DemoConfig): StockTrade[] {
+  // 行情结构先与股份类别对齐（企业退市后清理旧行情），保证读档校验不会引用已删类别。
+  ensureStockHistory(world);
   purgeStaleOrders(world, tick, config);
   const trades: StockTrade[] = [];
   const groups = new Map<string, StockOrder[]>();
@@ -824,7 +861,7 @@ export function matchOrders(world: WorldState, tick: number, config: DemoConfig)
             buy.shares = Math.max(0, buy.shares - quantity);
             sell.shares = Math.max(0, sell.shares - quantity);
             matched += 1;
-            trades.push({
+            const trade: StockTrade = {
               id: `trade-${tick}-${key}-${trades.length + 1}`,
               tick,
               companyId: buy.companyId,
@@ -835,7 +872,10 @@ export function matchOrders(world: WorldState, tick: number, config: DemoConfig)
               unitPrice: sell.limitPrice,
               value,
               origin: 'secondary',
-            });
+            };
+            trades.push(trade);
+            // 每笔真实成交立即进入月度 K 线（不从 lastTrades 反推历史）。
+            recordStockTrade(world, trade, config);
           }
         }
         if (buy.shares <= 0) break;
@@ -852,6 +892,11 @@ export function matchOrders(world: WorldState, tick: number, config: DemoConfig)
 
   purgeStaleOrders(world, tick, config);
   for (const trade of trades) world.securities.lastTrades.push(trade);
+  // 成交明细只保留最近 tradeHistoryLimit 条（防止存档无限增长）。
+  const historyLimit = Math.max(1, Math.floor(config.securities.tradeHistoryLimit));
+  if (world.securities.lastTrades.length > historyLimit) {
+    world.securities.lastTrades.splice(0, world.securities.lastTrades.length - historyLimit);
+  }
   return trades;
 }
 

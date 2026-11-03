@@ -6,24 +6,57 @@
 // - 非玩家市长城市保留 AI 自动发债；玩家仍可主动发债，居民投资实体/企业仍可按规则认购；
 // - 政府可向银行借款、债券到期银行无条件垫付、破产兑付勾销规则不变（本文件不触碰这些路径）。
 import { describe, expect, it } from 'vitest';
-import { DEMO_CONFIG } from '../../src/data/config';
+import { DEMO_CONFIG, type DemoConfig } from '../../src/data/config';
 import { Simulation } from '../../src/simulation/core/simulation';
+import { createInitialWorld } from '../../src/simulation/core/initializer';
 import { parseSave, serializeSave } from '../../src/simulation/core/save';
 import type { WorldState } from '../../src/simulation/contracts/types';
 import { bondsOf, issueGovernmentBond } from '../../src/simulation/government/bonds';
 import { appointPlayerMayor } from '../../src/simulation/politics/politics';
 import { cityById } from './helpers';
 
-const CONFIG = DEMO_CONFIG;
 const PLAYER_CITY = 'lanport';
 const AI_CITY = 'ironvale';
 
-/** 制造财政紧张：每个城市财政为 0、上月财政支出基线 100 万，使 AI 发债条件全部满足。 */
+/**
+ * 财政紧张口径（v0.8 回归修复）：
+ * 旧 helper 只手工置 treasury=0 / baseline=1M，但同一次月结里 settleGovernment 会先按当月
+ * 真实税收与支出重算 treasury，settleCityGovernmentDebt 又会用当月实际支出刷新
+ * fiscalExpenseBaseline，于是 maybeAutoIssueGovernmentBond 看到的是"结算后"的财政，
+ * 门槛（treasury < baseline × triggerBelowExpenseMonths）不再成立。
+ *
+ * 现在改为通过**完整月结路径**制造紧张：
+ * - 月结前清空各城 treasury（模拟财政耗尽），让第一次结算仍从低位起算；
+ * - 测试用代理 config 把 triggerBelowExpenseMonths 抬到 2、topUpToExpenseMonths 抬到 3，
+ *   使"结算后 treasury < 2×当月支出基线"对正常月份也成立，且补足目标 3×基线保证 need>0。
+ * 这样 AI 发债判定仍由 Simulation.tick() 的 settleGovernment → settleGovernmentDebt 真实触发，
+ * 不直接调用 maybeAutoIssueGovernmentBond，也不改变产品默认参数。
+ */
+const TENSE_CONFIG = {
+  ...DEMO_CONFIG,
+  government: {
+    ...DEMO_CONFIG.government,
+    aiGovernment: {
+      ...DEMO_CONFIG.government.aiGovernment,
+      triggerBelowExpenseMonths: 2,
+      topUpToExpenseMonths: 3,
+    },
+  },
+} as unknown as DemoConfig;
+
+/** 制造财政紧张：清空各城 treasury（月结会再按真实收支重算；门槛由 TENSE_CONFIG 保证）。 */
 function makeFiscalTense(world: WorldState): void {
   for (const city of world.cities) {
     city.treasury = 0;
     city.fiscalExpenseBaseline = 1_000_000;
   }
+}
+
+/** 新建一个财政紧张的世界（初始 world + 代理 config），后续全部走完整 tick。 */
+function createTenseSim(): Simulation {
+  const sim = new Simulation(createInitialWorld(TENSE_CONFIG), TENSE_CONFIG);
+  makeFiscalTense(sim.state);
+  return sim;
 }
 
 function issuancesAt(world: WorldState, cityId: string, tick: number) {
@@ -34,9 +67,8 @@ function issuancesAt(world: WorldState, cityId: string, tick: number) {
 
 describe('问题B：玩家市长城市禁止 AI 自动发债（完整月结路径）', () => {
   it('玩家任岚港市长：本城同月不出现 AI 发行计划，非玩家城市铁谷照常发债', () => {
-    const sim = Simulation.create();
+    const sim = createTenseSim();
     expect(appointPlayerMayor(sim.state, PLAYER_CITY).ok).toBe(true);
-    makeFiscalTense(sim.state);
 
     const result = sim.tick();
     expect(result.ok, result.ok ? '' : result.error).toBe(true);
@@ -48,9 +80,8 @@ describe('问题B：玩家市长城市禁止 AI 自动发债（完整月结路�
   });
 
   it('玩家离任后下一个完整月结立即恢复 AI 发债（不重启世界）', () => {
-    const sim = Simulation.create();
+    const sim = createTenseSim();
     expect(appointPlayerMayor(sim.state, PLAYER_CITY).ok).toBe(true);
-    makeFiscalTense(sim.state);
     expect(sim.tick().ok).toBe(true);
     const firstTick = sim.state.time.tick;
     expect(issuancesAt(sim.state, PLAYER_CITY, firstTick)).toHaveLength(0);
@@ -64,8 +95,7 @@ describe('问题B：玩家市长城市禁止 AI 自动发债（完整月结路�
   });
 
   it('玩家上任后立即停止本城 AI 发债：上任前已发一期，上任后同月不再新增', () => {
-    const sim = Simulation.create();
-    makeFiscalTense(sim.state);
+    const sim = createTenseSim();
     expect(sim.tick().ok).toBe(true);
     const beforeTick = sim.state.time.tick;
     expect(issuancesAt(sim.state, PLAYER_CITY, beforeTick).length).toBeGreaterThan(0);
@@ -78,9 +108,8 @@ describe('问题B：玩家市长城市禁止 AI 自动发债（完整月结路�
   });
 
   it('读档后立即按存档中的市长身份判定：岚港不再 AI 发债，铁谷照常', () => {
-    const sim = Simulation.create();
+    const sim = createTenseSim();
     expect(appointPlayerMayor(sim.state, PLAYER_CITY).ok).toBe(true);
-    makeFiscalTense(sim.state);
     expect(sim.tick().ok).toBe(true);
 
     const parsed = parseSave(serializeSave(sim.state));
@@ -89,7 +118,7 @@ describe('问题B：玩家市长城市禁止 AI 自动发债（完整月结路�
     expect(loaded.player.roles.mayorCityId).toBe(PLAYER_CITY);
     makeFiscalTense(loaded);
 
-    const resumed = new Simulation(loaded, CONFIG);
+    const resumed = new Simulation(loaded, TENSE_CONFIG);
     expect(resumed.tick().ok).toBe(true);
     const tick = resumed.state.time.tick;
     expect(issuancesAt(resumed.state, PLAYER_CITY, tick)).toHaveLength(0);
@@ -99,18 +128,17 @@ describe('问题B：玩家市长城市禁止 AI 自动发债（完整月结路�
     const controlWorld = controlParsed.world!;
     controlWorld.player.roles.mayorCityId = null;
     makeFiscalTense(controlWorld);
-    const controlSim = new Simulation(controlWorld, CONFIG);
+    const controlSim = new Simulation(controlWorld, TENSE_CONFIG);
     expect(controlSim.tick().ok).toBe(true);
     expect(issuancesAt(controlSim.state, PLAYER_CITY, controlSim.state.time.tick).length).toBeGreaterThan(0);
   });
 
   it('玩家市长仍可主动发债，居民投资实体/企业仍按既有规则在窗口关闭时认购', () => {
-    const sim = Simulation.create();
+    const sim = createTenseSim();
     expect(appointPlayerMayor(sim.state, PLAYER_CITY).ok).toBe(true);
-    makeFiscalTense(sim.state);
     const tick = sim.state.time.tick;
     const city = cityById(sim.state, PLAYER_CITY);
-    const issued = issueGovernmentBond(sim.state, city, CONFIG, 20, tick);
+    const issued = issueGovernmentBond(sim.state, city, TENSE_CONFIG, 20, tick);
     expect(issued.ok, issued.ok ? '' : issued.error).toBe(true);
     expect(issued.issuance!.status).toBe('offering');
 

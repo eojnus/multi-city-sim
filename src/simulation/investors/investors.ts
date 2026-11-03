@@ -10,9 +10,10 @@
 
 import type { Company, HolderRef, InvestorGroup, LogEntry, WorldState } from '../contracts/types';
 import type { DemoConfig } from '../../data/config';
-import { allocateProportionally, round2 } from '../core/math';
+import { allocateProportionally, clamp, round2 } from '../core/math';
 import { debitHouseholdSavings } from '../population/household-economy';
-import { monthlyWageBill } from '../companies/company';
+import { companyBookValue, monthlyWageBill } from '../companies/company';
+import { cityMarketPrices } from '../markets/markets';
 import { PRODUCTIVITY } from '../../data/demo-data';
 import {
   acceptFinancingOffer,
@@ -24,6 +25,7 @@ import {
   holderVotingShares,
   placeOrder,
 } from '../securities/securities';
+import { latestStockPrice, stockHistoryFor } from '../securities/history';
 
 const GROUP_NAME_SUFFIX = ['储蓄互助会', '工薪投资者联盟', '城市养老基金'];
 
@@ -131,6 +133,75 @@ export function collectInvestableFunds(world: WorldState, config: DemoConfig, lo
   }
 }
 
+/**
+ * 确定性伪随机：只依赖世界种子与传入标识，不读取时钟、不使用 Math.random。
+ * 用于同一评分下的稳定抖动，保证“相同种子 + 相同操作序列 = 相同结果”。
+ */
+function stableUnit(seed: number, ...parts: (string | number)[]): number {
+  let hash = (seed >>> 0) ^ 0x9e3779b9;
+  for (const part of parts) {
+    const text = String(part);
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 16777619) >>> 0;
+    }
+    hash = Math.imul(hash ^ 0x85ebca6b, 2246822519) >>> 0;
+  }
+  hash ^= hash >>> 13;
+  hash = Math.imul(hash, 0x5bd1e995) >>> 0;
+  hash ^= hash >>> 15;
+  return (hash >>> 0) / 4294967296;
+}
+
+/** 最近一个完整月的利润：本月已结算则用 lastMonth，否则回退 previousMonth（只读演示口径）。 */
+function recentProfit(company: Company): number {
+  if (company.lastMonth.profit !== 0) return round2(company.lastMonth.profit);
+  return round2(company.previousMonth.profit);
+}
+
+/** 用真实财务给单家企业估值：账面股权、负债/权益、最近利润与行情趋势（无成交时按账面价）。 */
+interface CompanyFinancials {
+  equity: number;
+  profit: number;
+  profitYield: number;
+  debtRatio: number;
+  price: number;
+  lastPrice: number;
+  /** 最近 lookbackMonths 根 K 线的收盘价变化率；无行情时为 0。 */
+  momentum: number;
+  /** 相对最近成交价的折价（>0 表示市价低于账面价）。 */
+  valueGap: number;
+}
+
+function financialsOf(
+  world: WorldState,
+  company: Company,
+  shareClassIdValue: string,
+  config: DemoConfig,
+): CompanyFinancials {
+  const city = world.cities.find((candidate) => candidate.id === company.cityId);
+  const equity = city ? round2(companyBookValue(company, cityMarketPrices(city))) : 0;
+  const profit = recentProfit(company);
+  const profitYield = equity > 0 ? round2(profit / equity) : 0;
+  const debtRatio = equity > 0 ? round2(company.debt / equity) : Number.POSITIVE_INFINITY;
+  const price = bookPrice(world, company);
+  const lastPrice = latestStockPrice(world, shareClassIdValue) ?? price;
+  const lookback = Math.max(1, Math.floor(config.securities.ai.lookbackMonths));
+  const candles = stockHistoryFor(world, shareClassIdValue)?.candles ?? [];
+  const window = candles.slice(-lookback);
+  const first = window[0]?.close ?? lastPrice;
+  const last = window[window.length - 1]?.close ?? lastPrice;
+  const momentum = first > 0 ? round2(last / first - 1) : 0;
+  const valueGap = lastPrice > 0 ? round2((price - lastPrice) / lastPrice) : 0;
+  return { equity, profit, profitYield, debtRatio, price, lastPrice, momentum, valueGap };
+}
+
+/** 玩家经营企业判定（与 management/operations.canOperate 同口径；此处内联以避免模块循环依赖）。 */
+function isPlayerOperated(world: WorldState, companyId: string): boolean {
+  const control = world.governance?.controls?.find((entry) => entry.companyId === companyId);
+  return !!control && control.operator !== 'management' && control.operator.type === 'player';
+}
+
 /** 每月按最新账面价重挂自动订单，避免旧限价长期偏离市场。 */
 function clearOrders(
   world: WorldState,
@@ -149,32 +220,48 @@ function clearOrders(
   );
 }
 
-function pickCompanyForGroup(
-  world: WorldState,
-  group: InvestorGroup,
-  tick: number,
-  offset: number,
-): Company | null {
-  const candidates = [...world.companies]
-    .filter((company) => company.totalShares > 0)
-    .sort((a, b) => a.id.localeCompare(b.id));
-  if (candidates.length === 0) return null;
-  const index = (tick + offset + group.id.length) % candidates.length;
-  return candidates[index] ?? null;
+function votingClassOf(world: WorldState, companyId: string) {
+  return world.securities.classes.find(
+    (candidate) => candidate.companyId === companyId && candidate.kind === 'voting',
+  );
 }
 
-/** 居民投资实体每月自动下单（可替换规则，不是逐居民 AI）。 */
+interface PlannedCandidate {
+  company: Company;
+  shareClassIdValue: string;
+  kind: 'voting' | 'nonVoting';
+  financials: CompanyFinancials;
+  score: number;
+}
+
+/**
+ * 居民投资实体的自动下单（可替换规则，不是逐居民 AI）。
+ *
+ * v0.8 改进：
+ * - 用真实财务与行情决定买卖：账面股权、最近利润、负债/权益、最近成交价与 K 线趋势；
+ * - 风险偏好（riskAppetite）与现金规模影响限价、预算与追涨/价值倾向；
+ * - 只用真实现金与持仓（placeOrder 二次校验，撮合时再校验）；
+ * - 每月每实体买单数受 maxBuyOrdersPerGroup、卖单数受 maxSellOrdersPerGroup 限制；
+ * - 买入预算受 groupBudgetShare 限制，且不会在同一股份类别上同时挂买卖（避免自成交）。
+ */
 export function planInvestorOrders(world: WorldState, config: DemoConfig, tick: number): void {
+  const ai = config.securities.ai;
+  if (!ai.enabled) return;
   const groups = [...world.investors].sort((a, b) => a.id.localeCompare(b.id));
+  const companies = [...world.companies].sort((a, b) => a.id.localeCompare(b.id));
+  const maxBuy = Math.max(1, Math.floor(ai.maxBuyOrdersPerGroup));
+  const maxSell = Math.max(1, Math.floor(ai.maxSellOrdersPerGroup));
+
   for (const group of groups) {
     const holder = groupHolder(group);
-    if (!group.cash || group.cash <= 0) continue;
+    const risk = clamp(group.riskAppetite, 0, 1);
+    const sellingClasses = new Set<string>();
+    let sellCount = 0;
 
-    // 1) 市场流动性：卖出极少量持仓，给其他投资者（含玩家）提供可买股份。
-    for (const company of [...world.companies].sort((a, b) => a.id.localeCompare(b.id))) {
-      const shareClass = world.securities.classes.find(
-        (candidate) => candidate.companyId === company.id && candidate.kind === 'voting',
-      );
+    // 1) 卖出：以最新账面价重挂流动性卖单；涨幅超过止盈阈值时提高卖出比例（不同风险偏好不同）。
+    for (const company of companies) {
+      if (sellCount >= maxSell) break;
+      const shareClass = votingClassOf(world, company.id);
       if (!shareClass) continue;
       const holding = world.securities.holdings.find(
         (entry) =>
@@ -183,98 +270,196 @@ export function planInvestorOrders(world: WorldState, config: DemoConfig, tick: 
           entry.holder.id === group.id,
       );
       if (!holding || holding.shares < 10) continue;
-      const shares = Math.floor(holding.shares * config.investors.liquiditySellShare);
+      const price = bookPrice(world, company);
+      if (!Number.isFinite(price) || price <= 0) continue;
+      const lastPrice = latestStockPrice(world, shareClass.id) ?? price;
+      const gainRatio = price > 0 ? round2(lastPrice / price - 1) : 0;
+      let sellShare = config.investors.liquiditySellShare;
+      if (gainRatio >= ai.takeProfitRatio) {
+        // 市价明显高于账面价：落袋意愿随风险偏好上升（高风险更愿意卖出锁定收益）。
+        sellShare *= 1.5 + risk;
+      } else if (gainRatio <= -ai.takeProfitRatio) {
+        // 市价明显低于账面价：惜售，减少流动性供给。
+        sellShare *= 0.5;
+      }
+      const shares = Math.floor(holding.shares * sellShare);
       if (shares < 1) continue;
+      const limitPrice = round2(price * 1.02);
+      if (limitPrice <= 0) continue;
       clearOrders(world, holder, shareClass.id, 'sell');
-      placeOrder(world, {
+      const placed = placeOrder(world, {
         companyId: company.id,
         shareClassId: shareClass.id,
         side: 'sell',
         holder,
         shares,
-        limitPrice: round2(bookPrice(world, company) * 1.02),
+        limitPrice,
         tick,
-        note: `${group.name} 提供流动性（演示自动规则）`,
+        note: `${group.name} 按最新账面价提供流动性（${gainRatio >= ai.takeProfitRatio ? '止盈' : '常规'}，演示自动规则）`,
       });
+      if (placed.ok) {
+        sellCount += 1;
+        sellingClasses.add(shareClass.id);
+      }
     }
 
+    // 2) 买入：按真实财务 + 行情 + 风险偏好打分，预算与订单数受配置约束。
     if (group.cash < config.investors.minCashToInvest) continue;
-    const budget = round2(group.cash * config.investors.buyBudgetShare);
-    if (budget <= 0) continue;
+    const budget = round2(group.cash * ai.groupBudgetShare);
+    if (budget < 1) continue;
 
-    // 2) 自动买入：优先有投票权类别；接近投票权上限时改买仅分红类别。
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const company = pickCompanyForGroup(world, group, tick, attempt);
-      if (!company) continue;
+    const candidates: PlannedCandidate[] = [];
+    for (const company of companies) {
+      if (company.totalShares <= 0) continue;
       const votingStake =
-        company.totalShares > 0 ? holderVotingShares(world, company.id, holder) / company.totalShares : 0;
+        company.totalShares > 0
+          ? holderVotingShares(world, company.id, holder) / company.totalShares
+          : 0;
       const atCap = votingStake >= config.investors.maxVotingStakeShare * 0.85;
+      const kind: 'voting' | 'nonVoting' = atCap ? 'nonVoting' : 'voting';
       const shareClass = world.securities.classes.find(
-        (candidate) =>
-          candidate.companyId === company.id && candidate.kind === (atCap ? 'nonVoting' : 'voting'),
+        (candidate) => candidate.companyId === company.id && candidate.kind === kind,
       );
       if (!shareClass) continue;
-      const price = round2(bookPrice(world, company) * (1 - config.investors.orderBidDiscount));
-      if (price <= 0) continue;
-      const shares = Math.floor((budget / 2) / price);
+      const plannedClassId = shareClass.id;
+      if (sellingClasses.has(plannedClassId)) continue; // 同一类别不双向挂单，避免自成交
+      const financials = financialsOf(world, company, plannedClassId, config);
+      if (!Number.isFinite(financials.price) || financials.price <= 0) continue;
+      // 低风险偏好更看重折价与盈利（价值），高风险偏好更愿意追趋势。
+      const valueWeight = 1 - risk * 0.5;
+      const trendWeight = risk * ai.riskWeight;
+      const score =
+        financials.valueGap * valueWeight +
+        clamp(financials.momentum, -0.3, 0.3) * trendWeight +
+        financials.profitYield * (0.2 + risk * 0.2) +
+        stableUnit(world.seed, tick, group.id, company.id, kind) * 0.01;
+      candidates.push({
+        company,
+        shareClassIdValue: plannedClassId,
+        kind,
+        financials,
+        score: round2(score),
+      });
+    }
+    candidates.sort(
+      (a, b) =>
+        b.score - a.score ||
+        a.company.id.localeCompare(b.company.id) ||
+        a.kind.localeCompare(b.kind),
+    );
+
+    let buyCount = 0;
+    let remainingBudget = budget;
+    for (const candidate of candidates) {
+      if (buyCount >= maxBuy || remainingBudget < 1) break;
+      const riskPremium = config.investors.orderBidDiscount * (1 - risk * ai.riskWeight);
+      const limitPrice = round2(candidate.financials.price * (1 - riskPremium));
+      if (!Number.isFinite(limitPrice) || limitPrice <= 0) continue;
+      // 第一笔用 60% 预算，第二笔用剩余；总额严格不超过 groupBudgetShare 预算。
+      const orderBudget =
+        buyCount === 0 && maxBuy > 1 ? round2(remainingBudget * 0.6) : remainingBudget;
+      let shares = Math.floor(orderBudget / limitPrice);
       if (shares < 1) continue;
-      if (!atCap) {
-        const projected =
-          company.totalShares > 0
-            ? (holderVotingShares(world, company.id, holder) + shares) / company.totalShares
-            : 0;
-        if (projected > config.investors.maxVotingStakeShare) continue;
+      if (candidate.kind === 'voting') {
+        const currentVoting = holderVotingShares(world, candidate.company.id, holder);
+        const maxByStake = Math.floor(
+          config.investors.maxVotingStakeShare * candidate.company.totalShares - currentVoting,
+        );
+        shares = Math.min(shares, Math.max(0, maxByStake));
+        if (shares < 1) continue;
       }
-      clearOrders(world, holder, shareClass.id, 'buy');
-      placeOrder(world, {
-        companyId: company.id,
-        shareClassId: shareClass.id,
+      const cost = round2(shares * limitPrice);
+      if (cost > remainingBudget + 0.01 || cost > group.cash + 0.01) continue;
+      clearOrders(world, holder, candidate.shareClassIdValue, 'buy');
+      const placed = placeOrder(world, {
+        companyId: candidate.company.id,
+        shareClassId: candidate.shareClassIdValue,
         side: 'buy',
         holder,
         shares,
-        limitPrice: price,
+        limitPrice,
         tick,
-        note: `${group.name} 自动投资（演示规则）`,
+        note: `${group.name} 自动投资（${candidate.kind === 'voting' ? '投票权' : '仅分红'}；折价 ${candidate.financials.valueGap.toFixed(3)}，最近利润 ${candidate.financials.profit.toFixed(0)}；演示规则）`,
       });
+      if (placed.ok) {
+        buyCount += 1;
+        remainingBudget = round2(remainingBudget - cost);
+      }
     }
   }
 }
 
 /**
  * 企业作为股票市场买方：只允许买入有投票权类别（用户已确认的规则）。
- * 演示中现金充裕的企业会小额买入其他城市的投票权股份。
+ *
+ * v0.8：只对真实财务允许的企业下单——现金需高于 companyReserveWageMonths 个月工资，
+ * 预算 = min(companyBudgetCap, 现金 × companyBudgetShare)；目标必须账面股权为正、
+ * 负债/权益不过高、最近利润非负（requireNonNegativeProfit），并用行情折价/趋势打分。
+ * 玩家经营的企业不参与 AI 下单（经营决策归玩家）。
  */
 export function planCompanyOrders(world: WorldState, config: DemoConfig, tick: number): void {
-  const rich = [...world.companies]
-    .filter((company) => company.cash > monthlyWageBill(company, config) * 3)
-    .sort((a, b) => b.cash - a.cash || a.id.localeCompare(b.id))
-    .slice(0, 3);
-  for (const company of rich) {
-    const candidates = [...world.companies]
-      .filter((candidate) => candidate.id !== company.id && candidate.totalShares > 0)
-      .sort((a, b) => a.id.localeCompare(b.id));
-    if (candidates.length === 0) continue;
-    const target = candidates[(tick + company.id.length) % candidates.length];
-    if (!target) continue;
-    const shareClass = world.securities.classes.find(
-      (candidate) => candidate.companyId === target.id && candidate.kind === 'voting',
+  const ai = config.securities.ai;
+  if (!ai.enabled) return;
+  const companies = [...world.companies].sort((a, b) => a.id.localeCompare(b.id));
+
+  for (const company of companies) {
+    if (isPlayerOperated(world, company.id)) continue;
+    const wage = monthlyWageBill(company, config);
+    if (company.cash <= wage * ai.companyReserveWageMonths) continue;
+    const budget = round2(
+      Math.min(ai.companyBudgetCap, company.cash * ai.companyBudgetShare),
     );
-    if (!shareClass) continue;
-    const holder: HolderRef = { type: 'company', id: company.id };
-    const price = round2(bookPrice(world, target) * 1.03);
-    const budget = Math.min(round2(company.cash * 0.05), 500_000);
-    const shares = Math.floor(budget / Math.max(0.01, price));
+    if (budget < 1) continue;
+
+    const candidates: PlannedCandidate[] = [];
+    for (const target of companies) {
+      if (target.id === company.id) continue;
+      if (target.totalShares <= 0) continue;
+      const shareClass = votingClassOf(world, target.id);
+      if (!shareClass) continue;
+      const financials = financialsOf(world, target, shareClass.id, config);
+      if (!Number.isFinite(financials.price) || financials.price <= 0) continue;
+      if (financials.equity <= 0) continue;
+      if (financials.debtRatio > 1.5) continue; // 高杠杆目标不做财务投资
+      if (ai.requireNonNegativeProfit && financials.profit < 0) continue;
+      const risk = company.ai?.style === 'growth' ? 1 : company.ai?.style === 'return' ? 0.2 : 0.5;
+      const score =
+        financials.valueGap * (1 - risk * 0.3) +
+        clamp(financials.momentum, -0.3, 0.3) * risk * ai.riskWeight +
+        financials.profitYield * 0.5 +
+        (1 - clamp(financials.debtRatio, 0, 1)) * 0.1 +
+        stableUnit(world.seed, tick, company.id, target.id) * 0.01;
+      candidates.push({
+        company: target,
+        shareClassIdValue: shareClass.id,
+        kind: 'voting',
+        financials,
+        score: round2(score),
+      });
+    }
+    if (candidates.length === 0) continue;
+    candidates.sort(
+      (a, b) => b.score - a.score || a.company.id.localeCompare(b.company.id),
+    );
+    const target = candidates[0]!;
+    // 企业买方对目标支付小额溢价（旧行为 3%），扩张型略高、回报型略低。
+    const premium =
+      company.ai?.style === 'growth' ? 0.04 : company.ai?.style === 'return' ? 0.02 : 0.03;
+    const limitPrice = round2(target.financials.price * (1 + premium));
+    if (!Number.isFinite(limitPrice) || limitPrice <= 0) continue;
+    const shares = Math.floor(budget / limitPrice);
     if (shares < 1) continue;
-    clearOrders(world, holder, shareClass.id, 'buy');
+    const holder: HolderRef = { type: 'company', id: company.id };
+    clearOrders(world, holder, target.shareClassIdValue, 'buy');
     placeOrder(world, {
-      companyId: target.id,
-      shareClassId: shareClass.id,
+      companyId: target.company.id,
+      shareClassId: target.shareClassIdValue,
       side: 'buy',
       holder,
       shares,
-      limitPrice: price,
+      limitPrice,
       tick,
-      note: `${company.name} 作为企业买方买入投票权股份（演示）`,
+      note: `${company.name} 作为企业买方买入 ${target.company.name} 投票权股份（账面折价 ${target.financials.valueGap.toFixed(3)}，最近利润 ${target.financials.profit.toFixed(0)}；演示）`,
     });
   }
 }

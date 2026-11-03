@@ -10,6 +10,7 @@ import { GOODS, RECIPES } from '../../data/demo-data';
 import { GOOD_IDS } from '../companies/company';
 import { clamp, round2 } from '../core/math';
 import { intracityDeliveryEfficiency } from '../transport/network';
+import { accrueConsumptionTax, splitConsumptionTax } from '../government/taxes';
 
 /**
  * 企业自用投入品不进入本月可售供应，避免同一批原料在月内被反复转卖，
@@ -53,6 +54,8 @@ export interface MarketLedger {
   externalExport: number;
   spend: number;
   transactionCount: number;
+  /** v0.8：本月本地居民消费成交额中的基准消费税（由税收模块结算时累加）。 */
+  consumptionTax: number;
 }
 
 export type CityLedgers = Record<GoodId, MarketLedger>;
@@ -78,6 +81,7 @@ export function createLedger(goodId: GoodId): MarketLedger {
     externalExport: 0,
     spend: 0,
     transactionCount: 0,
+    consumptionTax: 0,
   };
 }
 
@@ -161,6 +165,11 @@ export function executePurchase(
   desiredQty: number,
   maxSpend: number,
   options: { buyerCompanyId?: string; consumer?: boolean },
+  /**
+   * v0.8：传入配置后，居民最终消费按含税标价拆分消费税（卖方实收净额、税记入城市）；
+   * 企业采购不征消费税。省略时保持旧行为（供未迁移的调用点/测试使用）。
+   */
+  config?: DemoConfig,
 ): PurchaseResult {
   const ledger = ledgers[goodId];
   if (!ledger || desiredQty <= 0 || maxSpend <= 0) return { qty: 0, spend: 0 };
@@ -201,12 +210,19 @@ export function executePurchase(
     // ---- 提交点：以下变化要么全部发生，要么不发生 ----
     const currentStock = seller.company.inventory[goodId] ?? 0;
     if (qty > currentStock + 1e-6) continue;
+    // v0.8：居民消费的含税标价内已包含 5% 消费税。买方仍支付 finalCost（含税），
+    // 卖方现金/收入按净额入账，税单独累加并记入消费发生城市（不重复征税、不漏征）。
+    const consumerTax =
+      options.consumer && !buyer && config ? splitConsumptionTax(finalCost, config).tax : 0;
+    const sellerProceeds = round2(finalCost - consumerTax);
     seller.company.inventory[goodId] = round2(currentStock - qty);
     if (seller.company.inventory[goodId] < 0 && seller.company.inventory[goodId] > -1e-6) {
       seller.company.inventory[goodId] = 0;
     }
-    seller.company.cash = round2(seller.company.cash + finalCost);
-    seller.company.lastMonth.revenue = round2(seller.company.lastMonth.revenue + finalCost);
+    seller.company.cash = round2(seller.company.cash + sellerProceeds);
+    seller.company.lastMonth.revenue = round2(
+      seller.company.lastMonth.revenue + sellerProceeds,
+    );
     seller.company.lastMonth.sold = round2(
       seller.company.lastMonth.sold + (goodId === seller.company.recipeOutput ? qty : 0),
     );
@@ -222,8 +238,13 @@ export function executePurchase(
     }
 
     ledger.sold = round2(ledger.sold + qty);
+    // ledger.spend 保持买方含税实付口径（居民消费支出含税），税额另记 ledger.consumptionTax。
     ledger.spend = round2(ledger.spend + finalCost);
     ledger.transactionCount += 1;
+    if (consumerTax > 0) {
+      ledger.consumptionTax = round2(ledger.consumptionTax + consumerTax);
+      accrueConsumptionTax(world, city.id, consumerTax);
+    }
     bought += qty;
     spend += finalCost;
     remainingQty -= qty;
@@ -322,6 +343,7 @@ export function applyConsumerDemand(
   ledgers: CityLedgers,
   goodId: GoodId,
   desiredQty: number,
+  config?: DemoConfig,
 ): PurchaseResult {
   const ledger = ledgers[goodId];
   if (!ledger) return { qty: 0, spend: 0 };
@@ -329,9 +351,16 @@ export function applyConsumerDemand(
   const budget = desiredQty * price;
   ledger.consumerDemand = round2(ledger.consumerDemand + desiredQty);
   ledger.demand = round2(ledger.demand + desiredQty);
-  const result = executePurchase(world, city, ledgers, goodId, desiredQty, budget, {
-    consumer: true,
-  });
+  const result = executePurchase(
+    world,
+    city,
+    ledgers,
+    goodId,
+    desiredQty,
+    budget,
+    { consumer: true },
+    config,
+  );
   const unmet = Math.max(0, desiredQty - result.qty);
   if (unmet > 0) ledger.unmetDemand = round2(ledger.unmetDemand + unmet);
   return result;
@@ -385,6 +414,7 @@ export function finalizeMarkets(
         intercityImported: round2(ledger.intercityImported),
         externalExport: round2(ledger.externalExport),
         closingStock,
+        consumptionTax: round2(ledger.consumptionTax),
         lastPriceChangePct: oldPrice === 0 ? 0 : round2((newPrice / oldPrice - 1) * 10000) / 100,
       };
       city.market[goodId] = next;

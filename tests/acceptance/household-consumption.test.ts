@@ -13,6 +13,7 @@ import {
 import { householdGroupsOfCity } from '../../src/simulation/population/household-groups';
 import { depositAccountFor } from '../../src/simulation/banking/banking';
 import type { HouseholdGroup, WorldState } from '../../src/simulation/contracts/types';
+import { taxAccrualOf } from '../../src/simulation/government/taxes';
 import { cityById, newWorld } from './helpers';
 
 const BUDGET = DEMO_CONFIG.households.consumerBudget;
@@ -222,13 +223,22 @@ describe('AC-D08 确定性', () => {
 });
 
 describe('AC-D09 消费不创造资金', () => {
-  it('全群体成交后世界总现金不变（现金只在群体→卖方之间转移）', () => {
+  it('私人现金减少额=消费税额；含应缴未缴税的世界总资金守恒', () => {
     const world = newWorld(0);
     for (const good of CONSUMER_GOODS) stockInventory(world, 'lanport', good, 50_000);
     const group = pickGroup(world);
     group.cash = 10_000;
     group.lastMonth.income = 5_000;
-    const before = totalCash(world);
+    // 私人部门：居民群体 + 企业 + 玩家（不含政府）。
+    const privateCash = () =>
+      Math.round(
+        (world.households.groups.reduce((sum, entry) => sum + entry.cash, 0) +
+          world.companies.reduce((sum, company) => sum + company.cash, 0) +
+          world.player.cash) *
+          100,
+      ) / 100;
+    const beforePrivate = privateCash();
+    const beforeTotal = totalCash(world);
     const ledgers = createWorldLedgers(world);
     const result = runConsumerMarket(
       world,
@@ -237,6 +247,23 @@ describe('AC-D09 消费不创造资金', () => {
       NO_LOAN_NO_INTERCITY,
     );
     expect(result.spend).toBeGreaterThan(0);
-    expect(totalCash(world)).toBeCloseTo(before, 2);
+
+    // v0.8：含税标价，买方支付含税额、卖方按净额入账；5% 税先计入“应缴未缴”累计，
+    // 月末由 settleCityTaxes 转入城市财政。因此私人现金减少额恰为消费税额。
+    const accruedTax = world.cities.reduce(
+      (sum, city) => sum + taxAccrualOf(world, city.id).consumptionTax,
+      0,
+    );
+    expect(accruedTax).toBeGreaterThan(0);
+    expect(round2(beforePrivate - privateCash())).toBeCloseTo(
+      round2(result.spend * DEMO_CONFIG.tax.consumptionTaxRate),
+      2,
+    );
+    // 把“应缴未缴税”视为政府债权后，世界总资金（居民+企业+玩家+财政+应缴税）守恒。
+    expect(totalCash(world) + accruedTax).toBeCloseTo(beforeTotal, 2);
   });
 });
+
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
+}

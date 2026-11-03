@@ -75,7 +75,7 @@ function seedSecurities(world: WorldState, companyId: string, entries: HoldingSp
       });
     }
   }
-  world.securities = { classes, holdings, orders: [], lastTrades: [], offers: [] };
+  world.securities = { classes, holdings, orders: [], lastTrades: [], offers: [], history: [] };
 }
 
 function seedInvestors(world: WorldState): void {

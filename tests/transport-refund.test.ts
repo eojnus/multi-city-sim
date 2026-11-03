@@ -19,6 +19,7 @@ import { runConsumerMarket } from '../src/simulation/markets/consumer';
 import { householdGroupsOfCity } from '../src/simulation/population/household-groups';
 import { householdConsumerBudgetSnapshot } from '../src/simulation/population/household-finance';
 import { round2 } from '../src/simulation/core/math';
+import { splitConsumptionTax, taxAccrualOf } from '../src/simulation/government/taxes';
 import { appointPlayerMayor } from '../src/simulation/politics/politics';
 import { migrateLegacyCompanyDebt } from '../src/simulation/banking/banking';
 
@@ -329,7 +330,17 @@ describe('修复三：跨城超载结算的买卖双方资金流', () => {
       Math.max(0, 10_160 - (trade.buyerRefund ?? 0)),
       2,
     );
-    expect(seller.cash).toBeCloseTo(trade.sellerProceeds, 2);
+    // v0.8：买方支付额保持含税（净支付 = 成交额 − 退款），税从卖方所得中代扣 5%。
+    const netPaid = round2(purchase.spend - (trade.buyerRefund ?? 0));
+    const tax = splitConsumptionTax(trade.sellerProceeds, DEMO_CONFIG).tax;
+    expect(netPaid).toBeCloseTo(trade.sellerProceeds, 2);
+    expect(seller.cash).toBeCloseTo(round2(trade.sellerProceeds - tax), 2);
+    expect(tax).toBeCloseTo(round2(netPaid * DEMO_CONFIG.tax.consumptionTaxRate), 2);
+    // 税记到消费发生城市（买方城市）的账本与本月累计。
+    expect(ledgers.lanport!.grain.spend).toBeCloseTo(netPaid, 2);
+    expect(ledgers.lanport!.grain.consumptionTax).toBeCloseTo(tax, 2);
+    expect(taxAccrualOf(world, city.id).consumptionTax).toBeCloseTo(tax, 2);
+    expect(taxAccrualOf(world, seller.cityId).consumptionTax).toBe(0);
     const control = structuredClone(world);
     const finance = {
       investorDividendsByCity: {}, investorDistributionByCity: {}, cityDividendsByCity: {},

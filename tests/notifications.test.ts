@@ -21,7 +21,7 @@ import type { ShareKind, WorldState } from '../src/simulation/contracts/types';
 function freshWorld(): WorldState {
   const world = Simulation.create().state;
   if (!world.securities) {
-    world.securities = { classes: [], holdings: [], orders: [], lastTrades: [], offers: [] };
+    world.securities = { classes: [], holdings: [], orders: [], lastTrades: [], offers: [], history: [] };
   }
   if (!world.notifications) world.notifications = [];
   if (!world.governance) world.governance = { boards: [], motions: [], controls: [] };

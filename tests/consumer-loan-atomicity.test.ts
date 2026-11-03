@@ -210,7 +210,11 @@ describe('居民消费贷与商品成交原子一致（验收问题 3）', () =>
     const revenueAfter = world.companies
       .filter((company) => company.cityId === city.id)
       .reduce((total, company) => total + company.lastMonth.revenue, 0);
-    expect(revenueAfter - revenueBefore).toBeCloseTo(financed, 2);
+    // v0.8：居民消费含税标价，卖方按 95% 净额入账（税 5% 归消费城市财政）。
+    expect(revenueAfter - revenueBefore).toBeCloseTo(
+      round2(financed * (1 - CONFIG.tax.consumptionTaxRate)),
+      2,
+    );
   });
 
   it('实际成交额低于单笔最低贷款额时不得放款、不得成交', () => {

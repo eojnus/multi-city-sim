@@ -5,6 +5,8 @@ import type { FinanceResult } from '../finance/finance';
 import { recordFiscal } from './treasury';
 import { applyHouseholdIncome } from '../population/household-economy';
 import type { HouseholdRefundAllocation } from '../transport/settlement';
+import { settleCityTaxes, transportTaxFactorFor } from './taxes';
+import type { TransportTaxFactor } from './taxes';
 
 /**
  * 城市财政与居民收入。个人所得税从工资中扣除，企业所得税进入财政；
@@ -19,6 +21,11 @@ export function settleGovernment(
   config: DemoConfig,
   log: LogEntry[],
   householdRefunds: Readonly<Record<string, number | HouseholdRefundAllocation>> = {},
+  /**
+   * v0.8：本月各城使用的交通税收系数。必须由调用方在 settleTransportMonth 覆盖
+   * world.transport.lastMonth 之前用上一完整月数据算好；缺省时退回当前运输统计（仅兼容直接调用）。
+   */
+  transportTax?: Readonly<Record<string, TransportTaxFactor>>,
 ): void {
   for (const city of [...world.cities].sort((a, b) => a.id.localeCompare(b.id))) {
     const privateWages = finance.privateWagesByCity[city.id] ?? 0;
@@ -33,10 +40,20 @@ export function settleGovernment(
     const publicIncomeTax = round2(publicGross * city.incomeTaxRate);
     const incomeTax = round2(privateIncomeTax + publicIncomeTax);
 
+    // v0.8：四种税统一由税收模块结算（应用交通系数、写财政流水与月度记录、清零本月累计）。
+    // 基准税额 = 纳税人按税法实际承担的税（个税/企业所得税口径保持不变，不因加成/损耗补缴或退款）；
+    // 政府实际入账 = 基准 × 系数，差额分列为交通财政加成/征收损耗。
+    const factorInfo = transportTax?.[city.id] ?? transportTaxFactorFor(world, city.id, config);
+    settleCityTaxes(
+      world,
+      city,
+      { incomeTaxBase: incomeTax, corporateTaxBase: corporateTax },
+      factorInfo,
+      config,
+      world.time.tick,
+    );
+    // settleCityTaxes 已把税收入账到 city.treasury；这里继续扣公共部门工资与福利。
     let treasury = city.treasury;
-    receiveFiscal(world, city, incomeTax, 'incomeTax', `个人所得税（${city.name}）`, config);
-    receiveFiscal(world, city, corporateTax, 'corporateTax', `企业所得税（${city.name}）`, config);
-    treasury = round2(treasury + incomeTax + corporateTax);
     treasury = round2(treasury - publicGross);
     recordFiscal(
       world,
@@ -139,22 +156,6 @@ function householdRefundParts(refund: number | HouseholdRefundAllocation | undef
     total,
     allocation: Math.abs(byGroupTotal - total) <= 0.005 ? byGroup : total,
   };
-}
-
-function receiveFiscal(
-  world: WorldState,
-  city: City,
-  amount: number,
-  kind: 'incomeTax' | 'corporateTax',
-  source: string,
-  config: DemoConfig,
-): void {
-  if (amount <= 0) return;
-  recordFiscal(
-    world,
-    { tick: world.time.tick, cityId: city.id, kind, amount, source },
-    config,
-  );
 }
 
 export function recordMigrationReports(world: WorldState, city: City): void {

@@ -37,6 +37,8 @@ import {
 import { createInitialBanking } from '../banking/banking';
 import { laborCapacity } from '../production/production';
 import { createInitialManagement } from '../management/manager-pool';
+import { createEmptyTaxState } from '../government/taxes';
+import { ensureStockHistory } from '../securities/history';
 
 function createMarket(): Record<GoodId, MarketState> {
   const market = {} as Record<GoodId, MarketState>;
@@ -55,6 +57,7 @@ function createMarket(): Record<GoodId, MarketState> {
       intercityImported: 0,
       externalExport: 0,
       closingStock: 0,
+      consumptionTax: 0,
       lastPriceChangePct: 0,
     };
   }
@@ -307,7 +310,7 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
       roles: { mayorCityId: null },
       note: config.player.note,
     },
-    securities: { classes: [], holdings: [], orders: [], lastTrades: [], offers: [] },
+    securities: { classes: [], holdings: [], orders: [], lastTrades: [], offers: [], history: [] },
     governance: { boards: [], motions: [], controls: [] },
     investors: [],
     agreements: [],
@@ -333,6 +336,8 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
     // v0.7：债券与居民消费金融全新建账（空账本；迁移旧档时同样为空+迁移日志）。
     bonds: createEmptyBondState(),
     householdFinance: createEmptyHouseholdFinanceState(),
+    // v0.8：税收账本（空账本；旧档迁移时同样为空，不补记过去税额）。
+    taxes: createEmptyTaxState(),
     history: [],
     log: [],
     lastTick: {
@@ -347,6 +352,8 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
   // 居民投资实体：先建立资金来源，再发行股份给出资方。
   createInvestorGroups(world, config);
   createInitialShareStructure(world, config);
+  // v0.8：为每个股份类别建立空的月度行情容器；新世界首月前显示“暂无数据”，不虚构 K 线。
+  ensureStockHistory(world);
 
   // v0.4：居民群体（人口/收入/资产承载）、经营者（沿用原企业风格）、银行（空账本）。
   world.households = createInitialHouseholds(world, config);

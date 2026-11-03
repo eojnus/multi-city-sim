@@ -17,6 +17,7 @@ import {
 } from './network';
 import { intercityTradeSupportPayment } from '../policies/policies';
 import { householdGroupsOfCity } from '../population/household-groups';
+import { accrueConsumptionTax, splitConsumptionTax } from '../government/taxes';
 import { allocateMoney } from '../population/household-economy';
 
 /**
@@ -183,10 +184,23 @@ export function settleTransportMonth(
         continue;
       }
 
-      seller.cash = round2(seller.cash + proceeds);
-      seller.lastMonth.revenue = round2(seller.lastMonth.revenue + proceeds);
+      // v0.8：居民跨城消费按“最终消费者实付”（容量退款后的 proceeds）计 5% 消费税，
+      // 税归买方城市（消费发生地），卖方实收净额；企业间交易不征消费税。
+      // 退款已先冲减买方消费支出/账本支出，因此以净支付为税基不会重复征或漏征。
+      const householdSale = sale.buyerCompanyId === 'households';
+      const consumptionTax = householdSale ? splitConsumptionTax(proceeds, config).tax : 0;
+      const sellerNet = round2(proceeds - consumptionTax);
+      seller.cash = round2(seller.cash + sellerNet);
+      seller.lastMonth.revenue = round2(seller.lastMonth.revenue + sellerNet);
       if (sale.good === seller.recipeOutput) {
         seller.lastMonth.exported = round2(seller.lastMonth.exported + sale.qty);
+      }
+      if (consumptionTax > 0) {
+        accrueConsumptionTax(world, sale.toCityId, consumptionTax);
+        const buyerLedger = ledgers[sale.toCityId]?.[sale.good];
+        if (buyerLedger) {
+          buyerLedger.consumptionTax = round2(buyerLedger.consumptionTax + consumptionTax);
+        }
       }
 
       // 【暂定】容量不足时把差额退回买方：买方此前按原价付款，期末净支付应等于卖方所得。
@@ -218,6 +232,10 @@ export function settleTransportMonth(
         good: sale.good,
         qty: sale.qty,
         grossValue: gross,
+        // sellerProceeds 保持“容量结算后、税前”的卖方所得，满足
+        // grossValue = sellerProceeds + buyerRefund 的跨城账目恒等式（不变量校验）。
+        // 消费税另从卖方实收中代扣并计入买方城市，故 seller.cash 实收为
+        // sellerProceeds − consumptionTax。
         sellerProceeds: proceeds,
         capacityLoss: loss,
         buyerRefund,

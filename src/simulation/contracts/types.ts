@@ -2,8 +2,8 @@
 // 这些类型描述的是“演示方案 v0.2”的数据结构，不代表最终策划规则。
 // v0.2 新增证券/治理/居民投资/协议/通知数据；旧 v1 存档由 core/save.ts 迁移。
 
-export const SAVE_FORMAT_VERSION = 7;
-export const GAME_VERSION = '0.7.2';
+export const SAVE_FORMAT_VERSION = 8;
+export const GAME_VERSION = '0.8.0';
 
 export type GoodId =
   | 'grain'
@@ -164,6 +164,8 @@ export interface MarketState {
   externalExport: number;
   closingStock: number;
   lastPriceChangePct: number;
+  /** v0.8：本月居民消费实际成交额中包含的消费税（基准税额，含税标价内 5%）。 */
+  consumptionTax: number;
 }
 
 export interface PopulationState {
@@ -256,6 +258,16 @@ export interface CityMonthlyReport {
   /** 本月债务/GDP 判定值与分母。 */
   debtRatioAtMonthEnd?: number;
   gdpJudgementValue?: number;
+  /**
+   * v0.8：本月税收（基准税额与实际入账）。
+   * 基准税额 = 纳税人按税法实际承担的税额；实际入账 = 基准 × 交通税收系数。
+   * 差额分列为交通财政加成 / 交通征收损耗（游戏化调整，不由纳税人补缴或退款）。
+   */
+  consumptionTax?: number;
+  dividendTax?: number;
+  transportTaxFactor?: number;
+  transportTaxBonus?: number;
+  transportTaxLoss?: number;
   note: string;
 }
 
@@ -493,6 +505,35 @@ export interface StockTrade {
   origin: 'secondary' | 'primary';
 }
 
+/** v0.8：单个股份类别、单个游戏月的真实成交行情（K 线）。 */
+export interface StockCandle {
+  /** 游戏月（结算 tick）。 */
+  tick: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  /** 本月成交股数。 */
+  volume: number;
+  /** 本月成交笔数。 */
+  trades: number;
+}
+
+/**
+ * v0.8：股份类别的月度行情历史。
+ * 只记录真实成交（二级市场撮合与玩家手动成交），不写入账面参考价或挂单价；
+ * 某月无成交时不生成 K 线（读档/新功能启用前显示“暂无数据”）。
+ */
+export interface StockClassHistory {
+  shareClassId: string;
+  companyId: string;
+  kind: ShareKind;
+  /** 按 tick 升序；保留最近 config.securities.historyMonths 根。 */
+  candles: StockCandle[];
+  /** 最近一次真实成交（可跨月），用于“最近成交价”；无成交时缺省。 */
+  lastTrade?: { tick: number; price: number; shares: number };
+}
+
 export interface FinancingOffer {
   id: string;
   companyId: string;
@@ -514,6 +555,8 @@ export interface SecuritiesState {
   /** 最近一个结算月成交的股票交易，供界面与审计。 */
   lastTrades: StockTrade[];
   offers: FinancingOffer[];
+  /** v0.8：按股份类别保存的月度 K 线（真实成交，不虚构历史）。 */
+  history: StockClassHistory[];
 }
 
 // ---------------------------------------------------------------- 董事会与治理
@@ -793,7 +836,12 @@ export interface FiscalEntry {
     | 'bondInterest'
     | 'bondPrincipal'
     | 'bankAdvance'
-    | 'debtWriteOff';
+    | 'debtWriteOff'
+    // v0.8：消费税、股息税与交通税收调整（游戏化财政加成/损耗）。
+    | 'consumptionTax'
+    | 'dividendTax'
+    | 'transportTaxBonus'
+    | 'transportTaxLoss';
   /** 正数为财政收入，负数为财政支出。 */
   amount: number;
   source: string;
@@ -1885,6 +1933,8 @@ export interface WorldState {
   bonds?: BondState;
   /** v0.7：居民消费预算快照与居民群体消费贷款账本。 */
   householdFinance: HouseholdFinanceState;
+  /** v0.8：消费税、股息税、交通税收系数与月度税收记录。 */
+  taxes: TaxState;
   history: WorldHistoryPoint[];
   log: LogEntry[];
   lastTick: {
@@ -1901,6 +1951,45 @@ export interface SaveFile {
   gameVersion: string;
   savedAt: string;
   world: WorldState;
+}
+
+// ---------------------------------------------------------------- v0.8 税收
+
+/** 本月尚未做交通系数调整的基准税额（消费发生地归属）。 */
+export interface CityTaxAccrual {
+  consumptionTax: number;
+  dividendTax: number;
+}
+
+/** 单城单月的税收结算记录（市长可见；非市长只能看到公开财政白名单）。 */
+export interface CityTaxMonth {
+  tick: number;
+  /** 四种税的基准税额（纳税人实际承担）。 */
+  incomeTaxBase: number;
+  corporateTaxBase: number;
+  consumptionTaxBase: number;
+  dividendTaxBase: number;
+  /** 上一个月真实城内配送数据得到的交通保障率（0–1）与税收系数（0.5–1.5）。 */
+  transportGuarantee: number;
+  transportFactor: number;
+  /** 四种税按系数调整后的实际入账。 */
+  incomeTaxRevenue: number;
+  corporateTaxRevenue: number;
+  consumptionTaxRevenue: number;
+  dividendTaxRevenue: number;
+  /** 系数 >1 时的加成合计（系统注入，不向纳税人补收）。 */
+  transportBonus: number;
+  /** 系数 <1 时的损耗合计（基准税额未进入政府的部分，不退还纳税人）。 */
+  transportLoss: number;
+  totalBase: number;
+  totalRevenue: number;
+}
+
+export interface TaxState {
+  /** 本月待结算的基准税额；财政月结时清零。 */
+  accrualByCity: Record<string, CityTaxAccrual>;
+  /** 各城最近若干月的税收结算记录（按 tick 升序）。 */
+  historyByCity: Record<string, CityTaxMonth[]>;
 }
 
 export interface SaveSlotInfo {
