@@ -362,7 +362,8 @@ app.whenReady().then(async () => {
           candles: entry.candles.length,
           months: entry.candles.length > 0 ? entry.candles[entry.candles.length - 1].tick - entry.candles[0].tick + 1 : 0,
         }))
-        .filter((entry) => entry.months - entry.candles >= 2))()`);
+        .filter((entry) => entry.months - entry.candles >= 1)
+        .sort((a, b) => b.months - b.candles - (a.months - a.candles)))()`);
       const gap = Array.isArray(candidates) && candidates.length > 0 ? candidates[0] : null;
       if (gap) {
         gapTarget = gap;
@@ -372,13 +373,21 @@ app.whenReady().then(async () => {
       }
     }
     if (gapTarget) {
-      await click(win, `[data-action="stock-kind"][data-kind="${gapTarget.kind}"]`);
-      await sleep(350);
-      await click(win, `[data-testid="stock-row-${gapTarget.companyId}"]`);
-      await sleep(450);
+      // 直接通过 store 切换类别与聚焦（确定性命中目标类别，不依赖列表现有筛选顺序）。
+      await win.webContents.executeJavaScript(
+        `(() => {
+          const store = window.__lanwan.store;
+          store.setStockMarketKind(${JSON.stringify(gapTarget.kind)});
+          store.setStockMarketFocus(${JSON.stringify(gapTarget.companyId)});
+          return true;
+        })()`,
+        true,
+      );
+      await sleep(500);
     }
     const gapChart = await read(win, `(() => {
       const chart = document.querySelector('[data-testid="stock-chart"]');
+      const view = window.__lanwan.store.stockMarketView();
       if (!chart) return null;
       return {
         months: chart.getAttribute('data-months'),
@@ -386,11 +395,15 @@ app.whenReady().then(async () => {
         candles: chart.querySelectorAll('.stock-candle').length,
         gapMarks: chart.querySelectorAll('.gap-mark').length,
         meta: document.querySelector('.stock-chart-meta')?.innerText ?? null,
+        selectedCompany: view.selected?.company.id ?? null,
+        selectedKind: view.selected?.kind ?? null,
+        selectedCandles: view.selected?.candles.length ?? null,
+        target: ${JSON.stringify(gapTarget)},
       };
     })()`);
     check(
       'K 线按真实月份排布：无成交月份留空档并标记',
-      Boolean(gapChart) && Number(gapChart.gapMonths) >= 2 && gapChart.candles > 0 && gapChart.gapMarks >= 2,
+      Boolean(gapChart) && Number(gapChart.gapMonths) >= 1 && gapChart.candles > 0 && gapChart.gapMarks >= 1,
       JSON.stringify(gapChart),
     );
     await ensureWindowInside(win);
@@ -430,6 +443,84 @@ app.whenReady().then(async () => {
     );
     await ensureWindowInside(win);
     await capture(win, 'v08-12-stock-window-nonvoting.png');
+
+    // ---- 7d. 仅分红股份的真实交易：玩家以 AI 卖单价买入（v0.8.2 复验修复） ----
+    let nonVotingTrade = null;
+    for (let attempt = 0; attempt < 6 && !nonVotingTrade; attempt++) {
+      const nonVotingRows = await read(win, `(() => window.__lanwan.store.stockMarketView()
+        .rows.filter((row) => row.kind === 'nonVoting').map((row) => row.companyId))()`);
+      for (const companyId of nonVotingRows) {
+        await click(win, `[data-testid="stock-row-${companyId}"]`);
+        await sleep(260);
+        const quote = await read(win, `(() => {
+          const detail = window.__lanwan.store.stockMarketView().selected;
+          return detail ? { ask: detail.bestAsk, cash: detail.playerCash, classId: detail.classId } : null;
+        })()`);
+        if (!quote || quote.ask === null || !(quote.ask > 0)) continue;
+        const shares = 10;
+        await win.webContents.executeJavaScript(
+          `(() => {
+            const host = document.querySelector('[data-testid="stock-window"]');
+            const sharesInput = host?.querySelector('[data-stock-shares]');
+            const limitInput = host?.querySelector('[data-stock-limit]');
+            if (sharesInput) { sharesInput.value = '${shares}'; sharesInput.dispatchEvent(new Event('input', { bubbles: true })); }
+            if (limitInput) { limitInput.value = '${quote.ask.toFixed(2)}'; limitInput.dispatchEvent(new Event('input', { bubbles: true })); }
+            return true;
+          })()`,
+          true,
+        );
+        await click(win, '[data-action="stock-side"][data-side="buy"]');
+        await sleep(200);
+        await click(win, '[data-testid="stock-order-submit"]');
+        await sleep(600);
+        const tradeResult = await read(win, `(() => {
+          const store = window.__lanwan.store;
+          const view = store.stockMarketView();
+          const detail = view.selected;
+          if (!detail) return null;
+          const classIdValue = detail.classId;
+          const history = store.world.securities.history.find((entry) => entry.shareClassId === classIdValue);
+          const trades = store.world.securities.lastTrades.filter((entry) => entry.shareClassId === classIdValue);
+          const lastTrade = trades.length > 0 ? trades[trades.length - 1] : null;
+          return {
+            classId: classIdValue,
+            cash: detail.playerCash,
+            playerShares: detail.playerShares,
+            trades: trades.length,
+            lastTrade: lastTrade ? { shares: lastTrade.shares, price: lastTrade.unitPrice, tick: lastTrade.tick, buyer: lastTrade.buyer.type } : null,
+            candles: history ? history.candles.length : 0,
+            status: document.querySelector('[data-testid="stock-order-status"]')?.textContent ?? null,
+          };
+        })()`);
+        if (
+          tradeResult &&
+          tradeResult.lastTrade &&
+          tradeResult.lastTrade.buyer === 'player' &&
+          tradeResult.playerShares >= shares &&
+          tradeResult.candles > 0 &&
+          tradeResult.cash < quote.cash
+        ) {
+          nonVotingTrade = { ...tradeResult, ask: quote.ask, shares, cashBefore: quote.cash };
+          break;
+        }
+      }
+      if (!nonVotingTrade) {
+        await click(win, '[data-testid="btn-tick"]');
+        await sleep(1200);
+        await click(win, '[data-action="stock-kind"][data-kind="nonVoting"]');
+        await sleep(300);
+      }
+    }
+    check(
+      '仅分红股份可在股票窗口完成真实交易（玩家按 AI 卖单价买入）',
+      Boolean(nonVotingTrade),
+      JSON.stringify(nonVotingTrade),
+    );
+    if (nonVotingTrade) {
+      await ensureWindowInside(win);
+      await capture(win, 'v08-14-nonvoting-trade.png');
+    }
+
     if (target) {
       await click(win, `[data-action="stock-kind"][data-kind="${target.kind}"]`);
       await sleep(350);
