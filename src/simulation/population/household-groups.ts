@@ -23,6 +23,7 @@ import { clamp, round2 } from '../core/math';
 import { companySharePrice, occupationWageRate } from '../companies/company';
 import { cityMarketPrices } from '../markets/markets';
 import { depositAccountFor, ensureDepositAccount } from '../banking/banking';
+import { reallocateHouseholdDebtsForGroupChange } from './household-finance';
 
 /** 职业类别的固定顺序（确定性遍历与展示顺序）。 */
 export const OCCUPATIONS: OccupationClass[] = [
@@ -331,6 +332,9 @@ export function syncHouseholdPeople(world: WorldState, config: DemoConfig): void
     }
 
     // 人数统一按权威数据写回（资产转移只发生在有人数增加时）。
+    // 债务与现金/存款同一套人数口径：按人均把消费贷未偿本金/欠息转移到新增人数的群体；
+    // 群体人数归零且无接收方时按兜底规则并组或显式隔离（见 reallocateHouseholdDebtsForGroupChange）。
+    reallocateHouseholdDebtsForGroupChange(world, config, city.id, targets);
     for (const group of groups) {
       group.people = targets.get(group.occupation) ?? 0;
     }

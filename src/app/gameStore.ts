@@ -57,6 +57,7 @@ import {
   visibleNotifications as filterVisibleNotifications,
 } from '../simulation/government/fiscal-view';
 import {
+  bondSubscriptionCloseTick,
   issueGovernmentBond,
   subscribeGovernmentBond,
 } from '../simulation/government/bonds';
@@ -159,20 +160,28 @@ const SAVE_SLOTS: { slot: string; label: string }[] = [
   { slot: 'manual-3', label: '手动存档 3' },
 ];
 
-/** 公开破产事件摘要（渲染用；不含市长专属财政口径）。 */
+/**
+ * 公开破产事件摘要（渲染用）。
+ *
+ * 权限口径（v0.7 验收问题 5）：破产事实、处置流程、重选结果与股份托管对所有人公开；
+ * 但政府具体兑付/垫付/勾销金额、未清偿利息与债务率仅该城市**现任市长**可见。
+ * 非市长渲染时金额为 null、note 不含财政数字，个人持债兑付记录请看 ownBondHoldings。
+ */
 export interface PublicBankruptcyNotice {
   cityId: string;
   status: 'solvent' | 'bankrupt';
   tick: number | null;
   caretakerUntilElection: boolean;
   electionTriggeredTick: number | null;
-  bondsRedeemedPrincipal: number;
-  bondsRedeemedInterest: number;
-  bondRedemptionCount: number;
-  bankAdvanceCreated: number;
-  bankLoansWrittenOff: number;
-  advancesWrittenOff: number;
-  interestWrittenOff: number;
+  /** 当前查看者是否为该城市现任市长（决定金额明细是否可见）。 */
+  detailsVisible: boolean;
+  bondsRedeemedPrincipal: number | null;
+  bondsRedeemedInterest: number | null;
+  bondRedemptionCount: number | null;
+  bankAdvanceCreated: number | null;
+  bankLoansWrittenOff: number | null;
+  advancesWrittenOff: number | null;
+  interestWrittenOff: number | null;
   note: string;
   trustHoldings: { companyId: string; companyName: string; shares: number }[];
 }
@@ -650,20 +659,25 @@ export class GameStore {
         companyName: this.world.companies.find((company) => company.id === holding.companyId)?.name ?? holding.companyId,
         shares: holding.shares,
       }));
+    // 金额明细仅该城市现任市长可见；事实、流程与重选结果对所有人公开。
+    const detailsVisible = this.viewer.mayorCityId === cityId;
     return {
       cityId,
       status,
       tick: record?.tick ?? government?.bankruptcy?.tick ?? null,
       caretakerUntilElection: record?.caretakerUntilElection ?? false,
       electionTriggeredTick: record?.electionTriggeredTick ?? null,
-      bondsRedeemedPrincipal: record?.bondsRedeemedPrincipal ?? 0,
-      bondsRedeemedInterest: record?.bondsRedeemedInterest ?? 0,
-      bondRedemptionCount: record?.bondRedemptionCount ?? 0,
-      bankAdvanceCreated: record?.bankAdvanceCreated ?? 0,
-      bankLoansWrittenOff: record?.bankLoansWrittenOff ?? 0,
-      advancesWrittenOff: record?.advancesWrittenOff ?? 0,
-      interestWrittenOff: record?.interestWrittenOff ?? 0,
-      note: record?.note ?? '',
+      detailsVisible,
+      bondsRedeemedPrincipal: detailsVisible ? record?.bondsRedeemedPrincipal ?? 0 : null,
+      bondsRedeemedInterest: detailsVisible ? record?.bondsRedeemedInterest ?? 0 : null,
+      bondRedemptionCount: detailsVisible ? record?.bondRedemptionCount ?? 0 : null,
+      bankAdvanceCreated: detailsVisible ? record?.bankAdvanceCreated ?? 0 : null,
+      bankLoansWrittenOff: detailsVisible ? record?.bankLoansWrittenOff ?? 0 : null,
+      advancesWrittenOff: detailsVisible ? record?.advancesWrittenOff ?? 0 : null,
+      interestWrittenOff: detailsVisible ? record?.interestWrittenOff ?? 0 : null,
+      note: detailsVisible
+        ? record?.note ?? ''
+        : '破产处置金额、政府债务口径与财政流水仅该城市现任市长可见；破产事实与重选结果公开，个人持债兑付记录可在债券市场查看。',
       trustHoldings,
     };
   }
@@ -1239,7 +1253,10 @@ export class GameStore {
       this.emit();
       return false;
     }
-    this.toast(`已发起债券发行：计划 ${planUnits} 份，等待认购。`, 'success');
+    this.toast(
+      `已发起债券发行：计划 ${planUnits} 份；认购窗口为发行当月（下一次月结关闭），居民投资实体与企业会在窗口关闭前用自身资金认购剩余份数。`,
+      'success',
+    );
     void this.autosave();
     this.emit();
     return true;
@@ -1269,8 +1286,13 @@ export class GameStore {
       return false;
     }
     const partial = result.units < units ? `（申请 ${units} 份，按可成交部分成交）` : '';
+    const issuance = this.world.bonds?.issuances.find((entry) => entry.id === issuanceId);
+    const windowNote =
+      issuance && issuance.status === 'offering'
+        ? `；认购窗口至 ${bondSubscriptionCloseTick(issuance)}（下一次月结关闭）`
+        : '';
     this.toast(
-      `认购成功：${result.units} 份，实付 ${result.principal.toFixed(0)} 信用点${partial}。`,
+      `认购成功：${result.units} 份，实付 ${result.principal.toFixed(0)} 信用点${partial}${windowNote}。`,
       'success',
     );
     void this.autosave();

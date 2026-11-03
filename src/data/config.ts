@@ -644,6 +644,25 @@ export const DEMO_CONFIG = {
       topUpToExpenseMonths: 1.0,
       /** 债务/GDP 达到该比例后不再新发债（与破产线一致）。 */
       maxDebtRatioToIssue: 1.0,
+      /**
+       * v0.7 验收问题 7：本月存在**债券**到期本金/票息时是否禁止新发（禁借新还旧核心）。
+       * 默认 true：保持 #29 借新还旧约束。债券到期本息是集中兑付，靠新债滚动会掩盖偿付能力。
+       */
+      blockIssuanceOnBondService: true,
+      /**
+       * v0.7 验收问题 7：本月存在**政府贷款常规分期**时是否禁止新发。
+       * 默认 false：赤字转贷（borrowForGovernment）每月都有分期到期，旧口径（true）会让
+       * hasDebtServiceDueThisTick 恒真，破产/赤字后 AI 永久停发、只能靠贷款滚动。
+       * 贷款分期属常规偿债，不构成"借新还旧"；破产门槛（债务/GDP ≥ 100%）仍独立生效。
+       */
+      blockIssuanceOnLoanInstalment: false,
+      /**
+       * v0.7 验收问题 7：破产后恢复发债的门槛。true 时，若最近破产记录进入看守期
+       * （caretakerUntilElection），必须在该记录之后完成一次重选才恢复发债；
+       * 破产状态未解除（status==='bankrupt'）时始终禁止，不受本开关影响。
+       * 影响面：只影响 AI 发债时点，不取消债务、不修改破产判定、不允许银行买债。
+       */
+      requireElectionAfterBankruptcy: true,
     },
     /** 应付项保留月数（同月幂等与审计）。 */
     payableRetentionMonths: 24,

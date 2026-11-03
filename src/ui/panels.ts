@@ -1120,7 +1120,7 @@ export function renderMayorFiscalPanel(store: GameStore, city: City): string {
 
   const issuanceRows =
     view.issuances.length === 0
-      ? '<tr><td colspan="8" class="fiscal-empty-cell">尚未发行债券。</td></tr>'
+      ? '<tr><td colspan="9" class="fiscal-empty-cell">尚未发行债券。</td></tr>'
       : view.issuances
           .map(
             (issuance) => `
@@ -1132,6 +1132,11 @@ export function renderMayorFiscalPanel(store: GameStore, city: City): string {
               <td>${money(issuance.principal)}</td>
               <td>${pct(issuance.couponRateAnnual, 2)} / ${num(issuance.interestPeriodMonths)} 月</td>
               <td>${esc(tickDate(issuance.maturityTick))}</td>
+              <td>${
+                issuance.closedTick === null
+                  ? `发行中 · ${esc(tickDate(issuance.subscriptionCloseTick))} 月结关闭`
+                  : `已关闭（${esc(tickDate(issuance.closedTick))}）`
+              }</td>
               <td>${esc(BOND_STATUS_LABELS[issuance.status])}</td>
             </tr>`,
           )
@@ -1205,7 +1210,7 @@ export function renderMayorFiscalPanel(store: GameStore, city: City): string {
         <div class="fiscal-table-wrap" data-scroll="fiscal-issuances">
           <table class="fiscal-table">
             <thead>
-              <tr><th scope="col">批次</th><th scope="col">计划</th><th scope="col">实售</th><th scope="col">未售</th><th scope="col">形成本金</th><th scope="col">票息 / 周期</th><th scope="col">到期</th><th scope="col">状态</th></tr>
+              <tr><th scope="col">批次</th><th scope="col">计划</th><th scope="col">实售</th><th scope="col">未售</th><th scope="col">形成本金</th><th scope="col">票息 / 周期</th><th scope="col">到期</th><th scope="col">认购窗口</th><th scope="col">状态</th></tr>
             </thead>
             <tbody>${issuanceRows}</tbody>
           </table>
@@ -1232,10 +1237,10 @@ export function renderMayorFiscalPanel(store: GameStore, city: City): string {
             data-city-id="${esc(city.id)}"
             data-testid="issue-bond"
             data-focus-key="issue-bond"
-            title="按当前计划份数发起一次发行；认购窗口默认当月撮合"
+            title="按当前计划份数发起一次发行；认购窗口为发行当月，下一次月结关闭"
           >发起发行</button>
         </div>
-        <p class="fiscal-note">计划份数上限 ${num(maxPlanUnits)} 份；只有实际售出的份数形成本金，未售出份数关闭后记录但不形成债务。</p>
+        <p class="fiscal-note">计划份数上限 ${num(maxPlanUnits)} 份；只有实际售出的份数形成本金，未售出份数关闭后记录但不形成债务。认购窗口为发行当月（下一次月结关闭）：玩家可在窗口内认购，窗口关闭前居民投资实体与企业会用自身资金认购剩余份数。</p>
       </div>
     </div>`;
 }
@@ -1292,10 +1297,16 @@ export function renderPublicBankruptcyNotice(store: GameStore, city: City): stri
               ? '本月已即时重选'
               : '否'
         }</b></span>
-        <span>破产兑付<b data-testid="bankruptcy-bond-redemptions">${num(notice.bondRedemptionCount)} 笔 · 本金 ${money(notice.bondsRedeemedPrincipal)} · 利息 ${money(notice.bondsRedeemedInterest)}</b></span>
-        <span>银行垫付<b data-testid="bankruptcy-advance">${money(notice.bankAdvanceCreated)}</b></span>
-        <span>已勾销<b data-testid="bankruptcy-written-off">银行贷款本金 ${money(notice.bankLoansWrittenOff)} · 垫付贷款本金 ${money(notice.advancesWrittenOff)} · 未清偿利息 ${money(notice.interestWrittenOff)}</b></span>
       </div>
+      ${
+        notice.detailsVisible
+          ? `<div class="bankruptcy-grid" data-testid="bankruptcy-details">
+        <span>破产兑付<b data-testid="bankruptcy-bond-redemptions">${num(notice.bondRedemptionCount ?? 0)} 笔 · 本金 ${money(notice.bondsRedeemedPrincipal ?? 0)} · 利息 ${money(notice.bondsRedeemedInterest ?? 0)}</b></span>
+        <span>银行垫付<b data-testid="bankruptcy-advance">${money(notice.bankAdvanceCreated ?? 0)}</b></span>
+        <span>已勾销<b data-testid="bankruptcy-written-off">银行贷款本金 ${money(notice.bankLoansWrittenOff ?? 0)} · 垫付贷款本金 ${money(notice.advancesWrittenOff ?? 0)} · 未清偿利息 ${money(notice.interestWrittenOff ?? 0)}</b></span>
+      </div>`
+          : `<p class="bankruptcy-note" data-testid="bankruptcy-details-restricted">破产处置金额（兑付、垫付、勾销、未清偿利息）与政府债务口径仅该城市现任市长可见；破产事实与重选结果公开，个人持债兑付记录可在债券市场查看。</p>`
+      }
       <p class="bankruptcy-note" data-testid="bankruptcy-settlement-note">
         未到期债券的本金与已计提利息由银行垫付兑付（财政不参与兑付）；垫付形成的政府贷款与原有政府银行贷款在清算中勾销。按 #44 口径，“已勾销”单列，不计入“已还本金”。
       </p>
@@ -1367,6 +1378,11 @@ export function renderBondMarketSection(store: GameStore): string {
                   <span>付息周期<b>每 ${num(offer.interestPeriodMonths)} 月</b></span>
                   <span>到期<b>${esc(tickDate(offer.maturityTick))}</b></span>
                   <span>可认购<b>${num(offer.unitsAvailable)} 份</b></span>
+                  <span>认购窗口<b>${
+                    offer.status === 'offering'
+                      ? `本月内（${esc(tickDate(offer.subscriptionCloseTick))} 月结关闭）`
+                      : `已关闭（发行月内一次撮合）`
+                  }</b></span>
                 </div>
                 ${
                   settledEarly
@@ -1406,7 +1422,8 @@ export function renderBondMarketSection(store: GameStore): string {
         </div>
         <span class="section-tag">${num(offers.filter((offer) => offer.status === 'offering').length)} 批次认购中</span>
       </div>
-      <p class="fiscal-note">公开信息只含发行城市、面额、票面年利率、期限与到期日；发行计划总额、总售额与政府总债务不公开。认购只使用可用资金，不可贷款购债。</p>
+      <p class="fiscal-note">公开信息只含发行城市、面额、票面年利率、期限、到期日与认购窗口；发行计划总额、总售额与政府总债务不公开。认购只使用可用资金，不可贷款购债。</p>
+      <p class="fiscal-note">认购窗口为发行当月：发行后至下一次月结关闭（暂停/加速不改变游戏月），跨月不续售。窗口关闭前，居民投资实体与企业会用自身可用资金认购剩余份数；AI 不会使用玩家资金，玩家买不买由玩家自己决定。</p>
       ${
         bankruptCities.length > 0
           ? `<div class="bond-bankruptcy-banner" data-testid="bond-bankruptcy-banner">

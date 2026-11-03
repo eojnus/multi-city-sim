@@ -49,15 +49,17 @@ beforeAll(() => {
 }, 180_000);
 
 describe('AC-I10 公开破产面板权限（非市长可见破产事实、不见财政细节）', () => {
-  it('I10a 非市长城市视图渲染公开破产面板：垫付/兑付/勾销/托管可见', () => {
+  it('I10a 非市长城市视图：破产事实/重选/股份托管可见，具体金额仅提示受限', () => {
     store.selectCity(bankruptCityId);
     const html = renderRightCity(store, panelState);
     expect(html).toContain('data-testid="public-bankruptcy-notice"');
-    expect(html).toContain('data-testid="bankruptcy-advance"');
-    expect(html).toContain('data-testid="bankruptcy-written-off"');
-    expect(html).toContain('data-testid="bankruptcy-bond-redemptions"');
     expect(html).toContain('data-testid="bankruptcy-share-disposal"');
-    expect(html).toMatch(/银行垫付|破产兑付|已勾销/);
+    expect(html).toContain('data-testid="bankruptcy-details-restricted"');
+    // 政府具体兑付/垫付/勾销金额不得对非市长渲染（v0.7 验收问题 5）。
+    expect(html).not.toContain('data-testid="bankruptcy-advance"');
+    expect(html).not.toContain('data-testid="bankruptcy-written-off"');
+    expect(html).not.toContain('data-testid="bankruptcy-bond-redemptions"');
+    expect(html).toMatch(/破产|重选/);
   });
 
   it('I10b 非市长看不到财政余额、流水、债务率、风险档（testid 级）', () => {
@@ -94,17 +96,42 @@ describe('AC-I10 公开破产面板权限（非市长可见破产事实、不见
     }
   });
 
-  it('I10d 公开投影只含破产处置字段，不含财政余额/实时债务率/风险档', () => {
+  it('I10d 公开投影不含财政余额/实时债务率/风险档；非市长金额字段为 null', () => {
     const notice = store.publicBankruptcy(bankruptCityId);
     expect(notice).toBeTruthy();
     const keys = Object.keys(notice ?? {});
     for (const forbidden of ['treasury', 'debtRatio', 'riskLevel', 'gdpJudgementValue']) {
       expect(keys, `公开投影不得含 ${forbidden}`).not.toContain(forbidden);
     }
-    expect(notice!.bankAdvanceCreated).toBeGreaterThan(0);
-    expect(notice!.bondRedemptionCount).toBeGreaterThan(0);
-    expect(notice!.bondsRedeemedPrincipal).toBeGreaterThan(0);
-    expect(notice!.tick).not.toBeNull();
+    expect(notice!.detailsVisible).toBe(false);
+    expect(notice!.bankAdvanceCreated).toBeNull();
+    expect(notice!.bondRedemptionCount).toBeNull();
+    expect(notice!.bondsRedeemedPrincipal).toBeNull();
+    expect(notice!.interestWrittenOff).toBeNull();
+    expect(notice!.note).not.toMatch(/\d{2,}/);
+  });
+
+  it('I10f 该城市现任市长可见兑付/垫付/勾销金额与债务口径', () => {
+    store.world.player.roles.mayorCityId = bankruptCityId;
+    store.emit();
+    try {
+      const notice = store.publicBankruptcy(bankruptCityId)!;
+      expect(notice.detailsVisible).toBe(true);
+      expect(notice.bankAdvanceCreated).toBeGreaterThan(0);
+      expect(notice.bondRedemptionCount).toBeGreaterThan(0);
+      expect(notice.bondsRedeemedPrincipal).toBeGreaterThan(0);
+      expect(notice.note).toContain('债务/GDP');
+      store.selectCity(bankruptCityId);
+      const html = renderRightCity(store, panelState);
+      expect(html).toContain('data-testid="bankruptcy-details"');
+      expect(html).toContain('data-testid="bankruptcy-advance"');
+      expect(html).toContain('data-testid="bankruptcy-written-off"');
+      expect(html).toContain('data-testid="bankruptcy-bond-redemptions"');
+      expect(html).not.toContain('data-testid="bankruptcy-details-restricted"');
+    } finally {
+      store.world.player.roles.mayorCityId = null;
+      store.emit();
+    }
   });
 
   it('I10e 未破产城市：无公开破产面板、公开投影为 null', () => {

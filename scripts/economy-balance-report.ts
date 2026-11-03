@@ -229,6 +229,40 @@ function collectGovernmentProbe(world: WorldState, monthly: MonthRow[], months: 
     }
   }
 
+  const recoveryByCity: GovernmentProbe['recoveryByCity'] = [];
+  for (const record of bankruptcies) {
+    const issuances = (bonds?.issuances ?? [])
+      .filter((issuance) => issuance.cityId === record.cityId && issuance.issuedTick > record.tick)
+      .map((issuance) => issuance.issuedTick);
+    const loans = (world.banking?.loans ?? [])
+      .filter(
+        (loan) =>
+          loan.borrower.kind === 'government' &&
+          loan.borrower.id === record.cityId &&
+          loan.startTick > record.tick &&
+          loan.purpose === 'government',
+      )
+      .map((loan) => loan.startTick);
+    const firstBond = issuances.length > 0 ? Math.min(...issuances) : null;
+    const firstLoan = loans.length > 0 ? Math.min(...loans) : null;
+    recoveryByCity.push({
+      cityId: record.cityId,
+      cityName: record.cityName,
+      bankruptcyTick: record.tick,
+      firstBondIssuanceTickAfter: firstBond,
+      firstGovernmentLoanTickAfter: firstLoan,
+      recovered: firstBond !== null || firstLoan !== null,
+      recoveredBy:
+        firstBond !== null && firstLoan !== null
+          ? 'both'
+          : firstBond !== null
+            ? 'bond'
+            : firstLoan !== null
+              ? 'loan'
+              : 'none',
+    });
+  }
+
   const financingByCity = world.cities.map((city) => {
     const byKind: Record<string, number> = {};
     for (const kind of GOVERNMENT_FINANCING_KINDS) byKind[kind] = 0;
@@ -320,6 +354,7 @@ function collectGovernmentProbe(world: WorldState, monthly: MonthRow[], months: 
     bondIssuanceByCity,
     bondHoldersByCity,
     bankruptcies,
+    recoveryByCity,
     writeOffsByCity,
     elections,
     financingByCity,
@@ -533,6 +568,16 @@ interface GovernmentProbe {
   }>;
   elections: Array<{ tick: number; cityId: string; cityName: string; winnerName: string; playerWon: boolean; note: string }>;
   bondHoldersByCity: Array<{ issuerCityName: string; holderCityName: string; units: number }>;
+  /** 破产后融资恢复情况（任务书 §8：破产后 AI 能否恢复发债/借款）。 */
+  recoveryByCity: Array<{
+    cityId: string;
+    cityName: string;
+    bankruptcyTick: number;
+    firstBondIssuanceTickAfter: number | null;
+    firstGovernmentLoanTickAfter: number | null;
+    recovered: boolean;
+    recoveredBy: 'bond' | 'loan' | 'both' | 'none';
+  }>;
   financingByCity: Array<{
     cityId: string;
     cityName: string;
@@ -1173,13 +1218,28 @@ function run(months: number): { report: Report; elapsedMs: number } {
       return `${item.cityName} 最后一次发债 M${item.lastTick}、首笔政府贷款 ${firstLoan === null || firstLoan === undefined ? '无' : `M${firstLoan}`}`;
     })
     .join('；');
+  const recoveryText =
+    probe.recoveryByCity.length === 0
+      ? '无破产城市'
+      : probe.recoveryByCity
+          .map(
+            (item) =>
+              `${item.cityName} 破产 M${item.bankruptcyTick} → 新发债 ${
+                item.firstBondIssuanceTickAfter === null ? '无' : `M${item.firstBondIssuanceTickAfter}`
+              } / 新政府贷款 ${
+                item.firstGovernmentLoanTickAfter === null
+                  ? '无'
+                  : `M${item.firstGovernmentLoanTickAfter}`
+              }（${item.recovered ? `已恢复：${item.recoveredBy}` : '未恢复'}）`,
+          )
+          .join('；');
   report.limitations = [
     '单一固定条件（种子 20261101、36 月、玩家无操作），不是多种子统计；结论不能外推为概率。',
-    '版本：块1 债券（发行/认购/票息/到期/破产兑付/垫付）+ 块2 破产清算/月结六阶段/12 月真实 GDP 窗口 + 块3/4 居民消费预算（#39 80%/5%）与群体消费贷、债券兑付入账修复（316eff4）均已合入。',
-    '破产清算为一次性事件：勾销后债务重新累计，本报告只记录 36 月内发生的破产次数与当次明细，不评价恢复过程是否合理。#8 幂等由重复兑付判据（18）覆盖。',
+    '版本：块1 债券（发行/认购/票息/到期/破产兑付/垫付）+ 块2 破产清算/月结六阶段/12 月真实 GDP 窗口 + 块3/4 居民消费预算（#39 80%/5%）与群体消费贷、债券兑付入账修复（316eff4）均已合入；v0.7.1 验收修复（认购窗口、实际未偿计息、破产后恢复发债、非市长财政明细收敛、群体债务随人口分配）已合入。',
+    `破产清算为一次性事件：勾销后债务重新累计。v0.7.1 起本报告记录破产后的融资恢复：${recoveryText}。#8 幂等由重复兑付判据（18）覆盖。`,
     `财政 M36 未转负是"破产勾销 + 银行垫付 + 赤字转政府贷款"的结果，不是财政改善：${financingText}；剔除融资后的经营缺口仍很大（见 [块6] 累计拆解）。旧基线 −422.8M 是"没有融资渠道的欠账"。`,
     `破产事件：${bankruptcyText}；银行垫付合计 ${fmt(advanceTotal)} 兑付债券本息后全部核销。银行无资本充足/亏损口径，垫付成本不落在任何主体资产负债表上、也不进财政流水——破产成本目前是"隐性"的。`,
-    `【正式已知限制，v0.7 不改】政府贷款月供出现后 AI 发债永久停摆：赤字转成的政府贷款每月等额本金到期，使 AI "禁借新还旧"判定（hasDebtServiceDueThisTick）恒真，债券被银行贷款替代；实测 ${issueStopText}——铁谷未破产也未再发债，说明停摆不限于破产后。M36 负债率 ${debtText}。详见 B 稿 B11 / 块6 D11e-D11f。`,
+    `【v0.7.1 复验】旧口径“政府贷款月供出现后 AI 发债永久停摆”已不成立：hasDebtServiceDueThisTick 拆成“债券到期/票息仍阻断、常规贷款分期不再阻断”，看守期需本城重选后才恢复。实测 ${issueStopText}；破产后恢复：${recoveryText}。仍保留“禁借新还旧”：债券到期/票息月份仍不发新债（这是已确认规则，不是停摆）；M36 负债率 ${debtText}。`,
     `债务/GDP、预警档位与趋势由契约层 assessCityFiscalRisk 计算。本探针债券发行 ${bondIssueRows.length} 期、破产 ${probe.bankruptcies.length} 次；M36 总负债 ${debtText}。总负债 0 表示无未偿债务，不代表长期财政健康。`,
     `按 DECISIONS #44：政府贷款/银行垫付核销时账面 paidPrincipal=principal 仅是记账口径。本报告所有"已还/还本"列均为实际现金支付——债券还本 ${fmt(bondPrincipalPaid)} 是银行垫付实际付给持有人的现金；勾销合计 ${fmt(writeOffTotal)} 单列（${probe.writeOffsByCity.map((item) => `${item.cityName} ${fmt(item.total)}`).join(' / ') || '无'}），不计入已还本金或还款能力。期末债券欠付利息 ${fmt(bondArrearsTotal)}（#19：12/24 月票息不足不垫付、记欠付）。`,
     `12 个月 GDP 判定窗口：块2 已真实替换——开局 12 条估计（estimated=true）随结算逐月换出；M36 ${windowText}。负债率为真实口径，与旧基线（估计窗口 2.5B 级）不可直接比。`,
@@ -1361,6 +1421,21 @@ function printReport(report: Report, elapsedMs: number): void {
     console.log(
       `      重选：${item.electionTriggeredTick === null ? '未触发（看守期）' : `同 tick 触发（获胜 ${item.electionWinner ?? '—'}）`}；股份转移：${item.shareNote}`,
     );
+  }
+  if (probePrint.recoveryByCity.length > 0) {
+    console.log('  破产后融资恢复（任务书 §8）：');
+    for (const item of probePrint.recoveryByCity) {
+      console.log(
+        `    ${item.cityName}（破产 M${item.bankruptcyTick}）：` +
+          `新发债 ${item.firstBondIssuanceTickAfter === null ? '无' : `M${item.firstBondIssuanceTickAfter}`}；` +
+          `新政府贷款 ${item.firstGovernmentLoanTickAfter === null ? '无' : `M${item.firstGovernmentLoanTickAfter}`}；` +
+          `结论：${
+            item.recovered
+              ? `已恢复（${item.recoveredBy === 'bond' ? '债券' : item.recoveredBy === 'loan' ? '贷款' : '债券+贷款'}）`
+              : '截至观察期末未恢复融资'
+          }`,
+      );
+    }
   }
   if (probePrint.writeOffsByCity.length > 0) {
     const total = round2(probePrint.writeOffsByCity.reduce((sum, item) => sum + item.total, 0));

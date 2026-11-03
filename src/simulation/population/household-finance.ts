@@ -20,6 +20,7 @@ import type {
   HouseholdGroup,
   HouseholdLoanContract,
   LoanPayment,
+  OccupationClass,
   WorldState,
 } from '../contracts/types';
 import type { DemoConfig } from '../../data/config';
@@ -274,6 +275,50 @@ export function householdConsumerBudgetSnapshot(
 }
 
 /**
+ * 消费贷前置校验（纯函数：只读世界、不产生任何副作用）。
+ *
+ * v0.7 验收问题 3：消费市场必须在成交前用它确认“授信资格、当月笔数、真实可用额度、
+ * 单笔最低额”全部满足，再原子提交放款+成交；任何一条不满足就不得成交，
+ * 避免出现“市场记录成交、群体实际支付 0 / 贷款未放出”的虚假成交。
+ * 与 borrowForConsumption 共用同一套规则（放款前会再走一遍同样的校验）。
+ */
+export function consumptionLoanEligibility(
+  world: WorldState,
+  group: HouseholdGroup,
+  config: DemoConfig,
+  amount: number,
+  tick: number,
+): { ok: true } | { ok: false; error: string } {
+  const finance = world.householdFinance;
+  if (!finance) return { ok: false, error: '世界缺少居民消费金融账本' };
+  const credit = config.households.householdCredit;
+  const requested = round2(amount);
+  if (!Number.isFinite(requested) || requested <= 0) {
+    return { ok: false, error: '贷款金额必须为正' };
+  }
+  if (requested < credit.minLoanAmount) {
+    return {
+      ok: false,
+      error: `单笔消费贷款不能低于 ${credit.minLoanAmount.toFixed(0)} 信用点`,
+    };
+  }
+  const createdThisTick = finance.loans.filter(
+    (loan) => loan.groupId === group.id && loan.startTick === tick,
+  ).length;
+  if (createdThisTick >= Math.max(1, credit.maxLoansPerGroupPerMonth)) {
+    return { ok: false, error: '该群体本月新增消费贷款笔数已达上限' };
+  }
+  const limit = householdCreditLimit(world, group, config);
+  if (requested > limit + 0.005) {
+    return {
+      ok: false,
+      error: `超出消费贷额度：可借 ${limit.toFixed(2)}，申请 ${requested.toFixed(2)}`,
+    };
+  }
+  return { ok: true };
+}
+
+/**
  * 为消费放款（在额度内，整数金额；资金从银行支付给卖方，不进入居民收入）。
  * 约束：不得超过 householdCreditLimit；每月每群体新增笔数 ≤ maxLoansPerGroupPerMonth。
  */
@@ -288,29 +333,9 @@ export function borrowForConsumption(
   if (!finance) return { ok: false, loan: null, error: '世界缺少居民消费金融账本' };
   const credit = config.households.householdCredit;
   const requested = round2(amount);
-  if (!Number.isFinite(requested) || requested <= 0) {
-    return { ok: false, loan: null, error: '贷款金额必须为正' };
-  }
-  if (requested < credit.minLoanAmount) {
-    return {
-      ok: false,
-      loan: null,
-      error: `单笔消费贷款不能低于 ${credit.minLoanAmount.toFixed(0)} 信用点`,
-    };
-  }
-  const createdThisTick = finance.loans.filter(
-    (loan) => loan.groupId === group.id && loan.startTick === tick,
-  ).length;
-  if (createdThisTick >= Math.max(1, credit.maxLoansPerGroupPerMonth)) {
-    return { ok: false, loan: null, error: '该群体本月新增消费贷款笔数已达上限' };
-  }
-  const limit = householdCreditLimit(world, group, config);
-  if (requested > limit + 0.005) {
-    return {
-      ok: false,
-      loan: null,
-      error: `超出消费贷额度：可借 ${limit.toFixed(2)}，申请 ${requested.toFixed(2)}`,
-    };
+  const eligibility = consumptionLoanEligibility(world, group, config, requested, tick);
+  if (!eligibility.ok) {
+    return { ok: false, loan: null, error: eligibility.error };
   }
   const termMonths = Math.max(1, credit.termMonths);
   const loan: HouseholdLoanContract = {
@@ -363,11 +388,357 @@ export function repayHouseholdLoans(
   return result;
 }
 
+/** 贷款是否仍有未结清债务（未偿本金、欠付本金或欠付利息任一大于 0）。 */
+function loanHasDebt(loan: HouseholdLoanContract): boolean {
+  return (
+    loan.outstanding > 0.005 ||
+    loan.arrearsPrincipal > 0.005 ||
+    loan.arrearsInterest > 0.005
+  );
+}
+
+/**
+ * 把 total 按 weights 精确拆成 0.01 精度的金额数组（最大余数法）：
+ * Σ 返回值 === round2(total)（分位精确），避免逐项 round2 累积尾差破坏守恒。
+ */
+function allocateDebtCents(total: number, weights: number[]): number[] {
+  const cents = Math.max(0, Math.round(total * 100));
+  const allocations = weights.map(() => 0);
+  const weightTotal = weights.reduce((sum, weight) => sum + weight, 0);
+  if (cents <= 0 || weightTotal <= 0) return allocations;
+  const raw = weights.map((weight) => (cents * weight) / weightTotal);
+  const floors = raw.map((value) => Math.floor(value));
+  let remainder = cents - floors.reduce((sum, value) => sum + value, 0);
+  const order = raw
+    .map((value, index) => ({ index, fraction: value - Math.floor(value) }))
+    .sort((a, b) => b.fraction - a.fraction || a.index - b.index);
+  for (const entry of order) {
+    if (remainder <= 0) break;
+    floors[entry.index] = (floors[entry.index] ?? 0) + 1;
+    remainder -= 1;
+  }
+  return floors.map((value) => value / 100);
+}
+
+function remainingLoanTerm(loan: HouseholdLoanContract): number {
+  const elapsed = Math.max(0, loan.nextDueTick - loan.startTick - 1);
+  return Math.max(1, loan.termMonths - elapsed);
+}
+
+interface DebtSplitDestination {
+  group: HouseholdGroup;
+  weight: number;
+}
+
+interface DebtSplitResult {
+  outstanding: number;
+  arrearsPrincipal: number;
+  arrearsInterest: number;
+  contracts: number;
+}
+
+/** 群体变化拆分出的债务合同标记（用于月度合并，防止合同数量指数增长）。 */
+const GROUP_SPLIT_NOTE_MARK = '按人均债务分割';
+
+function isGroupSplitFragment(loan: HouseholdLoanContract): boolean {
+  return loan.note.includes(GROUP_SPLIT_NOTE_MARK);
+}
+
+/**
+ * 把同一城同一群体内的“群体变化拆分合同”合并为一笔：
+ * 拆分每月都会发生，若不合并，碎片会继续被拆分，合同数与存档体积指数增长。
+ * 合并只做账面聚合：Σ未偿/欠息守恒，payments 拼接，不产生还款记录。
+ */
+function consolidateGroupSplitFragments(
+  finance: NonNullable<WorldState['householdFinance']>,
+  cityId: string,
+  groupId: string,
+): number {
+  const fragments = finance.loans
+    .filter(
+      (loan) =>
+        loan.cityId === cityId &&
+        loan.groupId === groupId &&
+        isGroupSplitFragment(loan) &&
+        (loan.status === 'active' || loan.status === 'defaulted') &&
+        loanHasDebt(loan),
+    )
+    .sort((a, b) => a.id.localeCompare(b.id));
+  if (fragments.length <= 1) return 0;
+  const target = fragments[0]!;
+  for (const fragment of fragments.slice(1)) {
+    target.principal = round2(target.principal + fragment.principal);
+    target.outstanding = round2(target.outstanding + fragment.outstanding);
+    target.paidPrincipal = round2(target.paidPrincipal + fragment.paidPrincipal);
+    target.paidInterest = round2(target.paidInterest + fragment.paidInterest);
+    target.accruedInterest = round2(target.accruedInterest + fragment.accruedInterest);
+    target.arrearsPrincipal = round2(target.arrearsPrincipal + fragment.arrearsPrincipal);
+    target.arrearsInterest = round2(target.arrearsInterest + fragment.arrearsInterest);
+    target.payments = [...target.payments, ...fragment.payments];
+    target.startTick = Math.min(target.startTick, fragment.startTick);
+    target.nextDueTick = Math.min(target.nextDueTick, fragment.nextDueTick);
+    target.termMonths = Math.max(target.termMonths, fragment.termMonths);
+    if (fragment.status === 'defaulted') target.status = 'defaulted';
+  }
+  const mergedIds = new Set(fragments.slice(1).map((fragment) => fragment.id));
+  finance.loans = finance.loans.filter((loan) => !mergedIds.has(loan.id));
+  target.principal = round2(target.outstanding + target.paidPrincipal);
+  target.monthlyPrincipal = round2(
+    target.outstanding / Math.max(1, remainingLoanTerm(target)),
+  );
+  return mergedIds.size;
+}
+
+/**
+ * 把单笔贷款按 share 拆出一部分给 destinations（按权重分配，分位精确）。
+ * 只转移未偿本金/欠付本金/欠付利息，**不写 payments、不改 paidPrincipal/paidInterest**
+ * （转移不是还款）；源合同按转出额同步减记 principal，保持 principal − paidPrincipal === outstanding。
+ */
+function splitHouseholdLoan(
+  finance: NonNullable<WorldState['householdFinance']>,
+  loan: HouseholdLoanContract,
+  share: number,
+  destinations: DebtSplitDestination[],
+  tick: number,
+  notePrefix: string,
+): DebtSplitResult {
+  const result: DebtSplitResult = {
+    outstanding: 0,
+    arrearsPrincipal: 0,
+    arrearsInterest: 0,
+    contracts: 0,
+  };
+  if (destinations.length === 0 || share <= 0) return result;
+  const movedOutstanding = round2(Math.max(0, Math.min(loan.outstanding, loan.outstanding * share)));
+  const movedArrearsPrincipal = round2(
+    Math.max(0, Math.min(loan.arrearsPrincipal, loan.arrearsPrincipal * share)),
+  );
+  const movedArrearsInterest = round2(
+    Math.max(0, Math.min(loan.arrearsInterest, loan.arrearsInterest * share)),
+  );
+  if (movedOutstanding <= 0.004 && movedArrearsPrincipal <= 0.004 && movedArrearsInterest <= 0.004) {
+    return result;
+  }
+  const weights = destinations.map((entry) => entry.weight);
+  const outstandingParts = allocateDebtCents(movedOutstanding, weights);
+  const arrearsPrincipalParts = allocateDebtCents(movedArrearsPrincipal, weights);
+  const arrearsInterestParts = allocateDebtCents(movedArrearsInterest, weights);
+  const termMonths = remainingLoanTerm(loan);
+  for (let index = 0; index < destinations.length; index += 1) {
+    const destination = destinations[index]!;
+    const partOutstanding = outstandingParts[index] ?? 0;
+    // 欠付本金是未偿本金的一部分，拆分后不得超过该合同分到的未偿额。
+    const partArrearsPrincipal = Math.min(arrearsPrincipalParts[index] ?? 0, partOutstanding);
+    const partArrearsInterest = arrearsInterestParts[index] ?? 0;
+    if (partOutstanding <= 0 && partArrearsPrincipal <= 0 && partArrearsInterest <= 0) continue;
+    const split: HouseholdLoanContract = {
+      ...loan,
+      id: `${loan.id}-s${finance.nextLoanNumber}`,
+      cityId: destination.group.cityId,
+      groupId: destination.group.id,
+      principal: partOutstanding,
+      outstanding: partOutstanding,
+      monthlyPrincipal: round2(partOutstanding / termMonths),
+      // 保持原合同期限/首期：拆分不是新贷款，不得延长债务久期。
+      termMonths: loan.termMonths,
+      startTick: loan.startTick,
+      nextDueTick: loan.nextDueTick,
+      paidPrincipal: 0,
+      paidInterest: 0,
+      accruedInterest: 0,
+      arrearsPrincipal: partArrearsPrincipal,
+      arrearsInterest: partArrearsInterest,
+      payments: [],
+      note: `${notePrefix}：来自 ${loan.id} 的按人均债务分割（${(share * 100).toFixed(2)}%，不记为还款）。`,
+    };
+    finance.nextLoanNumber += 1;
+    finance.loans.push(split);
+    result.outstanding = round2(result.outstanding + partOutstanding);
+    result.arrearsPrincipal = round2(result.arrearsPrincipal + partArrearsPrincipal);
+    result.arrearsInterest = round2(result.arrearsInterest + partArrearsInterest);
+    result.contracts += 1;
+  }
+  // 源合同减记：未偿与原始本金同额减少，还款历史（payments/paidPrincipal/paidInterest）保持不动。
+  loan.outstanding = round2(Math.max(0, loan.outstanding - result.outstanding));
+  loan.arrearsPrincipal = round2(Math.max(0, loan.arrearsPrincipal - result.arrearsPrincipal));
+  loan.arrearsInterest = round2(Math.max(0, loan.arrearsInterest - result.arrearsInterest));
+  loan.principal = round2(Math.max(loan.paidPrincipal, loan.principal - result.outstanding));
+  loan.monthlyPrincipal = round2(
+    Math.min(loan.monthlyPrincipal, loan.outstanding / Math.max(1, termMonths)),
+  );
+  if (!loanHasDebt(loan)) {
+    loan.outstanding = 0;
+    loan.arrearsPrincipal = 0;
+    loan.arrearsInterest = 0;
+    loan.status = 'repaid';
+  }
+  return result;
+}
+
+/** 城内群体人数变化时的债务分配结果（会计口径；金额为本次转出/改挂的未偿与欠息）。 */
+export interface HouseholdDebtAllocationResult {
+  movedPrincipal: number;
+  movedArrearsPrincipal: number;
+  movedArrearsInterest: number;
+  splitLoans: number;
+  reassignedLoans: number;
+  isolatedLoans: number;
+}
+
+/**
+ * 城内居民群体人数变化（就业/失业/职业变动/并组拆分）时的消费贷债务归属守恒。
+ *
+ * 规则（与现金/存款的“按人均随人走”一致）：
+ * 1. 有接收群体时按“离开人数 / 源群体原人数”的比例把每笔贷款的未偿本金、欠付本金、
+ *    欠付利息转给新增人数的群体（按新增人数权重分配，分位精确，Σ 债务不变）；
+ * 2. 整群转出且只有一个接收群体时直接改挂 groupId（合同/还款记录原样保留，不伪造已还款）；
+ * 3. 目标人数为 0 的群体若仍留有债务：先并入同城人数最多（tie-break groupId 升序）的群体；
+ *    同城已无任何在册群体时**显式隔离**：保留原合同、追加【隔离】备注并写 warning 日志，
+ *    不删除、不改挂、不记为已还款（无法可靠承接的类别不静默消失）。
+ *
+ * 只读 targets（syncHouseholdPeople 计算出的新人数），要求调用时 group.people 仍是旧人数。
+ */
+export function reallocateHouseholdDebtsForGroupChange(
+  world: WorldState,
+  config: DemoConfig,
+  cityId: string,
+  targets: ReadonlyMap<OccupationClass, number>,
+): HouseholdDebtAllocationResult {
+  void config;
+  const result: HouseholdDebtAllocationResult = {
+    movedPrincipal: 0,
+    movedArrearsPrincipal: 0,
+    movedArrearsInterest: 0,
+    splitLoans: 0,
+    reassignedLoans: 0,
+    isolatedLoans: 0,
+  };
+  const finance = world.householdFinance;
+  if (!finance) return result;
+  const groups = householdGroupsOfCity(world, cityId);
+  if (groups.length === 0) return result;
+  const tick = world.time.tick;
+  // 先合并上月拆分碎片：拆分每月发生，碎片继续拆分会让合同数/存档体积指数增长。
+  for (const group of groups) {
+    consolidateGroupSplitFragments(finance, cityId, group.id);
+  }
+  const targetOf = (group: HouseholdGroup): number =>
+    Math.max(0, Math.round(targets.get(group.occupation) ?? group.people));
+
+  const changes = groups.map((group) => ({ group, delta: targetOf(group) - group.people }));
+  const increases = changes.filter((entry) => entry.delta > 0);
+  const decreases = changes.filter((entry) => entry.delta < 0);
+  const totalIncrease = increases.reduce((sum, entry) => sum + entry.delta, 0);
+  const destinations: DebtSplitDestination[] = increases.map((entry) => ({
+    group: entry.group,
+    weight: entry.delta,
+  }));
+
+  if (totalIncrease > 0 && destinations.length > 0) {
+    for (const entry of decreases) {
+      const source = entry.group;
+      if (source.people <= 0) continue;
+      const leaving = Math.min(-entry.delta, source.people);
+      if (leaving <= 0) continue;
+      const share = leaving / source.people;
+      const sourceLoans = finance.loans
+        .filter(
+          (loan) =>
+            loan.groupId === source.id &&
+            (loan.status === 'active' || loan.status === 'defaulted') &&
+            loanHasDebt(loan),
+        )
+        .sort((a, b) => a.id.localeCompare(b.id));
+      for (const loan of sourceLoans) {
+        // 整群转出且唯一接收方：改挂归属，保留合同与全部还款记录（不产生“已还款”记录）。
+        if (leaving >= source.people && destinations.length === 1) {
+          const destination = destinations[0]!.group;
+          loan.groupId = destination.id;
+          loan.cityId = destination.cityId;
+          result.reassignedLoans += 1;
+          result.movedPrincipal = round2(result.movedPrincipal + loan.outstanding);
+          result.movedArrearsPrincipal = round2(
+            result.movedArrearsPrincipal + loan.arrearsPrincipal,
+          );
+          result.movedArrearsInterest = round2(
+            result.movedArrearsInterest + loan.arrearsInterest,
+          );
+          continue;
+        }
+        const moved = splitHouseholdLoan(
+          finance,
+          loan,
+          share,
+          destinations,
+          tick,
+          '群体人数变化转入',
+        );
+        result.movedPrincipal = round2(result.movedPrincipal + moved.outstanding);
+        result.movedArrearsPrincipal = round2(
+          result.movedArrearsPrincipal + moved.arrearsPrincipal,
+        );
+        result.movedArrearsInterest = round2(
+          result.movedArrearsInterest + moved.arrearsInterest,
+        );
+        result.splitLoans += moved.contracts;
+      }
+    }
+  }
+
+  // 兜底：目标人数为 0 的群体若仍有未清债务，不得静默留在无人群体。
+  const fallback = groups
+    .filter((group) => targetOf(group) > 0)
+    .sort((a, b) => targetOf(b) - targetOf(a) || a.id.localeCompare(b.id))[0];
+  for (const group of groups) {
+    if (targetOf(group) > 0) continue;
+    const residualLoans = finance.loans
+      .filter(
+        (loan) =>
+          loan.groupId === group.id &&
+          (loan.status === 'active' || loan.status === 'defaulted') &&
+          loanHasDebt(loan),
+      )
+      .sort((a, b) => a.id.localeCompare(b.id));
+    for (const loan of residualLoans) {
+      if (fallback) {
+        loan.groupId = fallback.id;
+        loan.cityId = fallback.cityId;
+        result.reassignedLoans += 1;
+        result.movedPrincipal = round2(result.movedPrincipal + loan.outstanding);
+        result.movedArrearsPrincipal = round2(result.movedArrearsPrincipal + loan.arrearsPrincipal);
+        result.movedArrearsInterest = round2(
+          result.movedArrearsInterest + loan.arrearsInterest,
+        );
+        world.log.push({
+          tick,
+          kind: 'population',
+          message: `居民群体 ${group.name}（${group.cityId}）人数归零但仍有未偿债务，按兜底规则并入同城人数最多的 ${fallback.name}（合同 ${loan.id}）。`,
+        });
+        continue;
+      }
+      // 同城已无任何可承接群体：不删除、不改挂，显式隔离并记日志（未记为还款）。
+      result.isolatedLoans += 1;
+      if (!loan.note.includes('【隔离】')) {
+        loan.note = `${loan.note}【隔离】所在群体 ${group.id} 已无人且同城无其他可承接群体；债务保留原合同并记录日志，等待后续人工/迁移修复。`;
+        world.log.push({
+          tick,
+          kind: 'warning',
+          message: `居民消费贷款 ${loan.id} 所在群体 ${group.id} 已无人且同城无其他群体可承接：未偿本金 ${loan.outstanding.toFixed(2)} 已显式隔离（未删除、未记为已还款）。`,
+        });
+      }
+    }
+  }
+  finance.loans.sort((a, b) => a.id.localeCompare(b.id));
+  return result;
+}
+
 /**
  * 跨城迁移时的消费贷款归属守恒（“只增不改”追加导出，已获秘书处批准）：
  * 迁移者按人均带走自己那部分债务——按“迁出人数 / 源群体人数”的比例，把源群体贷款的
  * 未偿本金、欠付本金、欠付利息等额转移到目标城同职业群体；整群迁出时直接改挂 groupId。
- * 全程只转移债务、不产生新的现金；两城合计未偿本金守恒（容差 0.01/笔）。
+ * 拆分只减记源合同的 outstanding 与 principal（保持 principal − paidPrincipal === outstanding），
+ * 不写 payments、不改 paidPrincipal/paidInterest：转移不是还款。
+ * 全程不产生新的现金；两城合计未偿本金与欠息守恒（分位精确）。
  */
 export function transferHouseholdDebtsForMigration(
   world: WorldState,
@@ -402,11 +773,11 @@ export function transferHouseholdDebtsForMigration(
       .filter(
         (loan) =>
           loan.groupId === source.id &&
-          (loan.status === 'active' || loan.status === 'defaulted'),
+          (loan.status === 'active' || loan.status === 'defaulted') &&
+          loanHasDebt(loan),
       )
       .sort((a, b) => a.id.localeCompare(b.id));
     for (const loan of sourceLoans) {
-      if (loan.outstanding <= 0.005) continue;
       if (wholeGroup) {
         loan.groupId = destination.id;
         loan.cityId = destination.cityId;
@@ -414,46 +785,16 @@ export function transferHouseholdDebtsForMigration(
         result.loansMoved += 1;
         continue;
       }
-      const movedOutstanding = round2(loan.outstanding * share);
-      if (movedOutstanding <= 0) continue;
-      if (movedOutstanding > loan.outstanding) continue;
-      const movedArrearsPrincipal = round2(loan.arrearsPrincipal * share);
-      const movedArrearsInterest = round2(loan.arrearsInterest * share);
-      const elapsed = Math.max(0, loan.nextDueTick - loan.startTick - 1);
-      const remainingTerm = Math.max(1, loan.termMonths - elapsed);
-      const split: HouseholdLoanContract = {
-        ...loan,
-        id: `${loan.id}-m${finance.nextLoanNumber}`,
-        cityId: destination.cityId,
-        groupId: destination.id,
-        principal: movedOutstanding,
-        outstanding: movedOutstanding,
-        monthlyPrincipal: round2(movedOutstanding / remainingTerm),
-        termMonths: remainingTerm,
-        startTick: tick,
-        nextDueTick: tick + 1,
-        paidPrincipal: 0,
-        paidInterest: 0,
-        accruedInterest: 0,
-        arrearsPrincipal: movedArrearsPrincipal,
-        arrearsInterest: movedArrearsInterest,
-        missedPayments: loan.missedPayments,
-        payments: [],
-        note: `迁移转入：来自 ${loan.id} 的按人均债务分割（${moving}/${source.people}）。`,
-      };
-      finance.nextLoanNumber += 1;
-      finance.loans.push(split);
-      loan.outstanding = round2(loan.outstanding - movedOutstanding);
-      loan.arrearsPrincipal = round2(loan.arrearsPrincipal - movedArrearsPrincipal);
-      loan.arrearsInterest = round2(loan.arrearsInterest - movedArrearsInterest);
-      loan.monthlyPrincipal = round2(
-        Math.min(loan.monthlyPrincipal, loan.outstanding / Math.max(1, remainingTerm)),
+      const moved = splitHouseholdLoan(
+        finance,
+        loan,
+        share,
+        [{ group: destination, weight: 1 }],
+        tick,
+        '迁移转入',
       );
-      if (loan.outstanding <= 0.005) {
-        loan.outstanding = 0;
-        loan.status = 'repaid';
-      }
-      result.principalMoved = round2(result.principalMoved + movedOutstanding);
+      if (moved.contracts === 0) continue;
+      result.principalMoved = round2(result.principalMoved + moved.outstanding);
       result.loansMoved += 1;
     }
   }

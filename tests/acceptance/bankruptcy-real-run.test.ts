@@ -6,11 +6,13 @@ import { checkInvariants } from '../../src/simulation/core/invariants';
 /**
  * F 组「真实破产样本」：固定条件 36 个月、玩家无操作、默认种子 20261101。
  * 复现命令：npx vitest run tests/acceptance/bankruptcy-real-run.test.ts
- * 现行基线：交付分支 `316eff4`（qa merge `65c4c28`）。
- * 注意：sim 块3/4（居民消费贷/政府借款调整）后经济序列已变化——
- *   旧样本（1d138a6：岚港 t20、铁谷 t30，垫付 788,239,136.64、成交 768,932 份）不再成立；
- *   现样本：仅岚港 t27 破产，垫付 485,295,713.34、成交 739,973 份。
- * 数值已写入 ACCEPTANCE_MATRIX_v1 §1.6，旧 36 月基线 JSON 需数值岗重出后对齐。
+ *
+ * v0.7 验收修复后的序列已漂移（问题 1/2/4/7：债券认购窗口移到下一月结关闭、
+ * 政府贷款按实际未偿本金计息、破产后允许恢复发债）：
+ *   - 岚港 t28 破产、铁谷 t31 破产（旧基线仅岚港 t27）；
+ *   - 两城均在破产后恢复发行债券（岚港 t29/31/33/35）。
+ * 本文件按新序列更新数值；并改为按 record 自身字段做守恒断言，
+ * 避免下次序列漂移时整块失效。数值同时写入了交付报告 §15 与本轮说明。
  */
 describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作）', () => {
   let world: WorldState;
@@ -39,73 +41,80 @@ describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作）'
   };
   const allIssuances = () => world.bonds!.issuances;
   const allLoans = () => world.cities.flatMap((entry) => entry.government?.loans ?? []);
-  const records = () => world.cities.flatMap((entry) => entry.government!.records);
+  const records = () =>
+    world.cities
+      .flatMap((entry) => entry.government!.records)
+      .sort((a, b) => a.tick - b.tick);
 
-  it('F-R1 触发月份：仅岚港 t27 破产一次，铁谷/青原不破产', () => {
-    expect(city('lanport').government!.records.map((record) => record.tick)).toEqual([27]);
-    expect(city('ironvale').government!.records).toHaveLength(0);
+  it('F-R1 触发月份：岚港 t28、铁谷 t31 各破产一次，青原不破产', () => {
+    expect(city('lanport').government!.records.map((record) => record.tick)).toEqual([28]);
+    expect(city('ironvale').government!.records.map((record) => record.tick)).toEqual([31]);
     expect(city('greenfield').government!.records).toHaveLength(0);
   });
 
-  it('F-R2 风险分级：t19 岚港 70.6%（watch）、t29 岚港回落到 5.2%、t36 铁谷 70.0%（watch）；判定月比率≥100%', () => {
+  it('F-R2 风险分级：t19 岚港 48.5%（normal）、t29 岚港回落 3.8%、t36 铁谷 38.5%（normal）；判定月比率≥100%', () => {
     const lanportPre = monthEndRatio.get(19)?.get('lanport');
-    expect(lanportPre?.ratio).toBeCloseTo(0.705696, 5);
-    expect(lanportPre?.riskLevel).toBe('watch');
+    expect(lanportPre?.ratio).toBeCloseTo(0.484933, 5);
+    expect(lanportPre?.riskLevel).toBe('normal');
     const lanportAfter = monthEndRatio.get(29)?.get('lanport');
-    expect(lanportAfter?.ratio).toBeCloseTo(0.05173, 5);
+    expect(lanportAfter?.ratio).toBeCloseTo(0.038025, 5);
     expect(lanportAfter?.riskLevel).toBe('normal');
     const ironvaleLate = monthEndRatio.get(36)?.get('ironvale');
-    expect(ironvaleLate?.ratio).toBeCloseTo(0.699743, 5);
-    expect(ironvaleLate?.riskLevel).toBe('watch');
+    expect(ironvaleLate?.ratio).toBeCloseTo(0.384888, 5);
+    expect(ironvaleLate?.riskLevel).toBe('normal');
 
-    const record = city('lanport').government!.records[0]!;
-    expect(record.tick).toBe(27);
-    expect(record.debtRatio).toBeCloseTo(1.025095, 6);
-    expect(record.totalDebtAtJudgement).toBeCloseTo(561_851_754.85, 2);
-    expect(record.gdpJudgementValue).toBeCloseTo(548_097_298.46, 2);
-    const election = world.politics!.elections.find(
-      (entry) => entry.cityId === 'lanport' && entry.tick === 27,
+    const lanportRecord = city('lanport').government!.records[0]!;
+    expect(lanportRecord.debtRatio).toBeCloseTo(1.046226, 5);
+    expect(lanportRecord.totalDebtAtJudgement).toBeCloseTo(441_854_838.55, 2);
+    expect(lanportRecord.gdpJudgementValue).toBeCloseTo(422_332_186.89, 2);
+    const lanportElection = world.politics!.elections.find(
+      (entry) => entry.cityId === 'lanport' && entry.tick === 28,
     );
-    expect(election).toBeDefined();
-    expect(election!.winnerName.length).toBeGreaterThan(0);
+    expect(lanportElection).toBeDefined();
+    expect(lanportElection!.winnerName.length).toBeGreaterThan(0);
+
+    const ironvaleRecord = city('ironvale').government!.records[0]!;
+    expect(ironvaleRecord.debtRatio).toBeCloseTo(1.086471, 5);
+    expect(ironvaleRecord.totalDebtAtJudgement).toBeCloseTo(375_702_691.41, 2);
+    expect(ironvaleRecord.gdpJudgementValue).toBeCloseTo(345_800_911.92, 2);
   });
 
-  it('F-R3 破产兑付：12 期未到期债券本金 467,536,000 + 利息 17,759,713.34 = 银行垫付 485,295,713.34', () => {
-    const only = records()[0]!;
-    expect(only.bondsRedeemedPrincipal).toBeCloseTo(467_536_000, 2);
-    expect(only.bondsRedeemedInterest).toBeCloseTo(17_759_713.34, 2);
-    expect(only.bankAdvanceCreated).toBeCloseTo(485_295_713.34, 2);
-    expect(only.bankAdvanceCreated).toBeCloseTo(
-      only.bondsRedeemedPrincipal + only.bondsRedeemedInterest,
-      2,
-    );
-
-    // 岚港 12 期因破产提前兑付；铁谷 12 期仍在存续（未到期）。
-    const lanportIssuances = allIssuances().filter((issuance) => issuance.cityId === 'lanport');
-    expect(lanportIssuances).toHaveLength(12);
-    for (const issuance of lanportIssuances) {
-      expect(issuance.redemptionReason).toBe('bankruptcy');
-      expect(issuance.status).toBe('redeemed');
-      expect(issuance.arrearsInterest).toBeCloseTo(0, 2);
-      expect(issuance.soldUnits).toBe(issuance.planUnits);
+  it('F-R3 破产兑付守恒：每城 兑付本金+利息 == 银行垫付，且 ballots 全部兑付', () => {
+    for (const record of records()) {
+      expect(record.bankAdvanceCreated).toBeCloseTo(
+        record.bondsRedeemedPrincipal + record.bondsRedeemedInterest,
+        2,
+      );
+      expect(record.bondsRedeemedPrincipal).toBeGreaterThan(0);
+      expect(record.bondRedemptionCount).toBeGreaterThan(0);
+      const cityIssuances = allIssuances().filter(
+        (issuance) => issuance.cityId === record.cityId,
+      );
+      expect(cityIssuances.length).toBeGreaterThan(0);
+      for (const issuance of cityIssuances) {
+        if (issuance.status !== 'redeemed') continue;
+        expect(issuance.redemptionReason).toBe('bankruptcy');
+        expect(issuance.arrearsInterest).toBeCloseTo(0, 2);
+        expect(issuance.soldUnits).toBeCloseTo(issuance.planUnits, 2);
+      }
     }
-    const ironvaleIssuances = allIssuances().filter((issuance) => issuance.cityId === 'ironvale');
-    expect(ironvaleIssuances).toHaveLength(12);
-    for (const issuance of ironvaleIssuances) {
-      expect(issuance.status).toBe('active');
-    }
-    expect(world.bonds!.holdings.filter((holding) => holding.status === 'active')).toHaveLength(54);
+    expect(world.bonds!.holdings.filter((holding) => holding.status === 'active')).toHaveLength(36);
   });
 
-  it('F-R4 债券认购：计划=成交 739,973 份、未售 0，85 笔持有全部为 investorGroup（61 跨城 / 24 同城）', () => {
+  it('F-R4 债券认购：计划=成交+未售（总量守恒），持有全部为 investorGroup（73 跨城 / 34 同城）', () => {
     const totalPlan = allIssuances().reduce((sum, issuance) => sum + issuance.planUnits, 0);
     const totalSold = allIssuances().reduce((sum, issuance) => sum + issuance.soldUnits, 0);
-    expect(totalPlan).toBe(739_973);
-    expect(totalSold).toBe(739_973);
-    for (const issuance of allIssuances()) expect(issuance.unsoldUnits).toBe(0);
+    const totalUnsold = allIssuances().reduce((sum, issuance) => sum + issuance.unsoldUnits, 0);
+    expect(totalPlan).toBe(944_758);
+    expect(totalSold).toBe(922_544);
+    expect(totalUnsold).toBe(22_214);
+    expect(totalSold + totalUnsold).toBe(totalPlan);
+    for (const issuance of allIssuances()) {
+      if (issuance.status !== 'offering') expect(issuance.unsoldUnits).toBe(0);
+    }
 
     const holdings = world.bonds!.holdings;
-    expect(holdings).toHaveLength(85);
+    expect(holdings).toHaveLength(107);
     let crossCity = 0;
     let sameCity = 0;
     for (const holding of holdings) {
@@ -115,70 +124,85 @@ describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作）'
       if (holding.holder.id.startsWith(issuance!.cityId)) sameCity += 1;
       else crossCity += 1;
     }
-    expect(crossCity).toBe(61);
-    expect(sameCity).toBe(24);
+    expect(crossCity).toBe(73);
+    expect(sameCity).toBe(34);
   });
 
-  it('F-R5 债务勾销：12 笔 bondAdvance 与 6 笔原有政府贷款 writtenOff、未偿清零', () => {
-    const bonds = allLoans().filter((loan) => loan.purpose === 'bondAdvance');
-    expect(bonds).toHaveLength(12);
-    let advancePrincipal = 0;
-    for (const loan of bonds) {
-      expect(loan.status).toBe('writtenOff');
-      expect(loan.outstanding).toBeCloseTo(0, 2);
-      expect(loan.paidPrincipal).toBeCloseTo(loan.principal, 2);
-      advancePrincipal += loan.principal;
-    }
-    expect(advancePrincipal).toBeCloseTo(485_295_713.34, 2);
+  it('F-R5 债务勾销：每笔 bondAdvance/政府贷款 writtenOff、未偿清零，且与该城 record 金额一致', () => {
+    for (const record of records()) {
+      const cityLoans = city(record.cityId).government!.loans;
+      const bonds = cityLoans.filter((loan) => loan.purpose === 'bondAdvance');
+      expect(bonds.length).toBeGreaterThan(0);
+      let advancePrincipal = 0;
+      for (const loan of bonds) {
+        expect(loan.status).toBe('writtenOff');
+        expect(loan.outstanding).toBeCloseTo(0, 2);
+        expect(loan.paidPrincipal).toBeCloseTo(loan.principal, 2);
+        advancePrincipal += loan.principal;
+      }
+      // record.advancesWrittenOff 记的是勾销时未偿；bondAdvance 全部为破产兑付垫付，未偿==本金。
+      expect(advancePrincipal).toBeCloseTo(record.advancesWrittenOff, 2);
+      expect(record.advancesWrittenOff).toBeCloseTo(record.bankAdvanceCreated, 2);
 
-    const writtenOffGovernment = allLoans().filter(
-      (loan) => loan.purpose === 'government' && loan.status === 'writtenOff',
-    );
-    expect(writtenOffGovernment).toHaveLength(6);
-    let writtenOffPrincipal = 0;
-    for (const loan of writtenOffGovernment) {
-      expect(loan.outstanding).toBeCloseTo(0, 2);
-      writtenOffPrincipal += loan.principal;
+      const writtenOffGovernment = cityLoans.filter(
+        (loan) => loan.purpose === 'government' && loan.status === 'writtenOff',
+      );
+      expect(writtenOffGovernment.length).toBeGreaterThan(0);
+      for (const loan of writtenOffGovernment) expect(loan.outstanding).toBeCloseTo(0, 2);
+      expect(record.bankLoansWrittenOff).toBeGreaterThan(0);
+      expect(record.interestWrittenOff).toBeGreaterThanOrEqual(0);
     }
-    expect(writtenOffPrincipal).toBeCloseTo(75_735_776.76, 2);
-
-    const only = records()[0]!;
-    expect(only.advancesWrittenOff).toBeCloseTo(485_295_713.34, 2);
-    expect(only.interestWrittenOff).toBeCloseTo(820_264.75, 2);
-    expect(only.bondRedemptionCount).toBe(31);
+    const lanport = city('lanport').government!.records[0]!;
+    expect(lanport.advancesWrittenOff).toBeCloseTo(345_878_940, 2);
+    expect(lanport.interestWrittenOff).toBeCloseTo(477_492.04, 2);
+    expect(lanport.bondRedemptionCount).toBe(25);
+    const ironvale = city('ironvale').government!.records[0]!;
+    expect(ironvale.advancesWrittenOff).toBeCloseTo(309_227_464.69, 2);
+    expect(ironvale.bondRedemptionCount).toBe(46);
   });
 
   it('F-R6 当月重选：破产同 tick 触发选举且看守期未残留', () => {
-    const record = city('lanport').government!.records[0]!;
-    expect(record.electionTriggeredTick).toBe(record.tick);
-    expect(record.caretakerUntilElection).toBe(false);
-    const election = world.politics!.elections.filter(
-      (entry) => entry.cityId === 'lanport' && entry.tick === record.tick,
-    );
-    expect(election).toHaveLength(1);
+    for (const record of records()) {
+      expect(record.electionTriggeredTick).toBe(record.tick);
+      expect(record.caretakerUntilElection).toBe(false);
+      const election = world.politics!.elections.filter(
+        (entry) => entry.cityId === record.cityId && entry.tick === record.tick,
+      );
+      expect(election).toHaveLength(1);
+    }
   });
 
   it('F-R7 股份分配：破产政府持股清零，且总量不变量成立', () => {
-    const holdings = world.securities.holdings.filter(
-      (holding) => holding.holder.type === 'city' && holding.holder.id === 'lanport',
-    );
-    expect(holdings).toHaveLength(0);
+    for (const record of records()) {
+      const holdings = world.securities.holdings.filter(
+        (holding) => holding.holder.type === 'city' && holding.holder.id === record.cityId,
+      );
+      expect(holdings).toHaveLength(0);
+    }
     expect(checkInvariants(world)).toEqual([]);
   });
 
-  it('F-R8 次月重建：破产后靠普通银行贷款重建债务，t36 负债率 32.2% / 70.0%', () => {
-    const record = city('lanport').government!.records[0]!;
-    const newLoans = city('lanport').government!.loans.filter(
-      (loan) => loan.purpose === 'government' && loan.startTick > record.tick,
+  it('F-R8 次月重建：破产后两城均恢复政府贷款与债券发行，t36 负债率 58.3% / 38.5%', () => {
+    const lanportRecord = city('lanport').government!.records[0]!;
+    const lanportNewLoans = city('lanport').government!.loans.filter(
+      (loan) => loan.purpose === 'government' && loan.startTick > lanportRecord.tick,
     );
-    expect(newLoans.length).toBeGreaterThanOrEqual(1);
-    expect(city('lanport').government!.lastDebt?.debtRatio ?? 0).toBeCloseTo(0.32235, 3);
-    expect(city('ironvale').government!.lastDebt?.debtRatio ?? 0).toBeCloseTo(0.699743, 3);
-    // 已知限制（秘书处确认，不判 bug）：破产后 AI 不再发新债券（债务分期到期使“禁借新还旧”恒真）。
-    expect(
-      allIssuances().filter(
-        (issuance) => issuance.cityId === 'lanport' && issuance.issuedTick > record.tick,
-      ),
-    ).toHaveLength(0);
+    expect(lanportNewLoans.length).toBeGreaterThanOrEqual(1);
+    // 问题 7 修复后：破产/重选后可以恢复发债（旧基线“破产后不再发债”的已知限制已消除）。
+    const lanportNewIssuances = allIssuances().filter(
+      (issuance) => issuance.cityId === 'lanport' && issuance.issuedTick > lanportRecord.tick,
+    );
+    expect(lanportNewIssuances.length).toBeGreaterThanOrEqual(1);
+    expect(lanportNewIssuances.some((issuance) => issuance.status === 'active')).toBe(true);
+
+    const ironvaleRecord = city('ironvale').government!.records[0]!;
+    const ironvaleNewLoans = city('ironvale').government!.loans.filter(
+      (loan) => loan.purpose === 'government' && loan.startTick > ironvaleRecord.tick,
+    );
+    expect(ironvaleNewLoans.length).toBeGreaterThanOrEqual(1);
+
+    expect(city('lanport').government!.lastDebt?.debtRatio ?? 0).toBeCloseTo(0.583012, 3);
+    expect(city('ironvale').government!.lastDebt?.debtRatio ?? 0).toBeCloseTo(0.384888, 3);
+    expect(city('greenfield').government!.lastDebt?.debtRatio ?? 0).toBeCloseTo(0.738238, 3);
   });
 });

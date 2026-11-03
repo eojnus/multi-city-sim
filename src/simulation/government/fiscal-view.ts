@@ -28,7 +28,7 @@ import type {
 import type { DemoConfig } from '../../data/config';
 import { round2 } from '../core/math';
 import { classifyLegacyVisibility } from '../core/save';
-import { bondsOf } from './bonds';
+import { bondSubscriptionCloseTick, bondsOf } from './bonds';
 import { assessCityFiscalRisk, cityDebt, isCityBankrupt, recent12MonthGdp } from './metrics';
 
 /** 当前查看者的身份投影（只含权限判断所需字段；不缓存，每次现算）。 */
@@ -80,6 +80,9 @@ function issuanceView(issuance: BondIssuance): MayorBondIssuanceView {
     status: issuance.status,
     accruedInterest: issuance.accruedInterest,
     interestPaid: issuance.interestPaid,
+    issuedTick: issuance.issuedTick,
+    subscriptionCloseTick: bondSubscriptionCloseTick(issuance),
+    closedTick: issuance.closedTick,
   };
 }
 
@@ -170,6 +173,8 @@ export function buildPublicBondOffer(
     unitsAvailable: Math.max(0, issuance.planUnits - issuance.soldUnits),
     maturityTick: issuance.maturityTick,
     status: issuance.status,
+    issuedTick: issuance.issuedTick,
+    subscriptionCloseTick: bondSubscriptionCloseTick(issuance),
   };
 }
 

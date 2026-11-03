@@ -3,7 +3,7 @@
 // v0.2 新增证券/治理/居民投资/协议/通知数据；旧 v1 存档由 core/save.ts 迁移。
 
 export const SAVE_FORMAT_VERSION = 7;
-export const GAME_VERSION = '0.7.0';
+export const GAME_VERSION = '0.7.1';
 
 export type GoodId =
   | 'grain'
@@ -1804,11 +1804,17 @@ export interface MayorBondIssuanceView {
   status: BondIssuanceStatus;
   accruedInterest: number;
   interestPaid: number;
+  /** 发行 tick（认购窗口开启）。 */
+  issuedTick: number;
+  /** 认购窗口关闭 tick（= issuedTick + 1，下一次月结）；窗口内可认购，跨月不续售。 */
+  subscriptionCloseTick: number;
+  /** 实际关闭 tick；仍开放时为 null。 */
+  closedTick: number | null;
 }
 
 /**
- * 非市长可见的债券投资信息白名单：发行城市、期限、票面年利率、面额、可认购数量、到期日。
- * 不包含发行计划总额、全部已售额或政府总债务（补充指令 #7）。
+ * 非市长可见的债券投资信息白名单：发行城市、期限、票面年利率、面额、可认购数量、到期日，
+ * 以及认购窗口的开启/关闭 tick（窗口信息是投资决策必需，不含发行计划总额/总售额/总债务）。
  */
 export interface PublicBondOfferView {
   issuanceId: string;
@@ -1821,6 +1827,10 @@ export interface PublicBondOfferView {
   unitsAvailable: number;
   maturityTick: number;
   status: BondIssuanceStatus;
+  /** 发行 tick（认购窗口开启）。 */
+  issuedTick: number;
+  /** 认购窗口关闭 tick（= issuedTick + 1，下一次月结关闭；不是无限期窗口）。 */
+  subscriptionCloseTick: number;
 }
 
 /** 玩家自己持有的债券（含到期日与应得款，任何玩家可见自己的）。 */

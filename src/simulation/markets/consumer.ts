@@ -1,13 +1,26 @@
-import type { City, GoodId, OccupationClass, WorldState } from '../contracts/types';
+import type {
+  City,
+  Company,
+  GoodId,
+  HouseholdGroup,
+  OccupationClass,
+  WorldState,
+} from '../contracts/types';
 import type { DemoConfig } from '../../data/config';
 import { GOODS } from '../../data/demo-data';
 import type { CityLedgers } from './markets';
-import { applyConsumerDemand, offeredStock } from './markets';
+import {
+  applyConsumerDemand,
+  executePurchase,
+  offeredStock,
+  quoteLocalPurchase,
+} from './markets';
 import { executeIntercityPurchase } from './intercity';
 import { householdGroupsOfCity } from '../population/household-groups';
 import { recordGroupConsumption } from '../population/household-economy';
 import {
   borrowForConsumption,
+  consumptionLoanEligibility,
   householdConsumerBudgetSnapshot,
 } from '../population/household-finance';
 import { clamp, round2 } from '../core/math';
@@ -66,6 +79,85 @@ function localAvailableQty(world: WorldState, city: City, goodId: GoodId): numbe
     total += offeredStock(company, goodId);
   }
   return round2(Math.max(0, total));
+}
+
+/**
+ * 贷款补足成交前的城内市场快照（v0.7 验收问题 3：交易与放款必须原子一致）。
+ * 记录所有可能被 executePurchase 改写的字段：卖方库存/现金/收入/销量、市场账本。
+ * 正常路径下报价与成交额一致、预检已通过，不需要回滚；这是放款失败/报价漂移时的兜底。
+ */
+interface StagedSalesSnapshot {
+  companies: {
+    company: Company;
+    cash: number;
+    revenue: number;
+    sold: number;
+    inventory: Map<GoodId, number>;
+  }[];
+  ledgers: {
+    goodId: GoodId;
+    consumerDemand: number;
+    demand: number;
+    sold: number;
+    spend: number;
+    transactionCount: number;
+    unmetDemand: number;
+  }[];
+}
+
+function captureStagedSales(
+  world: WorldState,
+  city: City,
+  ledgers: CityLedgers,
+  goodIds: GoodId[],
+): StagedSalesSnapshot {
+  const snapshot: StagedSalesSnapshot = { companies: [], ledgers: [] };
+  for (const company of world.companies) {
+    if (company.cityId !== city.id) continue;
+    const inventory = new Map<GoodId, number>();
+    for (const goodId of goodIds) inventory.set(goodId, company.inventory[goodId] ?? 0);
+    snapshot.companies.push({
+      company,
+      cash: company.cash,
+      revenue: company.lastMonth.revenue,
+      sold: company.lastMonth.sold,
+      inventory,
+    });
+  }
+  for (const goodId of goodIds) {
+    const ledger = ledgers[goodId];
+    if (!ledger) continue;
+    snapshot.ledgers.push({
+      goodId,
+      consumerDemand: ledger.consumerDemand,
+      demand: ledger.demand,
+      sold: ledger.sold,
+      spend: ledger.spend,
+      transactionCount: ledger.transactionCount,
+      unmetDemand: ledger.unmetDemand,
+    });
+  }
+  return snapshot;
+}
+
+/** 完整撤销 captureStagedSales 之后的所有城内成交变化（不放款时不得留下虚假成交）。 */
+function restoreStagedSales(snapshot: StagedSalesSnapshot, ledgers: CityLedgers): void {
+  for (const entry of snapshot.companies) {
+    for (const [goodId, qty] of entry.inventory) entry.company.inventory[goodId] = qty;
+    entry.company.cash = entry.cash;
+    entry.company.lastMonth.revenue = entry.revenue;
+    entry.company.lastMonth.sold = entry.sold;
+  }
+  for (const entry of snapshot.ledgers) {
+    const ledger = ledgers[entry.goodId];
+    if (!ledger) continue;
+    ledger.consumerDemand = entry.consumerDemand;
+    ledger.demand = entry.demand;
+    ledger.sold = entry.sold;
+    ledger.spend = entry.spend;
+    ledger.transactionCount = entry.transactionCount;
+    ledger.unmetDemand = entry.unmetDemand;
+  }
 }
 
 /**
@@ -184,63 +276,103 @@ export function runConsumerMarket(
       }
     }
 
-    // 4) 缺口分账 + 消费贷补足：只在本地确有供给时放款，且不借超过已确认供给的资金。
+    // 4) 资金缺口补足（消费贷）：先按真实成交规则报价并校验授信，再原子提交“放款+成交”。
+    //    v0.7 验收问题 3：任何一步不满足都不得成交，绝不允许“市场记成交、群体支付 0”。
     let loanFinanced = 0;
     const loanAvailable = snapshot.loanAvailable;
     if (loanAvailable > 0) {
-      const gapCostByGood = new Map<GoodId, { price: number; supplyQty: number }>();
-      let financeableCost = 0;
-      for (const good of consumerGoods) {
-        const price = city.market[good.id]?.price ?? good.basePrice;
-        const effectiveQty = round2((desiredQty.get(good.id) ?? 0) * affordability);
-        const gapQty = round2(Math.max(0, effectiveQty - (groupBought[good.id] ?? 0)));
-        // 先确认供给：只对本地实际可售的部分放款，供给不足不借多余资金。
-        const supplyQty = round2(Math.min(gapQty, localAvailableQty(world, city, good.id)));
-        if (supplyQty <= 0) continue;
-        gapCostByGood.set(good.id, { price, supplyQty });
-        financeableCost = round2(financeableCost + supplyQty * price);
+      const credit = config.households.householdCredit;
+      // 4.1 只对“资金缺口中有本地真实供给”的部分报价：报价与 executePurchase 共用
+      //     卖家价格系数、配送效率、预算与舍入规则，报价额即最终成交额。
+      const gapGoods = consumerGoods
+        .map((good) => {
+          const effectiveQty = round2((desiredQty.get(good.id) ?? 0) * affordability);
+          const gapQty = round2(Math.max(0, effectiveQty - (groupBought[good.id] ?? 0)));
+          return { goodId: good.id, gapQty };
+        })
+        .filter((entry) => entry.gapQty > 0)
+        .sort((a, b) => a.goodId.localeCompare(b.goodId));
+      let remainingFinancing = round2(loanAvailable);
+      const plans: { goodId: GoodId; qty: number; cost: number }[] = [];
+      for (const entry of gapGoods) {
+        if (remainingFinancing <= 0) break;
+        const quote = quoteLocalPurchase(
+          world,
+          city,
+          entry.goodId,
+          entry.gapQty,
+          remainingFinancing,
+        );
+        if (quote.qty <= 0 || quote.cost <= 0) continue;
+        plans.push({ goodId: entry.goodId, qty: quote.qty, cost: quote.cost });
+        remainingFinancing = round2(Math.max(0, remainingFinancing - quote.cost));
       }
-      const financeBudget = Math.min(loanAvailable, financeableCost);
-      if (financeBudget >= config.households.householdCredit.minLoanAmount) {
-        let remaining = financeBudget;
-        const purchases = [...gapCostByGood.entries()]
-          .sort(([left], [right]) => left.localeCompare(right))
-          .map(([goodId, entry]) => {
-            const qty = round2(
-              Math.max(0, Math.min(entry.supplyQty, Math.floor((remaining / entry.price) * 100) / 100)),
-            );
-            const cost = round2(qty * entry.price);
-            remaining = round2(remaining - cost);
-            return { goodId, qty, cost };
-          })
-          .filter((entry) => entry.qty > 0);
-        const plannedCost = round2(purchases.reduce((total, entry) => total + entry.cost, 0));
-        if (plannedCost >= config.households.householdCredit.minLoanAmount) {
-          // 先确认供给并在本地成交，再按实际成交额放款（不借超过实际卖出额的资金）。
+      const plannedCost = round2(plans.reduce((total, plan) => total + plan.cost, 0));
+      // 4.2 预检：单笔最低额、授信资格/冻结、当月笔数、真实可用额度（放款前不再变化）。
+      if (plans.length > 0 && plannedCost >= credit.minLoanAmount) {
+        const eligibility = consumptionLoanEligibility(world, group, config, plannedCost, tick);
+        if (eligibility.ok) {
+          const staged = captureStagedSales(
+            world,
+            city,
+            ledgers,
+            plans.map((plan) => plan.goodId),
+          );
+          // 4.3 按计划成交（预算=计划金额）。实际成交额只会 ≤ 计划额，随后按实际成交额放款。
           let actualSpend = 0;
-          for (const purchase of purchases) {
-            const bought = applyConsumerDemand(world, city, ledgers, purchase.goodId, purchase.qty);
-            loanFinanced = round2(loanFinanced + bought.spend);
-            actualSpend = round2(actualSpend + bought.spend);
-            groupBought[purchase.goodId] = round2(
-              (groupBought[purchase.goodId] ?? 0) + bought.qty,
+          const executed: { goodId: GoodId; qty: number }[] = [];
+          for (const plan of plans) {
+            const ledger = ledgers[plan.goodId];
+            if (ledger) {
+              ledger.consumerDemand = round2(ledger.consumerDemand + plan.qty);
+              ledger.demand = round2(ledger.demand + plan.qty);
+            }
+            const bought = executePurchase(
+              world,
+              city,
+              ledgers,
+              plan.goodId,
+              plan.qty,
+              plan.cost,
+              { consumer: true },
             );
+            if (ledger && bought.qty < plan.qty - 1e-6) {
+              ledger.unmetDemand = round2(ledger.unmetDemand + (plan.qty - bought.qty));
+            }
+            actualSpend = round2(actualSpend + bought.spend);
+            executed.push({ goodId: plan.goodId, qty: bought.qty });
           }
-          if (actualSpend > 0) {
-            const amount = Math.max(actualSpend, config.households.householdCredit.minLoanAmount);
-            const loan = borrowForConsumption(world, group, config, amount, tick);
+          // 4.4 放款金额 = 最终实际成交额（不多借一分钱）；低于单笔最低额则不得成交。
+          const finalEligibility =
+            actualSpend >= credit.minLoanAmount
+              ? consumptionLoanEligibility(world, group, config, actualSpend, tick)
+              : ({ ok: false as const, error: '' } as const);
+          if (finalEligibility.ok) {
+            const loan = borrowForConsumption(world, group, config, actualSpend, tick);
             if (loan.ok) {
-              // 借到但未花掉的零头（最低金额/尾差）留在群体现金，仍是真实债务。
-              void loan;
+              loanFinanced = actualSpend;
+              for (const entry of executed) {
+                groupBought[entry.goodId] = round2(
+                  (groupBought[entry.goodId] ?? 0) + entry.qty,
+                );
+              }
             } else {
-              // 理论上预检已排除失败（额度、笔数）；若仍失败，这部分支出回滚不可行，
-              // 记录日志并让现金缺口暴露给不变量，而不是静默借新钱。
+              // 预检已通过，放款理论上不会失败；若失败则成交与放款一起回滚，不留部分状态。
+              restoreStagedSales(staged, ledgers);
               world.log.push({
                 tick,
                 kind: 'warning',
-                message: `${group.name} 的消费贷放款失败：${loan.error ?? '未知原因'}（已成交 ${actualSpend.toFixed(2)}）。`,
+                message: `${group.name} 的消费贷放款失败：${loan.error ?? '未知原因'}，本笔信贷消费已回滚。`,
               });
             }
+          } else {
+            // 实际成交额低于单笔最低贷款额（含舍入）：不得放款，也不得成交。
+            restoreStagedSales(staged, ledgers);
+            world.log.push({
+              tick,
+              kind: 'warning',
+              message: `${group.name} 的消费贷成交额 ${actualSpend.toFixed(2)} 低于最低贷款额 ${credit.minLoanAmount.toFixed(0)}，本笔信贷消费已回滚。`,
+            });
           }
         }
       }

@@ -17,7 +17,7 @@ import { settleGovernment } from '../src/simulation/government/fiscal';
 import { collectInvestableFunds } from '../src/simulation/investors/investors';
 import { runConsumerMarket } from '../src/simulation/markets/consumer';
 import { householdGroupsOfCity } from '../src/simulation/population/household-groups';
-import { householdGroupBudget } from '../src/simulation/population/household-economy';
+import { householdConsumerBudgetSnapshot } from '../src/simulation/population/household-finance';
 import { round2 } from '../src/simulation/core/math';
 import { appointPlayerMayor } from '../src/simulation/politics/politics';
 import { migrateLegacyCompanyDebt } from '../src/simulation/banking/banking';
@@ -374,11 +374,17 @@ describe('修复三：跨城超载结算的买卖双方资金流', () => {
     const restored = parseSave(serializeSave(world));
     expect(restored.ok, restored.error).toBe(true);
     const restoredCity = restored.world!.cities.find((entry) => entry.id === city.id)!;
-    // 问题 5：预算已改为逐群体口径（Σ min(群体收入×倾向, 群体现金)），不再是城市统一预算。
+    // 问题 5：预算已改为逐群体口径（由 householdConsumerBudgetSnapshot 计算：上月收入按比例
+    // + 现金按比例，并先扣当月到期贷款），不再是城市统一预算。
     // 必须在 runConsumerMarket 之前取预算：运行后群体现金已被消费扣减。
+    const budgetTick = restored.world!.time.tick;
     const expectedBudget = round2(
       householdGroupsOfCity(restored.world!, city.id).reduce(
-        (sum, group) => sum + householdGroupBudget(restored.world!, restoredCity, group, config),
+        (sum, group) =>
+          sum +
+          round2(
+            householdConsumerBudgetSnapshot(restored.world!, group, config, budgetTick).cashBudget,
+          ),
         0,
       ),
     );

@@ -46,13 +46,11 @@ import { assessCityFiscalRisk, cityDebt } from './metrics';
 import {
   accrueBondInterest,
   bondsOf,
-  closeGovernmentBondSubscription,
   issueGovernmentBond,
   payBondCoupon,
   settleBondBankruptcyRedemption,
   settleBondMaturity,
-  subscribeGovernmentBond,
-  bondSubscriptionOrder,
+  settleBondSubscriptionWindow,
 } from './bonds';
 import { receiveTreasury, spendTreasury } from './treasury';
 import { requestImmediateElection } from '../politics/politics';
@@ -72,6 +70,8 @@ export interface GovernmentSettlementResult {
   /** 本月转为欠付的应付项**笔数**（票息欠付 + 贷款分期欠付）。 */
   payablesInArrears: number;
   advancedByBank: number;
+  /** 本月关闭认购窗口时由居民投资实体/企业认购进入财政的资金合计（v0.7 问题 1）。 */
+  bondProceeds: number;
   bankrupted: boolean;
   debtSummary: GovernmentDebtSummary | null;
   problems: string[];
@@ -85,15 +85,18 @@ export interface GovernmentAdvanceResult {
   error?: string;
 }
 
-/** 政府贷款按月计提结果（等额本金：`outstanding_before_k = principal − (k−1)·monthlyPrincipal`）。 */
+/**
+ * 政府贷款按月计提结果（等额本金：期初未偿本金按**实际**还款历史逐月推进，
+ * 见 governmentLoanAccrual 口径注释；欠付本金会留在余额中，提前还款会降低余额）。
+ */
 export interface GovernmentLoanAccrual {
   /** 本月应计利息（若仍未付）。 */
   currentMonthInterest: number;
   /** 自放款至当前 tick 的累计应付利息。 */
   cumulativeInterest: number;
-  /** 累计应付中尚未支付的部分。 */
+  /** 累计应付中尚未支付的部分（欠息，不滚入本金/不计复利）。 */
   unpaidInterest: number;
-  /** 已过月数（0…termMonths）。 */
+  /** 已过月数（≥0；不封顶于 termMonths，超期未结清继续计息）。 */
   elapsedMonths: number;
 }
 
@@ -104,6 +107,7 @@ const EMPTY_SETTLEMENT = (tick: number, cityId: string): GovernmentSettlementRes
   payablesPaid: 0,
   payablesInArrears: 0,
   advancedByBank: 0,
+  bondProceeds: 0,
   bankrupted: false,
   debtSummary: null,
   problems: [],
@@ -113,20 +117,62 @@ function holderKey(holder: BondHolder): string {
   return `${holder.kind}:${holder.id}`;
 }
 
-/** 政府贷款等额本金计息表（纯计算，可重复调用同一 tick 得到相同结果）。 */
+/**
+ * 政府贷款等额本金计息表（纯计算，可重复调用同一 tick 得到相同结果）。
+ *
+ * 口径（v0.7 验收问题 4）：按**实际未偿本金**逐月计息，而不是"假设按期还本"的计划余额。
+ * - 以当前实际未偿 `loan.outstanding` 为锚，加上该月及以后**实际已还**本金（LoanPayment.
+ *   principalPaid）回推每月期初未偿：`outstanding_before_k = outstanding + Σ_{j≥k} principalPaid_j`。
+ *   欠付本金（应还未还）因此自然留在余额中，下月按更高的实际余额计息；提前还款则降低余额。
+ * - 若贷款尚无任何还款记录（纯函数预演/尚未结算），按计划等额本金余额计息，保持旧口径兼容。
+ * - 欠息单独挂账、不滚入计息本金（不罚息、不复利，与既有契约一致）；unpaidInterest 只累计
+ *   应计与已付的差额，不会抹掉欠款。
+ * - elapsedMonths 不封顶于 termMonths：超期未结清的贷款继续按实际余额计息。
+ */
 export function governmentLoanAccrual(
   loan: GovernmentLoanContract,
   tick: number,
 ): GovernmentLoanAccrual {
-  const term = Math.max(1, loan.termMonths);
-  const elapsedMonths = Math.max(0, Math.min(term, tick - loan.startTick));
+  const elapsedMonths = Math.max(0, tick - loan.startTick);
+  const payments = loan.payments ?? [];
+  const paidByMonth = new Map<number, number>();
+  let totalPaidPrincipal = 0;
+  for (const payment of payments) {
+    const month = payment.tick - loan.startTick;
+    if (month < 1) continue;
+    const paid = Math.max(0, payment.principalPaid);
+    paidByMonth.set(month, round2((paidByMonth.get(month) ?? 0) + paid));
+    totalPaidPrincipal = round2(totalPaidPrincipal + paid);
+  }
   let cumulativeInterest = 0;
   let currentMonthInterest = 0;
-  for (let month = 1; month <= elapsedMonths; month++) {
-    const outstandingBefore = Math.max(0, loan.principal - (month - 1) * loan.monthlyPrincipal);
-    const interest = round2(outstandingBefore * loan.rateMonthly);
-    cumulativeInterest = round2(cumulativeInterest + interest);
-    currentMonthInterest = interest;
+  const matchesScheduledStart =
+    payments.length === 0 && Math.abs(loan.outstanding - loan.principal) <= 0.005;
+  if (matchesScheduledStart) {
+    // 尚无任何还款记录且本金未动：按计划等额本金预演（旧口径，纯函数可测且不改变既有期望值）。
+    const term = Math.max(1, loan.termMonths);
+    const months = Math.min(elapsedMonths, term);
+    for (let month = 1; month <= months; month++) {
+      const outstandingBefore = Math.max(0, loan.principal - (month - 1) * loan.monthlyPrincipal);
+      const interest = round2(outstandingBefore * loan.rateMonthly);
+      cumulativeInterest = round2(cumulativeInterest + interest);
+      currentMonthInterest = interest;
+    }
+  } else {
+    // 有还款记录、或本金已变动（提前还款/逾期/超期）：以当前实际未偿为锚回推每月期初
+    // 未偿本金（含欠付本金、反映提前还款；超期未结清时继续按实际余额计息）。
+    let paidBefore = 0;
+    for (let month = 1; month <= elapsedMonths; month++) {
+      const paidFromThisMonth = round2(totalPaidPrincipal - paidBefore);
+      const outstandingBefore = Math.max(
+        0,
+        Math.min(loan.principal, round2(loan.outstanding + paidFromThisMonth)),
+      );
+      const interest = round2(outstandingBefore * loan.rateMonthly);
+      cumulativeInterest = round2(cumulativeInterest + interest);
+      currentMonthInterest = interest;
+      paidBefore = round2(paidBefore + (paidByMonth.get(month) ?? 0));
+    }
   }
   const unpaidInterest = round2(Math.max(0, cumulativeInterest - loan.paidInterest));
   return { currentMonthInterest, cumulativeInterest, unpaidInterest, elapsedMonths };
@@ -135,8 +181,13 @@ export function governmentLoanAccrual(
 /**
  * 月结唯一入口：对全部城市按固定六阶段顺序结算政府债务（对同一 tick 幂等：
  * 已记录在 city.government.settledTicks 的 tick 不得重复兑付/清算）。
- * AI 政府自动发债（config.government.aiGovernment）在本函数内、逐城结算之前执行：
- * 与手动路径走同一发行/认购校验，禁止借新还旧（本月有到期本息时不新发）。
+ *
+ * 顺序（v0.7 验收问题 1/2/7）：
+ * 1) 先结算本月（关闭上期认购窗口并在关闭前由居民投资实体/企业用真实资金认购、
+ *    计提利息、付息/还本、破产判定与解除）。
+ * 2) 结算**之后**再让 AI 政府按最新财政/债务状态发起下期发行计划；发行只创建 offering，
+ *    窗口留给玩家在当月操作，下一次月结才由 AI 主体认购并关闭。
+ *    这样破产当月不会新发债（破产状态已写入），也不会在同一次月结内创建又关闭。
  */
 export function settleGovernmentDebt(
   world: WorldState,
@@ -148,8 +199,11 @@ export function settleGovernmentDebt(
   for (const city of cities) {
     if (!city.government) continue;
     if (city.government.settledTicks.includes(tick)) continue;
-    maybeAutoIssueGovernmentBond(world, city, config, tick, logs);
+    // 禁借新还旧（#29）按**结算前**的到期状态判定：本月有到期债券本息时不新发计划；
+    // 新发计划的资金也要等下一次月结窗口关闭才到账，不会用于偿付本月到期项。
+    const debtServiceDue = hasDebtServiceDueThisTick(world, city, config, tick);
     settleCityGovernmentDebt(world, city, config, logs);
+    maybeAutoIssueGovernmentBond(world, city, config, tick, logs, { debtServiceDue });
   }
 }
 
@@ -179,12 +233,10 @@ export function settleCityGovernmentDebt(
     }
   }
 
-  // 认购窗口只限发行当月：结算开始时关闭仍未关闭的批次（未售出不形成债务）。
-  for (const issuance of bondsOf(world).issuances) {
-    if (issuance.cityId !== city.id) continue;
-    if (issuance.status !== 'offering') continue;
-    closeGovernmentBondSubscription(world, config, issuance.id, tick);
-  }
+  // ⓪ 认购窗口只限发行当月：结算开始时先由居民投资实体/企业用真实资金认购，再关闭窗口
+  //    （未售出不形成债务）。玩家不参与自动认购；AI 政府不得自动扣玩家现金。
+  const windowSettlement = settleBondSubscriptionWindow(world, config, city, tick, logs);
+  result.bondProceeds = windowSettlement.proceeds;
 
   // ① 计提应计利息（债券 + 政府贷款），必须在生成应付项与破产判定之前。
   accrueGovernmentDebtInterest(world, city, config, tick);
@@ -228,6 +280,8 @@ export function settleCityGovernmentDebt(
     logs.push({
       tick,
       kind: 'government',
+      // 债务率/破产状态细节仅市长可见。
+      visibility: { scope: 'mayor', cityId: city.id },
       message: `${city.name} 债务/GDP 回落至 ${(government.lastDebt.debtRatio * 100).toFixed(1)}%，解除破产状态（历史记录保留）。`,
     });
   }
@@ -264,13 +318,36 @@ export function lastMonthFiscalExpense(city: City): number {
 }
 
 /**
- * AI 政府自动发债（DECISIONS v1.5 #42）。触发条件全部满足才发行：
+ * 破产后恢复发债门槛（v0.7 验收问题 7）：只看政府记录与选举事实，不修改债务/破产判定。
+ * - 破产状态未解除（status==='bankrupt'）由调用方先拦截；
+ * - 若最近破产记录进入看守期（caretakerUntilElection），必须在该记录之后完成过至少一次重选，
+ *   才恢复发债（config.government.aiGovernment.requireElectionAfterBankruptcy=true 时生效）。
+ */
+function issuanceBlockedByCaretaker(world: WorldState, city: City, config: DemoConfig): boolean {
+  if (!config.government.aiGovernment.requireElectionAfterBankruptcy) return false;
+  const government = city.government;
+  const latestRecord = government?.records[government.records.length - 1];
+  if (!latestRecord?.caretakerUntilElection) return false;
+  const elections = world.politics?.elections ?? [];
+  return !elections.some(
+    (election) => election.cityId === city.id && election.tick > latestRecord.tick,
+  );
+}
+
+/**
+ * AI 政府自动发债（DECISIONS v1.5 #42；v0.7 验收问题 2/7 修订）。触发条件全部满足才发起
+ * **发行计划**：
  * - aiGovernment.enabled；
- * - 未破产、无看守期（#31：新发债须等新市长）、本月本城发行次数未超限；
+ * - 未破产；若破产记录进入看守期，还需此后已完成一次重选（问题 7 恢复门槛）；
+ * - 本月本城发行次数未超限；
  * - 财政余额 < 上月财政支出 × triggerBelowExpenseMonths，且补足到 topUpToExpenseMonths 倍；
- * - 本月无任何到期债券本息 / 政府贷款分期（禁止借新还旧）；
+ * - 禁借新还旧：本月有到期债券本息时默认不新发（blockIssuanceOnBondService=true）；
+ *   政府贷款常规分期默认不再阻断（blockIssuanceOnLoanInstalment=false，问题 7 根因）；
  * - 发债后债务/GDP 不超过 maxDebtRatioToIssue。
- * 发行、认购、关闭全部走 manual 路径的同一套函数与校验（不另写放行逻辑）。
+ *
+ * 本函数只创建 offering 发行计划，**不认购、不关闭**：窗口为发行当月，留给玩家（含其他城市）
+ * 在窗口内操作；下一次月结由 settleBondSubscriptionWindow 统一完成 AI 认购与关闭。
+ * 发行/认购/关闭全部走 manual 路径的同一套函数与校验（不另写放行逻辑）。
  */
 export function maybeAutoIssueGovernmentBond(
   world: WorldState,
@@ -278,13 +355,13 @@ export function maybeAutoIssueGovernmentBond(
   config: DemoConfig,
   tick: number,
   logs: LogEntry[],
+  options: { debtServiceDue?: boolean } = {},
 ): { issued: boolean; units: number } {
   const ai = config.government.aiGovernment;
   const government = city.government;
   if (!ai.enabled || !government) return { issued: false, units: 0 };
   if (government.bankruptcy.status === 'bankrupt') return { issued: false, units: 0 };
-  const latestRecord = government.records[government.records.length - 1];
-  if (latestRecord?.caretakerUntilElection) return { issued: false, units: 0 };
+  if (issuanceBlockedByCaretaker(world, city, config)) return { issued: false, units: 0 };
   const issuedThisTick = bondsOf(world).issuances.filter(
     (issuance) => issuance.cityId === city.id && issuance.issuedTick === tick,
   ).length;
@@ -294,8 +371,11 @@ export function maybeAutoIssueGovernmentBond(
   if (baseline <= 0) return { issued: false, units: 0 };
   const trigger = round2(baseline * ai.triggerBelowExpenseMonths);
   if (city.treasury >= trigger) return { issued: false, units: 0 };
-  // 禁借新还旧：本月已有债券/贷款到期项时不新发。
-  if (hasDebtServiceDueThisTick(world, city, config, tick)) return { issued: false, units: 0 };
+  // 禁借新还旧：本月已有到期债券本息时不新发（贷款分期按配置，默认不阻断）。
+  // 生产路径由 settleGovernmentDebt 传入"结算前"的判定，避免结算后到期项已消失导致规则失效。
+  const debtServiceDue =
+    options.debtServiceDue ?? hasDebtServiceDueThisTick(world, city, config, tick);
+  if (debtServiceDue) return { issued: false, units: 0 };
 
   const target = round2(baseline * ai.topUpToExpenseMonths);
   let need = round2(Math.max(0, target - city.treasury));
@@ -318,64 +398,54 @@ export function maybeAutoIssueGovernmentBond(
     logs.push({
       tick,
       kind: 'warning',
+      visibility: { scope: 'mayor', cityId: city.id },
       message: `${city.name} AI 自动发债未获准：${issue.error ?? '未知原因'}。`,
-    });
-    return { issued: false, units: 0 };
-  }
-  let sold = 0;
-  for (const holder of bondSubscriptionOrder(world, config, issue.issuance.id)) {
-    // AI 政府只代表非玩家主体自动认购；玩家是否买债必须由玩家自己决定，不能被动扣现金。
-    if (holder.kind === 'player') continue;
-    const remaining = issue.issuance.planUnits - issue.issuance.soldUnits;
-    if (remaining <= 0) break;
-    const subscription = subscribeGovernmentBond(
-      world,
-      config,
-      issue.issuance.id,
-      holder,
-      remaining,
-      tick,
-    );
-    if (subscription.ok) sold += subscription.units;
-  }
-  closeGovernmentBondSubscription(world, config, issue.issuance.id, tick);
-  if (sold <= 0) {
-    logs.push({
-      tick,
-      kind: 'warning',
-      message: `${city.name} AI 自动发债 ${units} 份无人认购，未形成债务。`,
     });
     return { issued: false, units: 0 };
   }
   logs.push({
     tick,
     kind: 'government',
-    message: `${city.name} AI 政府为补足财政发行债券 ${units} 份（成交 ${sold} 份，到账 ${round2(
-      sold * market.faceValue,
-    )}）。`,
+    // 计划份数/面额属市长专属财政口径；公开市场只显示可认购份数与窗口。
+    visibility: { scope: 'mayor', cityId: city.id },
+    message: `${city.name} AI 政府为补足财政发起债券发行计划 ${units} 份（面额 ${
+      market.faceValue
+    }，年息 ${(market.couponRateAnnual * 100).toFixed(1)}%，期限 ${
+      market.termMonths
+    } 个月，到期 tick ${issue.issuance.maturityTick}）；认购窗口至下一次月结，玩家可在本月内认购。`,
   });
-  return { issued: true, units: sold };
+  return { issued: true, units };
 }
 
-/** 本月是否存在已到期债券本息或政府贷款分期（AI 禁借新还旧的判定）。 */
+/**
+ * 本月是否存在"债券到期本息"或"政府贷款分期"（AI 禁借新还旧判定）。
+ *
+ * v0.7 验收问题 7：两类到期分开配置，默认只把**债券到期本息**视为借新还旧；
+ * 政府贷款常规分期不再永久阻断发债——赤字转贷后每月都有分期，旧口径恒真会使 AI 永久停发。
+ * 是否阻断由 config.government.aiGovernment.blockIssuanceOnBondService /
+ * blockIssuanceOnLoanInstalment 控制（默认 true / false），不修改任何债务本身。
+ */
 function hasDebtServiceDueThisTick(
   world: WorldState,
   city: City,
   config: DemoConfig,
   tick: number,
 ): boolean {
-  const ledger = bondsOf(world);
-  for (const issuance of ledger.issuances) {
-    if (issuance.cityId !== city.id || issuance.status !== 'active') continue;
-    if (tick >= issuance.maturityTick) return true;
-    const period = issuance.interestPeriodMonths;
-    const dueTick = (issuance.lastCouponTick ?? issuance.issuedTick) + period;
-    if (issuance.couponsPaid < 3 && tick >= dueTick) return true;
+  const ai = config.government.aiGovernment;
+  if (ai.blockIssuanceOnBondService) {
+    for (const issuance of bondsOf(world).issuances) {
+      if (issuance.cityId !== city.id || issuance.status !== 'active') continue;
+      if (tick >= issuance.maturityTick) return true;
+      const period = issuance.interestPeriodMonths;
+      const dueTick = (issuance.lastCouponTick ?? issuance.issuedTick) + period;
+      if (issuance.couponsPaid < 3 && tick >= dueTick) return true;
+    }
   }
-  for (const loan of city.government?.loans ?? []) {
-    if (loan.status === 'active' && loan.nextDueTick <= tick) return true;
+  if (ai.blockIssuanceOnLoanInstalment) {
+    for (const loan of city.government?.loans ?? []) {
+      if (loan.status === 'active' && loan.nextDueTick <= tick) return true;
+    }
   }
-  void config;
   return false;
 }
 
@@ -585,6 +655,7 @@ export function payGovernmentPayables(
       logs.push({
         tick,
         kind: 'warning',
+        visibility: { scope: 'mayor', cityId: city.id },
         message: `${city.name} 债券 ${issuanceId} 票息支付失败：${redemption.error ?? '未知原因'}。`,
       });
       continue;
@@ -597,6 +668,7 @@ export function payGovernmentPayables(
       logs.push({
         tick,
         kind: 'warning',
+        visibility: { scope: 'mayor', cityId: city.id },
         message: `${city.name} 债券 ${issuanceId} 到期兑付失败：${redemption.error ?? '未知原因'}。`,
       });
       continue;
@@ -791,6 +863,8 @@ export function borrowForGovernment(
   logs.push({
     tick,
     kind: 'government',
+    // 政府借款金额/利率仅市长可见。
+    visibility: { scope: 'mayor', cityId: city.id },
     message: `${city.name} 政府向银行借款 ${borrowed}（${loanConfig.termMonths} 个月，月息 ${(
       loanConfig.rateMonthly * 100
     ).toFixed(2)}%）。`,
@@ -1048,12 +1122,18 @@ export function liquidateBankruptGovernment(
     government.records = government.records.slice(-maxRecords);
   }
 
+  // 破产事实与重选结果公开（不含任何财政数字）；具体兑付/勾销/债务率仅该城市长可见。
   logs.push({
     tick,
     kind: 'warning',
-    message: `${city.name} 政府破产：债务 ${summary.totalDebt} / 判定 GDP ${summary.gdpJudgementValue} = ${(
-      summary.debtRatio * 100
-    ).toFixed(1)}%；银行兑付债券本金 ${redemption.principalPaid}、利息 ${redemption.interestPaid}，勾销贷款 ${round2(
+    visibility: { scope: 'public', cityId: null },
+    message: `${city.name} 政府破产：已触发破产清算与重选程序（财政细节见市长视图）。`,
+  });
+  logs.push({
+    tick,
+    kind: 'warning',
+    visibility: { scope: 'mayor', cityId: city.id },
+    message: `${city.name} 政府破产：债务/GDP ${(summary.debtRatio * 100).toFixed(1)}%（债务 ${summary.totalDebt} / 判定 GDP ${summary.gdpJudgementValue}）；银行兑付债券本金 ${redemption.principalPaid}、利息 ${redemption.interestPaid}，勾销贷款 ${round2(
       bankLoansWrittenOff + advancesWrittenOff,
     )}。`,
   });

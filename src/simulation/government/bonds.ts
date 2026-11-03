@@ -96,6 +96,17 @@ function bondHolderKey(holder: BondHolder): string {
   return ownerKey(holder);
 }
 
+/**
+ * 认购窗口关闭 tick：发行当月一次撮合，窗口在发行 tick 之后的下一次月结关闭。
+ * 月结每次只推进 1 个 tick（Simulation.tick 是唯一时间入口），因此关闭 tick 恒为
+ * issuedTick + 1；窗口是**有限**的一个游戏月——暂停/加速只改变真实时间，不改变游戏时间，
+ * 不会延长或重复窗口。该值不单独存档：由持久化的 issuedTick / status / closedTick 推导，
+ * 读档后仍能正确判定窗口是否开放，存档格式无需升级。
+ */
+export function bondSubscriptionCloseTick(issuance: BondIssuance): number {
+  return issuance.issuedTick + 1;
+}
+
 function holderExists(world: WorldState, holder: BondHolder): boolean {
   if (holder.kind === 'player') return true;
   if (holder.kind === 'investorGroup') {
@@ -252,6 +263,7 @@ export function issueGovernmentBond(
 
   const number = ledger.nextIssuanceNumber;
   ledger.nextIssuanceNumber += 1;
+  const windowCloseTick = tick + 1;
   const issuance: BondIssuance = {
     id: `bond-${city.id}-${number}`,
     cityId: city.id,
@@ -278,7 +290,7 @@ export function issueGovernmentBond(
     redemptionReason: null,
     note: `【暂定】${city.name} 发行 ${planUnits} 份政府债券（面额 ${market.faceValue}，年息 ${(
       market.couponRateAnnual * 100
-    ).toFixed(1)}%，期限 ${market.termMonths} 个月）`,
+    ).toFixed(1)}%，期限 ${market.termMonths} 个月）；认购窗口：${tick} 至 ${windowCloseTick}（下一次月结关闭，跨月不续售）`,
   };
   ledger.issuances.push(issuance);
   return { ok: true, issuance };
@@ -408,11 +420,107 @@ export function closeGovernmentBondSubscription(
   issuance.unsoldUnits = issuance.planUnits - issuance.soldUnits;
   if (issuance.soldUnits === 0) {
     issuance.note = `${issuance.note}；认购窗口关闭时无成交，未形成债务`;
+  } else {
+    issuance.note = `${issuance.note}；认购窗口关闭：成交 ${issuance.soldUnits} 份、未售 ${issuance.unsoldUnits} 份（未售不形成债务）`;
   }
   // 首次付息日按发行月 + 付息周期计算；到期按发行月 + 期限。
   issuance.maturityTick = issuance.issuedTick + issuance.termMonths;
   return { ok: true };
 }
+
+export interface BondWindowSettlementResult {
+  /** 本次关闭的发行批次数。 */
+  issuancesClosed: number;
+  /** 关闭前由居民投资实体/企业自动认购的份数合计。 */
+  subscribedUnits: number;
+  /** 上述认购进入发行城市财政的资金合计。 */
+  proceeds: number;
+}
+
+/**
+ * 月结：关闭上一游戏月开启的认购窗口，并在关闭前由**居民投资实体与企业**用真实可用资金
+ * 自动认购剩余份数（v0.7 验收问题 1）。
+ *
+ * 规则（与玩家手动认购走同一 `subscribeGovernmentBond` 校验，不另写放行逻辑）：
+ * - 只处理 `issuedTick < tick` 的 offering 批次：发行当月留给玩家操作，下一次月结关闭；
+ *   因此窗口是有限的一个游戏月，不会因暂停/加速延长，也不会在同一次月结内创建又关闭。
+ * - 按 `config.government.bondMarket.subscriptionOrder` 展开认购主体，**跳过 player**：
+ *   玩家是否购债必须由玩家自己决定，AI 政府不得自动扣玩家现金。
+ * - 银行不在 BondHolder 类型中，天然不得认购国债。
+ * - 每个主体最多认购剩余份数，受真实可用资金约束，整数份、允许部分成交；0 份不扣款、
+ *   不建持债记录。认购资金通过 `receiveTreasury` 进入发行城市财政。
+ * - 认购按"发行当月"记账（tick=issuedTick）：与玩家在窗口内买入的计息起点一致
+ *   （interestStartTick = issuedTick），现金流仍发生在当前月结。
+ * - 幂等：批次关闭后 status 不再是 offering；重复月结由 government.settledTicks 拦截，
+ *   不会重复认购/重复入账。
+ */
+export function settleBondSubscriptionWindow(
+  world: WorldState,
+  config: DemoConfig,
+  city: City,
+  tick: number,
+  logs: LogEntry[],
+): BondWindowSettlementResult {
+  const ledger = bondsLedger(world);
+  const result: BondWindowSettlementResult = {
+    issuancesClosed: 0,
+    subscribedUnits: 0,
+    proceeds: 0,
+  };
+  const offerings = ledger.issuances
+    .filter(
+      (issuance) =>
+        issuance.cityId === city.id &&
+        issuance.status === 'offering' &&
+        issuance.closedTick === null &&
+        issuance.issuedTick < tick,
+    )
+    .sort((a, b) => a.issuedTick - b.issuedTick || a.id.localeCompare(b.id));
+  for (const issuance of offerings) {
+    for (const holder of bondSubscriptionOrder(world, config, issuance.id)) {
+      // AI 政府只代表非玩家主体自动认购；玩家是否买债由玩家自己决定，不能被动扣现金。
+      if (holder.kind === 'player') continue;
+      const remaining = issuance.planUnits - issuance.soldUnits;
+      if (remaining <= 0) break;
+      const subscription = subscribeGovernmentBond(
+        world,
+        config,
+        issuance.id,
+        holder,
+        remaining,
+        issuance.issuedTick,
+      );
+      if (subscription.ok && subscription.units > 0) {
+        result.subscribedUnits += subscription.units;
+        result.proceeds = round2(result.proceeds + subscription.principal);
+      }
+    }
+    closeGovernmentBondSubscription(world, config, issuance.id, tick);
+    result.issuancesClosed += 1;
+    const sold = issuance.soldUnits;
+    const unsold = issuance.planUnits - sold;
+    if (sold > 0) {
+      logs.push({
+        tick,
+        kind: 'government',
+        // 成交份数/到账金额属市长专属财政口径；公开市场只暴露可认购份数与窗口。
+        visibility: { scope: 'mayor', cityId: city.id },
+        message: `${city.name} 政府债券 ${issuance.id} 认购窗口关闭：成交 ${sold} 份（到账 ${round2(
+          sold * issuance.faceValue,
+        )}），未售 ${unsold} 份不形成债务。`,
+      });
+    } else {
+      logs.push({
+        tick,
+        kind: 'warning',
+        visibility: { scope: 'mayor', cityId: city.id },
+        message: `${city.name} 政府债券 ${issuance.id} 认购窗口关闭时无人认购，未形成债务。`,
+      });
+    }
+  }
+  return result;
+}
+
 
 /** 单批次的当月计息（幂等重算）。返回该批次当前未付利息合计。 */
 function accrueIssuance(
@@ -742,6 +850,8 @@ export function settleBondMaturity(
   logs.push({
     tick,
     kind: 'government',
+    // 兑付金额属市长专属财政口径：非市长不得看到（v0.7 验收问题 5）。
+    visibility: { scope: 'mayor', cityId: city.id },
     message: `${city.name} 政府债券 ${issuance.id} 到期兑付：本金 ${totalPrincipalPaid}，利息 ${totalInterestPaid}${
       advancedByBank > 0 ? `，其中银行垫付 ${advancedByBank}` : ''
     }。`,
@@ -804,6 +914,8 @@ export function settleBondBankruptcyRedemption(
       logs.push({
         tick,
         kind: 'warning',
+        // 涉及政府兑付/垫付操作：市长专属。
+        visibility: { scope: 'mayor', cityId: city.id },
         message: `${city.name} 破产兑付 ${issuance.id} 失败：${advance.error ?? '银行垫付失败'}。`,
       });
       continue;
@@ -851,6 +963,8 @@ export function settleBondBankruptcyRedemption(
     logs.push({
       tick,
       kind: 'warning',
+      // 兑付/垫付金额仅市长可见；破产事实由公开日志单独告知。
+      visibility: { scope: 'mayor', cityId: city.id },
       message: `${city.name} 政府破产：银行兑付未到期债券本金 ${totalPrincipal}、未付利息 ${totalInterest}（垫付 ${advancedByBank}）。`,
     });
   }
