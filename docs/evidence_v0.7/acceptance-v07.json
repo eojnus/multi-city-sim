@@ -1,0 +1,69 @@
+{
+  "tick": 29,
+  "passed": 12,
+  "total": 12,
+  "checks": [
+    {
+      "name": "启动后区域视图渲染城市卡片（不含财政余额）",
+      "pass": true,
+      "detail": "岚港 | LANPORT | 港口、纺织与消费品制造中心 | 人口 | 120,000 | 就业 | 41,100 | 失业 | 9.9% | GDP 0 | 劳动力 45,600"
+    },
+    {
+      "name": "非市长只看财政受限占位（无余额/债务率）",
+      "pass": true,
+      "detail": "{\"restricted\":true,\"mayorPanel\":false,\"treasury\":null}"
+    },
+    {
+      "name": "市长发起 100 份发行（计划创建、尚未成交）",
+      "pass": true,
+      "detail": "{\"id\":\"bond-lanport-1\",\"status\":\"offering\",\"planUnits\":100,\"soldUnits\":0,\"treasury\":60000000}"
+    },
+    {
+      "name": "AI 在认购窗口内以真实资金认购并计入财政",
+      "pass": true,
+      "detail": "{\"status\":\"active\",\"soldUnits\":100,\"planUnits\":100,\"holders\":1,\"holderPrincipal\":100000,\"proceedsLog\":\"岚港 政府债券 bond-lanport-1 认购窗口关闭：成交 100 份（到账 100000），未售 0 份不形成债务。\",\"treasury\":55847306.42}"
+    },
+    {
+      "name": "存读档后债券成交与财政一致",
+      "pass": true,
+      "detail": "{\"tick\":2,\"soldUnits\":100,\"treasury\":55847306.42} vs {\"tick\":2,\"soldUnits\":100,\"treasury\":55847306.42}"
+    },
+    {
+      "name": "存在 AI 城市可认购债券（认购窗口对玩家开放）",
+      "pass": true,
+      "detail": "{\"id\":\"bond-ironvale-2\",\"cityId\":\"ironvale\",\"unitsAvailable\":16373}"
+    },
+    {
+      "name": "玩家用真实资金认购 AI 城市债券（整数份/部分成交）",
+      "pass": true,
+      "detail": "{\"cash\":2000000,\"holdings\":0} → {\"cash\":1995000,\"holdings\":1,\"myUnits\":5}"
+    },
+    {
+      "name": "36 个月内出现破产城市（用于权限走查）",
+      "pass": true,
+      "detail": "lanport"
+    },
+    {
+      "name": "非市长：破产事实公开、兑付/垫付/勾销金额不渲染",
+      "pass": true,
+      "detail": "{\"hasSection\":true,\"restricted\":true,\"hasAmounts\":false}"
+    },
+    {
+      "name": "该城市长：可见破产金额明细与财政面板",
+      "pass": true,
+      "detail": "{\"details\":true,\"advance\":true,\"treasury\":true}"
+    },
+    {
+      "name": "1100x700 无横向溢出",
+      "pass": true,
+      "detail": "{\"scrollWidth\":1100,\"clientWidth\":1100,\"overflowX\":\"hidden\"}"
+    },
+    {
+      "name": "控制台无错误",
+      "pass": true,
+      "detail": ""
+    }
+  ],
+  "errors": [],
+  "evidenceDir": "docs/evidence_v0.7"
+}
