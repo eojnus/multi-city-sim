@@ -4,11 +4,12 @@
 // 暂定演示规则（待用户决定）：
 // - 每月从城市居民可支配收入中按 savingsRate 转入投资实体，剩余才用于下月消费。
 // - 实体收到的股息按 dividendDistributionRate 返还居民收入，其余留存投资。
-// - 自动投资规则可替换：优先买入有投票权股份，接近持股上限时买仅分红股份；
-//   同时每月卖出极小比例持股作为市场流动性。
+// - 自动投资规则可替换：投票权与仅分红两类股份都参与买卖打分；投票权接近持股上限时
+//   只排除投票权买入，仅分红类别按股息收益率、折价、趋势与风险偏好独立评估；
+//   两类股份每月都按真实持仓提供极小比例的流动性卖单（仅分红另有现金需求/股息惜售规则）。
 // - 跨城买股、阈值、风险偏好均为演示参数。
 
-import type { Company, HolderRef, InvestorGroup, LogEntry, WorldState } from '../contracts/types';
+import type { Company, HolderRef, InvestorGroup, LogEntry, ShareClass, WorldState } from '../contracts/types';
 import type { DemoConfig } from '../../data/config';
 import { allocateProportionally, clamp, round2 } from '../core/math';
 import { debitHouseholdSavings } from '../population/household-economy';
@@ -226,6 +227,29 @@ function votingClassOf(world: WorldState, companyId: string) {
   );
 }
 
+/** 企业当前可交易的两类股份（存在才返回；顺序固定为仅分红在前，便于确定性排序）。 */
+function classesForCompany(world: WorldState, companyId: string): ShareClass[] {
+  return world.securities.classes
+    .filter((candidate) => candidate.companyId === companyId)
+    .sort((a, b) => a.kind.localeCompare(b.kind));
+}
+
+/** 每股股息收益率：最近一个完整月的实际派息 ÷ 总股本 ÷ 参考价（两类股份按持股比例分享同一笔分红）。 */
+function dividendYieldOf(company: Company, price: number): number {
+  if (!(price > 0) || !(company.totalShares > 0)) return 0;
+  const dividendPerShare = company.lastMonth.dividendsPaid / company.totalShares;
+  return dividendPerShare > 0 ? round2(dividendPerShare / price) : 0;
+}
+
+interface PlannedSell {
+  company: Company;
+  shareClass: ShareClass;
+  shares: number;
+  limitPrice: number;
+  gainRatio: number;
+  priority: number;
+}
+
 interface PlannedCandidate {
   company: Company;
   shareClassIdValue: string;
@@ -258,48 +282,100 @@ export function planInvestorOrders(world: WorldState, config: DemoConfig, tick: 
     const sellingClasses = new Set<string>();
     let sellCount = 0;
 
-    // 1) 卖出：以最新账面价重挂流动性卖单；涨幅超过止盈阈值时提高卖出比例（不同风险偏好不同）。
+    // 1) 卖出：投票权与仅分红两类股份各自按真实持仓提供流动性。
+    //    v0.8.2 修复：此前只遍历 votingClassOf，仅分红股份永远不会被自动卖出。
+    const cashPressed = group.cash < config.investors.minCashToInvest * ai.nonVotingCashPressureMultiple;
+    const sellCandidates: PlannedSell[] = [];
     for (const company of companies) {
-      if (sellCount >= maxSell) break;
-      const shareClass = votingClassOf(world, company.id);
-      if (!shareClass) continue;
-      const holding = world.securities.holdings.find(
-        (entry) =>
-          entry.shareClassId === shareClass.id &&
-          entry.holder.type === 'investorGroup' &&
-          entry.holder.id === group.id,
-      );
-      if (!holding || holding.shares < 10) continue;
       const price = bookPrice(world, company);
       if (!Number.isFinite(price) || price <= 0) continue;
-      const lastPrice = latestStockPrice(world, shareClass.id) ?? price;
-      const gainRatio = price > 0 ? round2(lastPrice / price - 1) : 0;
-      let sellShare = config.investors.liquiditySellShare;
-      if (gainRatio >= ai.takeProfitRatio) {
-        // 市价明显高于账面价：落袋意愿随风险偏好上升（高风险更愿意卖出锁定收益）。
-        sellShare *= 1.5 + risk;
-      } else if (gainRatio <= -ai.takeProfitRatio) {
-        // 市价明显低于账面价：惜售，减少流动性供给。
-        sellShare *= 0.5;
+      for (const shareClass of classesForCompany(world, company.id)) {
+        const holding = world.securities.holdings.find(
+          (entry) =>
+            entry.shareClassId === shareClass.id &&
+            entry.holder.type === 'investorGroup' &&
+            entry.holder.id === group.id,
+        );
+        if (!holding || holding.shares < 10) continue;
+        const lastPrice = latestStockPrice(world, shareClass.id) ?? price;
+        const gainRatio = price > 0 ? round2(lastPrice / price - 1) : 0;
+        const nonVoting = shareClass.kind === 'nonVoting';
+        let sellShare = nonVoting ? ai.nonVotingSellShare : config.investors.liquiditySellShare;
+        let limitPremium: number = nonVoting ? ai.nonVotingSellLimitPremium : 1.02;
+        let priority = gainRatio >= ai.takeProfitRatio ? 1.3 : 1;
+        if (nonVoting) {
+          // 现金需求：提高仅分红股份的卖出比例并接受小幅折价；高股息时惜售。
+          if (cashPressed) {
+            sellShare *= ai.nonVotingCashPressureBoost;
+            limitPremium = ai.nonVotingCashPressureLimitPremium;
+            priority += 0.5;
+          }
+          if (dividendYieldOf(company, price) >= ai.nonVotingDividendHoldThreshold) {
+            sellShare *= ai.nonVotingDividendHoldFactor;
+          }
+        }
+        if (gainRatio >= ai.takeProfitRatio) {
+          // 市价明显高于账面价：落袋意愿随风险偏好上升（高风险更愿意卖出锁定收益）。
+          sellShare *= 1.5 + risk;
+        } else if (gainRatio <= -ai.takeProfitRatio) {
+          // 市价明显低于账面价：惜售，减少流动性供给。
+          sellShare *= 0.5;
+        }
+        const shares = Math.floor(holding.shares * clamp(sellShare, 0, 0.25));
+        if (shares < 1) continue;
+        const limitPrice = round2(price * limitPremium);
+        if (!Number.isFinite(limitPrice) || limitPrice <= 0) continue;
+        sellCandidates.push({ company, shareClass, shares, limitPrice, gainRatio, priority });
       }
-      const shares = Math.floor(holding.shares * sellShare);
-      if (shares < 1) continue;
-      const limitPrice = round2(price * 1.02);
-      if (limitPrice <= 0) continue;
-      clearOrders(world, holder, shareClass.id, 'sell');
+    }
+    // 卖出配额：仅分红至少 1 笔（现金需求时 2 笔），其余名额给投票权股份。
+    // 投票权按公司 id 顺序覆盖不同企业（与旧行为一致，保证企业买方有可成交对手方），
+    // 仅分红按优先级（现金需求/止盈）选择；两类换算互不挤占。
+    const votingCandidates = sellCandidates
+      .filter((candidate) => candidate.shareClass.kind === 'voting')
+      .sort(
+        (a, b) =>
+          a.company.id.localeCompare(b.company.id) ||
+          a.shareClass.id.localeCompare(b.shareClass.id),
+      );
+    const nonVotingCandidates = sellCandidates
+      .filter((candidate) => candidate.shareClass.kind === 'nonVoting')
+      .sort(
+        (a, b) =>
+          b.priority - a.priority ||
+          a.company.id.localeCompare(b.company.id) ||
+          a.shareClass.id.localeCompare(b.shareClass.id),
+      );
+    // 仅分红卖单与投票权卖单分开计数：投票权仍覆盖 maxSell 家企业（保持既有市场流动性），
+    // 仅分红按现金需求挂 1–2 笔，两类互不挤占名额。
+    const nonVotingQuota = Math.min(
+      ai.nonVotingMaxSellOrdersPerGroup,
+      cashPressed ? ai.nonVotingMaxSellOrdersPerGroup : 1,
+    );
+    const chosenSells: PlannedSell[] = [
+      ...votingCandidates.slice(0, maxSell),
+      ...nonVotingCandidates.slice(0, nonVotingQuota),
+    ];
+    chosenSells.sort(
+      (a, b) =>
+        a.shareClass.kind.localeCompare(b.shareClass.kind) ||
+        a.company.id.localeCompare(b.company.id),
+    );
+    for (const candidate of chosenSells) {
+      clearOrders(world, holder, candidate.shareClass.id, 'sell');
       const placed = placeOrder(world, {
-        companyId: company.id,
-        shareClassId: shareClass.id,
+        companyId: candidate.company.id,
+        shareClassId: candidate.shareClass.id,
         side: 'sell',
         holder,
-        shares,
-        limitPrice,
+        shares: candidate.shares,
+        limitPrice: candidate.limitPrice,
         tick,
-        note: `${group.name} 按最新账面价提供流动性（${gainRatio >= ai.takeProfitRatio ? '止盈' : '常规'}，演示自动规则）`,
+        note: `${group.name} 按最新账面价提供流动性（${candidate.shareClass.kind === 'nonVoting' ? '仅分红' : '投票权'}${candidate.gainRatio >= ai.takeProfitRatio ? '，止盈' : ''}${cashPressed && candidate.shareClass.kind === 'nonVoting' ? '，现金需求' : ''}，演示自动规则）`,
       });
       if (placed.ok) {
         sellCount += 1;
-        sellingClasses.add(shareClass.id);
+        sellingClasses.add(candidate.shareClass.id);
       }
     }
 
@@ -316,30 +392,35 @@ export function planInvestorOrders(world: WorldState, config: DemoConfig, tick: 
           ? holderVotingShares(world, company.id, holder) / company.totalShares
           : 0;
       const atCap = votingStake >= config.investors.maxVotingStakeShare * 0.85;
-      const kind: 'voting' | 'nonVoting' = atCap ? 'nonVoting' : 'voting';
-      const shareClass = world.securities.classes.find(
-        (candidate) => candidate.companyId === company.id && candidate.kind === kind,
-      );
-      if (!shareClass) continue;
-      const plannedClassId = shareClass.id;
-      if (sellingClasses.has(plannedClassId)) continue; // 同一类别不双向挂单，避免自成交
-      const financials = financialsOf(world, company, plannedClassId, config);
-      if (!Number.isFinite(financials.price) || financials.price <= 0) continue;
-      // 低风险偏好更看重折价与盈利（价值），高风险偏好更愿意追趋势。
-      const valueWeight = 1 - risk * 0.5;
-      const trendWeight = risk * ai.riskWeight;
-      const score =
-        financials.valueGap * valueWeight +
-        clamp(financials.momentum, -0.3, 0.3) * trendWeight +
-        financials.profitYield * (0.2 + risk * 0.2) +
-        stableUnit(world.seed, tick, group.id, company.id, kind) * 0.01;
-      candidates.push({
-        company,
-        shareClassIdValue: plannedClassId,
-        kind,
-        financials,
-        score: round2(score),
-      });
+      // v0.8.2：两类股份都进入候选池；投票权接近持股上限时只排除投票权候选，
+      // 仅分红类别仍按股息收益率、折价、趋势与风险偏好独立打分（不只是“被动兜底”）。
+      for (const shareClass of classesForCompany(world, company.id)) {
+        if (shareClass.kind === 'voting' && atCap) continue;
+        if (sellingClasses.has(shareClass.id)) continue; // 同一类别不双向挂单，避免自成交
+        const financials = financialsOf(world, company, shareClass.id, config);
+        if (!Number.isFinite(financials.price) || financials.price <= 0) continue;
+        // 低风险偏好更看重折价与盈利（价值），高风险偏好更愿意追趋势。
+        const valueWeight = 1 - risk * 0.5;
+        const trendWeight = risk * ai.riskWeight;
+        const dividendYield = dividendYieldOf(company, financials.price);
+        const classBonus =
+          shareClass.kind === 'nonVoting'
+            ? ai.nonVotingBuyBias + Math.min(dividendYield, 0.1) * ai.nonVotingDividendWeight
+            : 0;
+        const score =
+          financials.valueGap * valueWeight +
+          clamp(financials.momentum, -0.3, 0.3) * trendWeight +
+          financials.profitYield * (0.2 + risk * 0.2) +
+          classBonus +
+          stableUnit(world.seed, tick, group.id, company.id, shareClass.kind) * 0.01;
+        candidates.push({
+          company,
+          shareClassIdValue: shareClass.id,
+          kind: shareClass.kind,
+          financials,
+          score: round2(score),
+        });
+      }
     }
     candidates.sort(
       (a, b) =>
@@ -353,7 +434,11 @@ export function planInvestorOrders(world: WorldState, config: DemoConfig, tick: 
     for (const candidate of candidates) {
       if (buyCount >= maxBuy || remainingBudget < 1) break;
       const riskPremium = config.investors.orderBidDiscount * (1 - risk * ai.riskWeight);
-      const limitPrice = round2(candidate.financials.price * (1 - riskPremium));
+      // 仅分红股份：股息偏好可以支付少量溢价；投票权仍按风险折价报价。
+      const limitPrice = round2(
+        candidate.financials.price *
+          (candidate.kind === 'nonVoting' ? 1 - riskPremium + ai.nonVotingBidPremium : 1 - riskPremium),
+      );
       if (!Number.isFinite(limitPrice) || limitPrice <= 0) continue;
       // 第一笔用 60% 预算，第二笔用剩余；总额严格不超过 groupBudgetShare 预算。
       const orderBudget =

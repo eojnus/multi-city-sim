@@ -377,6 +377,32 @@ export const DEMO_CONFIG = {
       takeProfitRatio: 0.15,
       /** 风险偏好权重：实体风险偏好越高，越愿意追涨并接受更高买价。 */
       riskWeight: 0.6,
+      /**
+       * v0.8.2：仅分红股份的 AI 交易参数（居民投资实体；企业买方仍只允许投票权股份）。
+       * 首版设计意图：让仅分红类别有独立的卖出与买入意愿，而不是只在“接近投票权持股上限”时才被动考虑。
+       */
+      /** 仅分红股份每月基础卖出比例（相对该实体持仓），低于投票权的流动性比例。 */
+      nonVotingSellShare: 0.004,
+      /** 仅分红股份每月最多挂出的卖单数（与投票权的 maxSellOrdersPerGroup 分开计数）。 */
+      nonVotingMaxSellOrdersPerGroup: 2,
+      /** 仅分红股份常规卖单限价相对账面价的溢价。 */
+      nonVotingSellLimitPremium: 1.02,
+      /** 实体现金低于 minCashToInvest × 该倍数时视为有现金需求，提高卖出比例并接受折价。 */
+      nonVotingCashPressureMultiple: 2,
+      /** 现金需求下的卖出比例放大倍数。 */
+      nonVotingCashPressureBoost: 2.5,
+      /** 现金需求下的卖单限价（低于账面价，换取更快成交）。 */
+      nonVotingCashPressureLimitPremium: 0.995,
+      /** 股息收益率达到该阈值（每月每股股息/价格）时惜售。 */
+      nonVotingDividendHoldThreshold: 0.002,
+      /** 惜售时的卖出比例系数（0–1）。 */
+      nonVotingDividendHoldFactor: 0.6,
+      /** 买入打分中仅分红候选的固定加分，避免总是排在投票权之后。 */
+      nonVotingBuyBias: 0.02,
+      /** 买入打分中“每股股息收益率”的权重（仅分红类别）。 */
+      nonVotingDividendWeight: 2,
+      /** 仅分红买单相对账面价的最高溢价（股息偏好愿意支付的价格）。 */
+      nonVotingBidPremium: 0.015,
     },
   },
   governance: {

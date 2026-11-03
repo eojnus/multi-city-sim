@@ -96,7 +96,22 @@ describe('AI 投资行为（v0.8）', () => {
           order.holder.id === group.id,
       );
       expect(buys.length).toBeLessThanOrEqual(ai.maxBuyOrdersPerGroup);
-      expect(sells.length).toBeLessThanOrEqual(ai.maxSellOrdersPerGroup);
+      // v0.8.2：投票权与仅分红卖单分开计数（仅分红是独立流动性与现金需求通道）。
+      const votingSells = sells.filter(
+        (order) =>
+          world.securities.classes.find((cls) => cls.id === order.shareClassId)?.kind ===
+          'voting',
+      );
+      const nonVotingSells = sells.filter(
+        (order) =>
+          world.securities.classes.find((cls) => cls.id === order.shareClassId)?.kind ===
+          'nonVoting',
+      );
+      expect(votingSells.length).toBeLessThanOrEqual(ai.maxSellOrdersPerGroup);
+      expect(nonVotingSells.length).toBeLessThanOrEqual(ai.nonVotingMaxSellOrdersPerGroup);
+      expect(sells.length).toBeLessThanOrEqual(
+        ai.maxSellOrdersPerGroup + ai.nonVotingMaxSellOrdersPerGroup,
+      );
       const buyValue = round2(
         buys.reduce((sum, order) => sum + order.shares * order.limitPrice, 0),
       );
