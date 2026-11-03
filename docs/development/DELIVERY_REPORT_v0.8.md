@@ -308,3 +308,84 @@ DISPLAY=:99 node_modules/electron/dist/electron --no-sandbox \
 - 家庭贷款合同数仍随群体变化线性增长（36 月约 2 千笔），已用“同还款计划碎片合并”抑制指数增长，后续仍需按还款计划聚合的账本结构。
 - 股票 AI 仍为首版规则型（月度一次、无做市/组合优化），企业投资上限较小；消费税只覆盖居民消费品，股息税首版对企业/政府股东不征。
 - 桌面证据为 Xvfb 无头截图，Windows 真机表现需按第 10 节复验；经济平衡未作为本轮目标，也未调整任何数值。
+
+# 18. v0.8.2 复验补充修复记录：仅分红股 AI 交易（2026-11-03）
+
+## 18.1 基线
+
+- 分支：`feature/stock-market-ui-tax`
+- 修复前基线：`7442e0a97168913d5959944490c7ac411c1bb27f`（v0.8.1）
+- `SAVE_FORMAT_VERSION` 保持 8（无结构变更），`GAME_VERSION` 升级为 `0.8.2`。
+
+## 18.2 问题
+
+`planInvestorOrders` 的居民投资实体卖出逻辑只取 `votingClassOf`，因此仅分红股份永远没有自动卖出路径；买入候选同样以投票权股份为主。默认条件 12 个月观察中，有表决权股份出现 66 笔二级成交、仅分红股份 0 笔。
+
+## 18.3 修复内容
+
+### 居民投资实体（`src/simulation/investors/investors.ts`）
+
+- 新增 `classesForCompany()`（返回企业两类股份类别）与 `dividendYieldOf()`（`lastDividend / 总股本 / 账面价`），卖出与买入候选都遍历**两类股份**。
+- 卖出：只对**真实持仓**挂单，数量不超过持仓；仅分红股份基础卖出比例为 `nonVotingSellShare`（0.004），投票权沿用原流动性比例。现金低于 `minCashToInvest × nonVotingCashPressureMultiple` 时，仅分红卖出比例乘 `nonVotingCashPressureBoost`，并以 `nonVotingCashPressureLimitPremium`（0.995×账面）挂单换取成交；股息收益率 ≥ `nonVotingDividendHoldThreshold` 时按 `nonVotingDividendHoldFactor` 惜售。止盈/风险规则与投票权一致。
+- 卖出配额：投票权卖单仍覆盖 `maxSellOrdersPerGroup` 家企业（保持既有市场流动性），仅分红卖单独立计数，最多 `nonVotingMaxSellOrdersPerGroup`（2）笔——两类股份的订单上限互不挤占，避免“只有投票权在卖”。
+- 买入：两类股份都可形成买单；仅分红打分加 `nonVotingBuyBias + min(股息率, 0.1) × nonVotingDividendWeight`，限价为 `账面价 × (1 − 风险溢价 + nonVotingBidPremium)`。买入预算、企业买方限制、同类别禁双向挂单、确定性（`stableUnit`）规则不变。
+- 企业买方仍只能买有表决权股份（既有校验未放宽）。
+
+### 首版参数（`config.securities.ai`，集中配置）
+
+| 参数 | 值 | 含义 |
+| --- | --- | --- |
+| `nonVotingSellShare` | 0.004 | 仅分红股份每月基础卖出比例 |
+| `nonVotingMaxSellOrdersPerGroup` | 2 | 仅分红卖单上限（与投票权分开计数） |
+| `nonVotingSellLimitPremium` | 1.02 | 常规仅分红卖单限价（账面价倍数） |
+| `nonVotingCashPressureMultiple` | 2 | 现金低于多少倍 `minCashToInvest` 视为现金紧张 |
+| `nonVotingCashPressureBoost` | 2.5 | 现金紧张时卖出比例倍数 |
+| `nonVotingCashPressureLimitPremium` | 0.995 | 现金紧张时限价（低于账面，换取成交） |
+| `nonVotingDividendHoldThreshold` | 0.002 | 惜售的股息率阈值 |
+| `nonVotingDividendHoldFactor` | 0.6 | 惜售时卖出比例倍数 |
+| `nonVotingBuyBias` | 0.02 | 仅分红买入打分加成 |
+| `nonVotingDividendWeight` | 2 | 股息率对买入打分的权重 |
+| `nonVotingBidPremium` | 0.015 | 仅分红买入限价相对账面价的溢价 |
+
+设计意图：仅分红股份的流动性略低于投票权（符合“只分红、无控制权”的定位），但在股息率有吸引力或现金紧张时仍会参与交易；不保证每月成交，也不制造对手方。
+
+## 18.4 测试
+
+| 测试 | 结果 |
+| --- | --- |
+| `tests/stock-ai-nonvoting.test.ts`（新增 7 项） | 通过 |
+| `tests/stock-ai.test.ts`（卖单上限按类别拆分） | 8/8 |
+| `tests/acceptance/bankruptcy-real-run.test.ts`（序列按新实测重锁） | 8/8 |
+| 全量 `npx vitest run --maxWorkers=1` | **76 个文件 / 608 项全部通过** |
+
+新增用例覆盖：仅分红卖单存在且不超过持仓；仅分红买单金额不超过真实现金；两个居民实体价格匹配时真实成交并核对现金/股份/K 线；只有一方或价格不匹配不成交；企业买方买仅分红被拒；两类 K 线独立且存读档后不重复成交；同一实体无自成交；存入/读取存档后再次撮合不重复。
+
+序列漂移说明：仅分红交易改变了居民投资实体与企业的现金流，进而影响公司利润、股息与财政，36 月真实序列整体前移（岚港破产由 t28 变为 t30）。测试按最终代码实测值重锁，结构/守恒断言（兑付守恒、计划=成交+未售、writtenOff 清零、次月重建、同 tick 重选、不变量为空）全部保留。
+
+## 18.5 桌面验证
+
+- `node scripts/acceptance-v08.cjs`（Xvfb + Electron，隔离 userData）：**43/43 项通过、0 条控制台错误**。
+- 新增场景：在股票窗口切到「仅分红」类别，找到 AI 挂出的可成交卖单，玩家按卖价买入 10 股；断言 `lastTrade.buyer === 'player'`、玩家现金减少、持仓增加、K 线出现该笔真实成交。
+- 证据：`docs/evidence_v0.8/`（14 张 PNG + `acceptance-v08.json`），新增 `v08-14-nonvoting-trade.png`；同时重截了窗口内 K 线、空档 K 线与退出企业历史。
+
+## 18.6 市场效果（默认条件、12 个月实测）
+
+- 有表决权股份：7 笔二级成交（AI 之间），K 线持续累积。
+- 仅分红股份：AI 之间撮合极少（卖价约 1.02×账面、AI 买价约 1.00×账面，通常不交叉）；但 AI 会持续挂出**可成交的仅分红卖单**，玩家可在窗口中真实买入。12 个月内 AI 之间 0 笔仅分红成交，符合“无真实对手方允许无成交、不制造行情”的规则。
+- 企业买方仍只能买投票权股份，因此仅分红的主要对手方是居民实体与玩家。
+
+## 18.7 仍存在的问题
+
+- 仅分红股份的 AI 流动性仍低：卖价略高于买价，AI 之间成交主要发生在现金紧张（0.995×账面）时；若希望提高活跃度，可后续引入仅分红做市或按股息率定价，但本轮未改数值。
+- 两类股份共享同一账面参考价，未做差异化估值。
+- 家庭贷款合同线性增长、银行负利差、居民消费低于期望、交通税收系数恒 1.50 等 v0.8 已记录的问题不变。
+
+## 18.8 本轮验证汇总
+
+| 命令 | 结果 |
+| --- | --- |
+| `npm run typecheck` | 通过（渲染层 + Electron 主进程，0 错误） |
+| `npm run build` | 通过（`multi-city-sim@0.8.2`） |
+| `npx vitest run --maxWorkers=1` | **76 个测试文件 / 608 项全部通过** |
+| `node scripts/acceptance-v08.cjs` | **43/43 项通过、0 条控制台错误** |
+| 证据 | `docs/evidence_v0.8/`（14 张 PNG + JSON） |
