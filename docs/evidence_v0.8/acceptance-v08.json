@@ -1,0 +1,191 @@
+{
+  "version": "0.8.0",
+  "ranAt": "2026-11-03T10:19:24.775Z",
+  "display": ":99",
+  "total": 36,
+  "passed": 36,
+  "failed": [],
+  "checks": [
+    {
+      "name": "启动进入区域视图且右栏标签可见",
+      "pass": true,
+      "detail": "{\"view\":\"region\",\"tick\":0,\"tabs\":[\"概况\",\"人口\",\"企业\",\"市场\",\"政府\",\"交通\"],\"activeTab\":\"概况\",\"overflowX\":false,\"panel\":true}"
+    },
+    {
+      "name": "默认标签为「概况」",
+      "pass": true,
+      "detail": "概况"
+    },
+    {
+      "name": "1600x1000 无横向溢出",
+      "pass": true,
+      "detail": false
+    },
+    {
+      "name": "城市上下文 6 个标签",
+      "pass": true,
+      "detail": "[\"概况\",\"人口\",\"企业\",\"市场\",\"政府\",\"交通\"]"
+    },
+    {
+      "name": "城市「人口」标签渲染 [data-testid=\"population-strata-section\"]",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "城市「企业」标签渲染 [data-testid=\"company-row-lp-food\"]",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "城市「市场」标签渲染 [data-testid=\"bank-section\"]",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "城市「政府」标签渲染 [data-testid=\"government-section\"]",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "城市「交通」标签渲染 [data-testid=\"transport-section\"]",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "切换标签不推进时间、不改模拟状态",
+      "pass": true,
+      "detail": "{\"tick\":0,\"before\":0}"
+    },
+    {
+      "name": "企业上下文 5 个标签",
+      "pass": true,
+      "detail": "[\"概况\",\"经营\",\"财务\",\"股东与治理\",\"股票\"]"
+    },
+    {
+      "name": "企业「经营」标签含经营者区域",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "企业「股票」标签含行情入口",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "股票窗口可打开且宽度≥900/高度≥560",
+      "pass": true,
+      "detail": "{\"left\":200,\"top\":105,\"width\":1200,\"height\":760}"
+    },
+    {
+      "name": "企业列表每家企业一行（≥10 行）",
+      "pass": true,
+      "detail": 17
+    },
+    {
+      "name": "新世界无成交时 K 线显示「暂无成交/暂无数据」空态",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "窗口显示当前游戏月",
+      "pass": true,
+      "detail": "2026 年 01 月"
+    },
+    {
+      "name": "拖动标题栏移动窗口",
+      "pass": true,
+      "detail": "{\"before\":{\"left\":200,\"top\":105,\"width\":1200,\"height\":760},\"after\":{\"left\":320,\"top\":185,\"width\":1200,\"height\":760}}"
+    },
+    {
+      "name": "拖动右下角可放大窗口",
+      "pass": true,
+      "detail": "{\"before\":{\"left\":320,\"top\":185,\"width\":1200,\"height\":760},\"after\":{\"left\":320,\"top\":185,\"width\":1360,\"height\":860}}"
+    },
+    {
+      "name": "拖出屏幕时窗口被夹回可见区域",
+      "pass": true,
+      "detail": "{\"left\":-1200,\"top\":0,\"width\":1360,\"height\":860,\"right\":160,\"bottom\":860}"
+    },
+    {
+      "name": "切换到「仅分红」类别后列表与行情独立刷新",
+      "pass": true,
+      "detail": "{\"pressed\":\"true\",\"rows\":17,\"emptyChart\":true}"
+    },
+    {
+      "name": "月结撮合后行情历史出现真实月度成交（K 线数据）",
+      "pass": true,
+      "detail": "{\"candles\":2,\"trades\":6,\"classes\":40,\"tick\":2,\"months\":[1,2]}"
+    },
+    {
+      "name": "选中有成交的企业后渲染月度 OHLCV 蜡烛",
+      "pass": true,
+      "detail": "{\"companyId\":\"gf-garment\",\"kind\":\"voting\",\"candles\":2,\"empty\":false,\"meta\":\"共 2 根月 K\\n2026.02 → 2026.03\"}"
+    },
+    {
+      "name": "玩家限价买单提交后生成未成交委托",
+      "pass": true,
+      "detail": "{\"cash\":2000000,\"holdings\":\"[]\",\"orders\":1,\"status\":\"订单已挂出，暂时没有对手方；可在下方委托列表撤单。\",\"rows\":1}"
+    },
+    {
+      "name": "未成交委托不改变现金与持股",
+      "pass": true,
+      "detail": "{\"before\":2000000,\"after\":2000000}"
+    },
+    {
+      "name": "撤单后委托消失且不改变现金",
+      "pass": true,
+      "detail": "{\"orders\":0,\"cash\":2000000,\"worldOrders\":65,\"status\":\"已撤销该委托；未冻结的资金与股份不受影响。\"}"
+    },
+    {
+      "name": "关闭按钮关闭股票窗口",
+      "pass": true,
+      "detail": true
+    },
+    {
+      "name": "Esc 关闭股票窗口且打开/关闭不改变暂停状态",
+      "pass": true,
+      "detail": "{\"pausedBefore\":false,\"pausedDuring\":false,\"closedByEsc\":true}"
+    },
+    {
+      "name": "市长政府标签显示城市税收面板（含交通系数）",
+      "pass": true,
+      "detail": "{\"hasPanel\":true,\"text\":\"税收结算 · 基准税与交通系数\\n最近 2026.03\\n基准税额3519.0 万\\n交通系数×1.50保障率 100%\\n交通加成1759.5 万系统注入，不向纳税人补收\\n交通损耗0基准税未入账部分，不退还\\n最终入账5278.5 万\\n个税3953.5 万基准 2635.7 万 企税247.4 万基准 164.9 万 消费税824.8 万基准 549.9 万 股息税252.7 万基准 168.5 万\\n月份\\t基准税\\t交通系数\\t加成\\t损耗\\t最终入账\\n2026.03\\t3519.0 万\\t×1.50\\t1759.5 万\\t0\\t5278.\",\"factor\":1.5,\"history\":2}"
+    },
+    {
+      "name": "非市长看不到城市税收金额明细",
+      "pass": true,
+      "detail": "{\"hasPanel\":false,\"taxView\":null}"
+    },
+    {
+      "name": "税收历史含四税与交通系数，且入账可对账",
+      "pass": true,
+      "detail": "{\"tick\":2,\"incomeTaxBase\":26356870.4,\"corporateTaxBase\":1649409.84,\"consumptionTaxBase\":5498874.77,\"dividendTaxBase\":1684773.21,\"transportGuarantee\":1,\"transportFactor\":1.5,\"incomeTaxRevenue\":39535305.6,\"corporateTaxRevenue\":2474114.76,\"consumptionTaxRevenue\":8248312.15,\"dividendTaxRevenue\":2527159.82,\"transportBonus\":17594964.11,\"transportLoss\":0,\"totalBase\":35189928.22,\"totalRevenue\":52784892.33}"
+    },
+    {
+      "name": "消费税与股息税进入财政分录/城市月报",
+      "pass": true,
+      "detail": "[\"transportMaintenance\",\"incomeTax\",\"corporateTax\",\"consumptionTax\",\"dividendTax\",\"publicWages\",\"benefits\",\"policySpending\",\"transportTaxBonus\"]"
+    },
+    {
+      "name": "存读档保留股票行情历史且不重复/不乱序",
+      "pass": true,
+      "detail": "{\"saved\":2,\"after\":2}"
+    },
+    {
+      "name": "存读档保留税收历史",
+      "pass": true,
+      "detail": "{\"saved\":795,\"after\":795}"
+    },
+    {
+      "name": "1100x700 无横向溢出且城市标签仍完整",
+      "pass": true,
+      "detail": "{\"overflowX\":false,\"tabs\":6,\"stockWindow\":false}"
+    },
+    {
+      "name": "控制台无未过滤错误",
+      "pass": true,
+      "detail": ""
+    }
+  ],
+  "consoleErrors": []
+}
