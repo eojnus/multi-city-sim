@@ -34,6 +34,7 @@ function row(overrides: Partial<StockListRow> = {}): StockListRow {
     playerStake: 0.001,
     playerOpenOrders: 1,
     tradable: true,
+    exited: false,
     ...overrides,
   };
 }
@@ -66,6 +67,8 @@ function detail(overrides: Partial<StockDetailView> = {}): StockDetailView {
     playerCash: 100_000,
     playerOrders: [],
     tradable: true,
+    exited: false,
+    exitedTick: null,
     note: '行情来自真实成交。',
     ...overrides,
   };
@@ -272,5 +275,142 @@ describe('股票大窗口：位置与尺寸约束', () => {
     expect(small.width).toBeGreaterThanOrEqual(STOCK_WINDOW_MIN_WIDTH);
     expect(small.height).toBeGreaterThanOrEqual(STOCK_WINDOW_MIN_HEIGHT);
     expect(small.width).toBeLessThanOrEqual(1000);
+  });
+});
+
+describe('股票大窗口：K 线按真实月份排布（v0.8 复验问题 2）', () => {
+  function candle(tick: number, price: number, volume = 100): StockCandleView {
+    return {
+      tick,
+      open: price,
+      high: price + 1,
+      low: price - 1,
+      close: price + 0.5,
+      volume,
+      trades: 1,
+    };
+  }
+
+  function positions(html: string): { x: number[]; volBottom: number[] } {
+    const xs = [...html.matchAll(/<rect class="body" x="([\d.]+)"/g)].map((m) => Number(m[1]));
+    const vol = [...html.matchAll(/<rect class="vol" x="([\d.]+)" y="([\d.]+)" width="[\d.]+" height="([\d.]+)"/g)]
+      .map((m) => Number(m[2]) + Number(m[3]));
+    return { x: xs, volBottom: vol };
+  }
+
+  it('中间无成交月份留出空档：1 月与 12 月有成交时不相邻', () => {
+    const html = renderStockWindow(view({ selected: detail({ candles: [candle(0, 10), candle(11, 12)] }) }), { rect });
+    expect(html).toContain('data-months="12"');
+    expect(html).toContain('data-gap-months="10"');
+    expect(html).toContain('空档 10 个月无成交');
+    const { x } = positions(html);
+    expect(x).toHaveLength(2);
+    // 12 个月槽位、绘图区宽 466：两根 K 线的 x 间距应接近 11 个槽位（约 427），而不是相邻。
+    expect((x[1] ?? 0) - (x[0] ?? 0)).toBeGreaterThan(400);
+    expect(html).toContain('2026.01');
+  });
+
+  it('连续月份成交不留空档，月份刻度按真实 tick', () => {
+    const html = renderStockWindow(
+      view({ selected: detail({ candles: [candle(3, 10), candle(4, 11), candle(5, 12)] }) }),
+      { rect },
+    );
+    expect(html).toContain('data-months="3"');
+    expect(html).toContain('data-gap-months="0"');
+    expect(html).not.toContain('个月无成交');
+    const { x } = positions(html);
+    expect(x).toHaveLength(3);
+    expect((x[1] ?? 0) - (x[0] ?? 0)).toBeCloseTo((x[2] ?? 0) - (x[1] ?? 0), 1);
+  });
+
+  it('单笔成交居中显示，横坐标月份与悬停标题一致', () => {
+    const html = renderStockWindow(view({ selected: detail({ candles: [candle(7, 10)] }) }), { rect });
+    expect(html).toContain('data-months="1"');
+    expect(html).toContain('data-tick="7"');
+    expect(html).toContain('2026.08');
+    const { x } = positions(html);
+    expect(x).toHaveLength(1);
+    expect(x[0]).toBeGreaterThan(200);
+    expect(x[0]).toBeLessThan(280);
+  });
+
+  it('成交量柱不超出 SVG 视口（底部不被裁切）', () => {
+    const candles = Array.from({ length: 8 }, (_, index) => candle(index, 10 + index, (index + 1) * 100));
+    const html = renderStockWindow(view({ selected: detail({ candles }) }), { rect });
+    const { volBottom } = positions(html);
+    expect(volBottom.length).toBe(8);
+    // 成交量区底线 = 190 - 22 = 168；柱底不得超过该线。
+    for (const bottom of volBottom) expect(bottom).toBeLessThanOrEqual(168.05);
+    for (const bottom of volBottom) expect(bottom).toBeGreaterThan(130);
+  });
+
+  it('两类股份切换时标题与 K 线数据只显示当前类别', () => {
+    const html = renderStockWindow(
+      view({ kind: 'nonVoting', selected: detail({ kind: 'nonVoting', candles: [candle(2, 8)] }) }),
+      { rect },
+    );
+    expect(html).toContain('仅分红股份');
+    expect(html).toContain('NON-VOTING SHARES');
+    expect(html).toContain('data-tick="2"');
+  });
+});
+
+describe('股票大窗口：已退出企业只读（v0.8 复验问题 3）', () => {
+  it('已退出行显示“已退出”，明细有提示且不渲染下单表单', () => {
+    const exitedRow = row({
+      companyId: 'retired-co',
+      companyName: '已退出示例厂',
+      cityId: '',
+      cityName: '已退出市场',
+      industry: '已退出',
+      lastPrice: 6.5,
+      lastTradeTick: 4,
+      bookPrice: 0,
+      tradable: false,
+      exited: true,
+      playerShares: 0,
+      playerStake: 0,
+    });
+    const exitedDetail = detail({
+      company: {
+        id: 'retired-co',
+        name: '已退出示例厂',
+        cityId: '',
+        cityName: '已退出市场',
+        industry: '已退出',
+        note: '该企业已退出市场。',
+        employees: 0,
+        capacity: 0,
+        utilization: 0,
+      },
+      kind: 'voting',
+      classId: 'retired-co-voting',
+      issuedShares: 0,
+      lastPrice: 6.5,
+      lastTradeTick: 4,
+      bookPrice: 0,
+      changePct: null,
+      candles: [{ tick: 2, open: 5, high: 6, low: 4.5, close: 5.5, volume: 10, trades: 1 }],
+      bestBid: null,
+      bestAsk: null,
+      playerShares: 0,
+      playerStake: 0,
+      tradable: false,
+      exited: true,
+      exitedTick: 4,
+      note: '企业已退出市场：只保留退出前真实成交历史。',
+    });
+    const html = renderStockWindow(
+      view({ rows: [row(), exitedRow], selected: exitedDetail }),
+      { rect },
+    );
+    expect(html).toContain('stock-exited-flag');
+    expect(html).toContain('已退出');
+    expect(html).toContain('data-testid="stock-exited-notice"');
+    expect(html).toContain('data-testid="stock-exited-panel"');
+    expect(html).not.toContain('data-testid="stock-order-form"');
+    expect(html).not.toContain('data-testid="stock-order-submit"');
+    expect(html).toContain('最后真实成交：2026.05');
+    expect(html).toContain('data-tick="2"');
   });
 });

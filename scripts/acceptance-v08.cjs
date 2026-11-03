@@ -25,6 +25,37 @@ const savesDir = path.join(app.getPath('userData'), 'saves');
 fs.mkdirSync(savesDir, { recursive: true });
 registerSaveHandlers(() => savesDir);
 
+/** 把股票窗口完全拖回视口内（先缩到视口以内，再把左上角移到 16,16），返回最终矩形。 */
+async function ensureWindowInside(win) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const rect = await read(win, `(() => {
+      const el = document.querySelector('.stock-window');
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height, vw: innerWidth, vh: innerHeight };
+    })()`);
+    if (!rect || rect.error) return rect;
+    const targetWidth = Math.max(900, Math.min(1200, rect.vw - 32));
+    const targetHeight = Math.max(560, Math.min(760, rect.vh - 32));
+    if (rect.width > targetWidth + 1 || rect.height > targetHeight + 1) {
+      await dragBy(win, '.stock-resize', targetWidth - rect.width, targetHeight - rect.height);
+      await sleep(300);
+      continue;
+    }
+    const dx = 16 - rect.left;
+    const dy = 16 - rect.top;
+    if (Math.abs(dx) <= 1 && Math.abs(dy) <= 1) return rect;
+    await dragBy(win, '.stock-titlebar', dx, dy);
+    await sleep(300);
+  }
+  return read(win, `(() => {
+    const el = document.querySelector('.stock-window');
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height, vw: innerWidth, vh: innerHeight };
+  })()`);
+}
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const checks = [];
 function check(name, pass, detail) {
@@ -256,6 +287,15 @@ app.whenReady().then(async () => {
       return { left: r.left, top: r.top, width: r.width, height: r.height, right: Math.min(r.right, innerWidth), bottom: Math.min(r.bottom, innerHeight) };
     })()`);
     check('拖出屏幕时窗口被夹回可见区域', clamped.left <= 0 ? clamped.right >= 160 : true, JSON.stringify(clamped));
+    // 极限拖动后拖回屏幕内，截图必须能证明完整窗口（含 K 线与成交量）真实可见。
+    const insideAfterDrag = await ensureWindowInside(win);
+    const insideOk =
+      Boolean(insideAfterDrag) &&
+      insideAfterDrag.left >= 0 &&
+      insideAfterDrag.top >= 0 &&
+      insideAfterDrag.right <= insideAfterDrag.vw + 1 &&
+      insideAfterDrag.bottom <= insideAfterDrag.vh + 1;
+    check('极限拖动后窗口可拖回屏幕内且完整可见', insideOk, JSON.stringify(insideAfterDrag));
     await capture(win, 'v08-06-stock-window-moved.png');
 
     // ---- 6. 类别切换：有投票权 / 仅分红 各自独立列表与行情 ----
@@ -308,7 +348,92 @@ app.whenReady().then(async () => {
       }))()`);
     }
     check('选中有成交的企业后渲染月度 OHLCV 蜡烛', Boolean(chartRender) && chartRender.candles > 0, JSON.stringify(chartRender));
+    await ensureWindowInside(win);
     await capture(win, 'v08-07-stock-window-candles.png');
+
+    // ---- 7b. 无成交月份空档：找到“覆盖月份 > K 线根数”的类别再截图 ----
+    let gapTarget = null;
+    for (let attempt = 0; attempt < 8 && !gapTarget; attempt += 1) {
+      const candidates = await read(win, `(() => window.__lanwan.store.world.securities.history
+        .filter((entry) => entry.candles.length > 0)
+        .map((entry) => ({
+          companyId: entry.companyId,
+          kind: entry.kind,
+          candles: entry.candles.length,
+          months: entry.candles.length > 0 ? entry.candles[entry.candles.length - 1].tick - entry.candles[0].tick + 1 : 0,
+        }))
+        .filter((entry) => entry.months - entry.candles >= 2))()`);
+      const gap = Array.isArray(candidates) && candidates.length > 0 ? candidates[0] : null;
+      if (gap) {
+        gapTarget = gap;
+      } else {
+        await click(win, '[data-testid="btn-tick"]');
+        await sleep(1200);
+      }
+    }
+    if (gapTarget) {
+      await click(win, `[data-action="stock-kind"][data-kind="${gapTarget.kind}"]`);
+      await sleep(350);
+      await click(win, `[data-testid="stock-row-${gapTarget.companyId}"]`);
+      await sleep(450);
+    }
+    const gapChart = await read(win, `(() => {
+      const chart = document.querySelector('[data-testid="stock-chart"]');
+      if (!chart) return null;
+      return {
+        months: chart.getAttribute('data-months'),
+        gapMonths: chart.getAttribute('data-gap-months'),
+        candles: chart.querySelectorAll('.stock-candle').length,
+        gapMarks: chart.querySelectorAll('.gap-mark').length,
+        meta: document.querySelector('.stock-chart-meta')?.innerText ?? null,
+      };
+    })()`);
+    check(
+      'K 线按真实月份排布：无成交月份留空档并标记',
+      Boolean(gapChart) && Number(gapChart.gapMonths) >= 2 && gapChart.candles > 0 && gapChart.gapMarks >= 2,
+      JSON.stringify(gapChart),
+    );
+    await ensureWindowInside(win);
+    await capture(win, 'v08-11-stock-window-gap.png');
+
+    // ---- 7c. 两类股份各自独立：切到「仅分红」并展示其行情 ----
+    const nonVotingTarget = await read(win, `(() => window.__lanwan.store.world.securities.history
+      .filter((entry) => entry.kind === 'nonVoting' && entry.candles.length > 0)
+      .map((entry) => ({ companyId: entry.companyId, candles: entry.candles.length }))[0] ?? null)()`);
+    await click(win, '[data-action="stock-kind"][data-kind="nonVoting"]');
+    await sleep(400);
+    if (nonVotingTarget) {
+      await click(win, `[data-testid="stock-row-${nonVotingTarget.companyId}"]`);
+      await sleep(450);
+    }
+    const nonVotingChart = await read(win, `(() => {
+      const s = window.__lanwan.store;
+      const view = s.stockMarketView();
+      return {
+        kind: view.kind,
+        rows: view.rows.length,
+        classIds: [...new Set(view.rows.map((row) => row.classId))].slice(0, 2),
+        candles: document.querySelectorAll('[data-testid="stock-chart"] .stock-candle').length,
+        empty: Boolean(document.querySelector('[data-testid="stock-chart-empty"]')),
+        month: document.querySelector('[data-testid="stock-window-month"]')?.textContent ?? null,
+      };
+    })()`);
+    // 股份类别 id 形如 `${companyId}:non-voting`；两类股份的列表行必须全部属于非投票类别。
+    const nonVotingClassIds =
+      nonVotingChart.classIds.length > 0 && nonVotingChart.classIds.every((id) => /:non-voting$/.test(id));
+    const nonVotingChartOk =
+      nonVotingTarget === null ? nonVotingChart.empty === true : nonVotingChart.candles > 0;
+    check(
+      '切换到仅分红股份后列表/行情按该类别独立刷新',
+      nonVotingChart.kind === 'nonVoting' && nonVotingChart.rows > 0 && nonVotingClassIds && nonVotingChartOk,
+      JSON.stringify({ ...nonVotingChart, nonVotingTarget }),
+    );
+    await ensureWindowInside(win);
+    await capture(win, 'v08-12-stock-window-nonvoting.png');
+    if (target) {
+      await click(win, `[data-action="stock-kind"][data-kind="${target.kind}"]`);
+      await sleep(350);
+    }
 
     // ---- 8. 下单 → 委托可见 → 撤单（现金/持股不变） ----
     const beforeOrder = await read(win, `(() => ({
@@ -409,6 +534,57 @@ app.whenReady().then(async () => {
     check('税收历史含四税与交通系数，且入账可对账', taxLedger.history > 0 && taxLedger.reconciliation === true && taxLedger.factorLedger === true, JSON.stringify(taxLedger.last));
     check('消费税与股息税进入财政分录/城市月报', taxLedger.kinds.includes('consumptionTax') && taxLedger.kinds.includes('dividendTax'), JSON.stringify(taxLedger.kinds));
 
+    // ---- 11b. 交通加成/损耗不得在流水与市长面板重复计算（v0.8 复验问题 1） ----
+    const taxConsistency = await read(win, `(() => {
+      const s = window.__lanwan.store;
+      const world = s.world;
+      s.world.player.roles.mayorCityId = 'lanport';
+      const history = world.taxes?.historyByCity?.lanport ?? [];
+      const last = history[history.length - 1] ?? null;
+      const view = s.fiscalView('lanport');
+      s.world.player.roles.mayorCityId = null;
+      if (!last || !view) return { ok: false };
+      const entries = (world.fiscal?.ledger ?? []).filter((e) => e.cityId === 'lanport' && e.tick === last.tick);
+      const byKind = {};
+      for (const entry of entries) byKind[entry.kind] = entry.amount;
+      const net = entries.reduce((sum, entry) => sum + entry.amount, 0);
+      const taxKinds = new Set(['incomeTax', 'corporateTax', 'consumptionTax', 'dividendTax', 'transportTaxBonus', 'transportTaxLoss']);
+      const taxNet = entries.filter((entry) => taxKinds.has(entry.kind)).reduce((sum, entry) => sum + entry.amount, 0);
+      return {
+        ok: true,
+        tick: last.tick,
+        net,
+        taxNet,
+        totalRevenue: last.totalRevenue,
+        monthIncome: view.monthIncome,
+        monthExpense: view.monthExpense,
+        fourSum: last.incomeTaxRevenue + last.corporateTaxRevenue + last.consumptionTaxRevenue + last.dividendTaxRevenue,
+        byKind,
+        bases: {
+          incomeTax: last.incomeTaxBase,
+          corporateTax: last.corporateTaxBase,
+          consumptionTax: last.consumptionTaxBase,
+          dividendTax: last.dividendTaxBase,
+        },
+      };
+    })()`);
+    const near = (a, b) => Math.abs((a ?? 0) - (b ?? 0)) <= 0.05;
+    const taxConsistent =
+      Boolean(taxConsistency?.ok) &&
+      // 税收相关流水净额（基准四税 + 加成 − 损耗）= 税收月报最终入账：加成/损耗没有被重复计入。
+      near(taxConsistency.taxNet, taxConsistency.totalRevenue) &&
+      // 市长面板的当月收入−支出等于该城全部财政流水净额（含工资/福利等非税支出）。
+      near(taxConsistency.monthIncome - taxConsistency.monthExpense, taxConsistency.net) &&
+      near(taxConsistency.fourSum, taxConsistency.totalRevenue);
+    check('税收流水净额 = 税收月报最终入账；市长面板收支=财政流水净额（不重复计算）', taxConsistent, JSON.stringify(taxConsistency));
+    const baseRecorded =
+      Boolean(taxConsistency?.ok) &&
+      near(taxConsistency.byKind.incomeTax, taxConsistency.bases.incomeTax) &&
+      near(taxConsistency.byKind.consumptionTax, taxConsistency.bases.consumptionTax) &&
+      (taxConsistency.byKind.transportTaxBonus === undefined || taxConsistency.byKind.transportTaxBonus >= 0) &&
+      (taxConsistency.byKind.transportTaxLoss === undefined || taxConsistency.byKind.transportTaxLoss <= 0);
+    check('四税财政分录按基准税额记账，加成/损耗单列', baseRecorded, JSON.stringify({ byKind: taxConsistency?.byKind, bases: taxConsistency?.bases }));
+
     // ---- 12. 存读档：行情、税账、委托全部随存档保存 ----
     const saveState = await read(win, `(async () => {
       const s = window.__lanwan.store;
@@ -444,6 +620,54 @@ app.whenReady().then(async () => {
     win.setSize(1600, 1000);
     await sleep(600);
 
+    // ---- 13b. 企业退出后保留股票历史（v0.8 复验问题 3） ----
+    const exitedCheck = await read(win, `(async () => {
+      const s = window.__lanwan.store;
+      s.setView('region');
+      s.clearSelection();
+      s.closeStockMarket();
+      s.emit();
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      const world = s.world;
+      const entry = world.securities.history.find((h) => h.candles.length > 0);
+      if (!entry) return { ok: false, reason: 'no-history' };
+      const company = world.companies.find((c) => c.id === entry.companyId);
+      const name = company ? company.name : entry.companyName;
+      world.companies = world.companies.filter((c) => c.id !== entry.companyId);
+      world.securities.classes = world.securities.classes.filter((c) => c.companyId !== entry.companyId);
+      world.securities.holdings = world.securities.holdings.filter((h) => h.shareClassId !== entry.shareClassId);
+      world.securities.orders = world.securities.orders.filter((o) => o.shareClassId !== entry.shareClassId);
+      s.openStockMarket(entry.companyId, entry.kind);
+      s.emit();
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      const view = s.stockMarketView();
+      const row = view.rows.find((r) => r.companyId === entry.companyId);
+      const html = document.querySelector('[data-testid="stock-window"]')?.innerHTML ?? '';
+      const orderResult = s.tradeShares(entry.companyId, entry.kind, 'buy', 10, 1);
+      return {
+        ok: true,
+        companyName: name,
+        exited: row ? row.exited : null,
+        tradable: row ? row.tradable : null,
+        candles: view.selected ? view.selected.candles.length : 0,
+        hasNotice: html.includes('stock-exited-notice'),
+        hasOrderForm: html.includes('stock-order-form'),
+        orderOk: orderResult.ok,
+        orderError: orderResult.error ?? null,
+      };
+    })()`);
+    const exitedOk =
+      Boolean(exitedCheck?.ok) &&
+      exitedCheck.exited === true &&
+      exitedCheck.tradable === false &&
+      exitedCheck.candles > 0 &&
+      exitedCheck.hasNotice === true &&
+      exitedCheck.hasOrderForm === false &&
+      exitedCheck.orderOk === false;
+    check('企业退出后行情历史保留，界面标识已退出且禁止下单', exitedOk, JSON.stringify(exitedCheck));
+    await ensureWindowInside(win);
+    await capture(win, 'v08-13-stock-exited-history.png');
+
     // ---- 14. 控制台无错误 ----
     check('控制台无未过滤错误', errors.length === 0, errors.slice(0, 3).join(' | '));
   } catch (error) {
@@ -451,7 +675,7 @@ app.whenReady().then(async () => {
   }
 
   const result = {
-    version: '0.8.0',
+    version: '0.8.1',
     ranAt: new Date().toISOString(),
     display: process.env.DISPLAY ?? null,
     total: checks.length,

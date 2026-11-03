@@ -187,7 +187,7 @@ function renderRow(row: StockListRow, selected: boolean): string {
   return `
     <button
       type="button"
-      class="stock-row ${selected ? 'is-selected' : ''} ${row.tradable ? '' : 'is-locked'}"
+      class="stock-row ${selected ? 'is-selected' : ''} ${row.exited ? 'is-exited' : row.tradable ? '' : 'is-locked'}"
       data-action="stock-focus"
       data-company-id="${esc(row.companyId)}"
       data-testid="stock-row-${esc(row.companyId)}"
@@ -206,7 +206,7 @@ function renderRow(row: StockListRow, selected: boolean): string {
       <span class="stock-row-flags">
         ${row.playerShares > 0 ? `<span class="stock-holding-flag" title="你的持股 ${num(row.playerShares)} 股 / ${pct(row.playerStake, 2)}">持仓 ${pct(row.playerStake, 1)}</span>` : ''}
         ${row.playerOpenOrders > 0 ? `<span class="stock-order-flag">挂单 ${row.playerOpenOrders}</span>` : ''}
-        ${row.tradable ? '' : '<span class="stock-locked-flag">不可交易</span>'}
+        ${row.exited ? '<span class="stock-exited-flag">已退出</span>' : row.tradable ? '' : '<span class="stock-locked-flag">不可交易</span>'}
       </span>
     </button>`;
 }
@@ -252,6 +252,10 @@ function renderMarketPanel(view: StockMarketView): string {
         <small>未成交委托最优价</small>
       </div>
     </div>
+    ${detail.exited ? `<div class="stock-exited-notice" data-testid="stock-exited-notice" role="status">
+      <b>已退出市场</b>
+      <span>${detail.lastTradeTick === null ? '退出前没有真实成交记录' : `最后真实成交：${esc(tickDate(detail.lastTradeTick))}`} · 股份已注销，不可再交易或恢复</span>
+    </div>` : ''}
     ${renderCandleChart(detail.candles as readonly StockCandleView[])}
     <p class="stock-market-note">${esc(detail.note)}</p>`;
 }
@@ -471,7 +475,7 @@ export function renderStockWindow(view: StockMarketView, options: StockWindowOpt
           ${
             detail
               ? `<section class="stock-company" data-testid="stock-company-info">
-                  <div class="gov-sub-head"><span>企业信息</span><em>${esc(detail.company.cityName)}</em></div>
+                  <div class="gov-sub-head"><span>企业信息</span><em>${detail.exited ? '已退出' : esc(detail.company.cityName)}</em></div>
                   <div class="stock-kv"><span>行业</span><b>${esc(detail.company.industry)}</b></div>
                   <div class="stock-kv"><span>已发行</span><b>${num(detail.issuedShares)} 股</b></div>
                   <div class="stock-kv"><span>员工 / 产能</span><b>${num(detail.company.employees)} / ${num(detail.company.capacity)}</b></div>
@@ -482,8 +486,13 @@ export function renderStockWindow(view: StockMarketView, options: StockWindowOpt
                   <div class="stock-kv"><span>持股</span><b>${num(detail.playerShares)} 股</b></div>
                   <div class="stock-kv"><span>可投资现金</span><b>${money(detail.playerCash)}</b></div>
                 </section>
-                ${renderOrderForm(detail, draft, options.orderNote)}
-                ${renderOrders(detail)}`
+                ${detail.exited
+                  ? `<section class="stock-exited-panel" data-testid="stock-exited-panel">
+                      <div class="gov-sub-head"><span>交易</span><em>已停止</em></div>
+                      <p class="fin-hint">该企业已退出市场，股份类别已注销：不能下单、买入或卖出，也不能恢复已注销股份。历史行情仅用于查阅。</p>
+                    </section>`
+                  : `${renderOrderForm(detail, draft, options.orderNote)}
+                ${renderOrders(detail)}`}`
               : `<div class="empty-state compact"><span class="empty-mark" aria-hidden="true">◫</span><p>未选中企业</p><small>在左侧列表选择一家企业后可查看持仓与下单。</small></div>`
           }
         </aside>

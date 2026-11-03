@@ -9082,3 +9082,68 @@ kbd {
   padding: 1px 5px;
   font-size: 6.4px;
 }
+
+/* v0.8 复验：K 线时间轴空档与已退出企业 */
+.stock-chart .gap-mark {
+  stroke: rgba(124, 196, 205, 0.1);
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+}
+
+.stock-chart .axis.month,
+.stock-chart .axis.vol-label {
+  font-size: 6.2px;
+}
+
+.stock-chart-note {
+  margin: 2px 0 0;
+  color: var(--faint);
+  font-size: 6.2px;
+  line-height: 1.4;
+}
+
+.stock-row.is-exited {
+  opacity: 0.8;
+  border-style: dashed;
+}
+
+.stock-exited-flag {
+  padding: 0 4px;
+  border: 1px solid rgba(255, 171, 118, 0.45);
+  border-radius: 2px;
+  color: var(--orange);
+  font-size: 6.2px;
+}
+
+.stock-locked-flag {
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  color: var(--faint);
+  font-size: 6.2px;
+}
+
+.stock-exited-notice {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: baseline;
+  margin: 4px 0 2px;
+  padding: 4px 7px;
+  border: 1px dashed rgba(255, 171, 118, 0.4);
+  border-radius: 3px;
+  background: rgba(255, 171, 118, 0.05);
+  font-size: 6.6px;
+}
+
+.stock-exited-notice b {
+  color: var(--orange);
+}
+
+.stock-exited-notice span {
+  color: var(--muted);
+}
+
+.stock-exited-panel {
+  padding: 4px 0;
+}
