@@ -360,6 +360,9 @@ export function maybeAutoIssueGovernmentBond(
   const ai = config.government.aiGovernment;
   const government = city.government;
   if (!ai.enabled || !government) return { issued: false, units: 0 };
+  // v0.7.1 复验问题 B：玩家担任该城现任市长时，发债是玩家决定的财政操作，AI 不得代发。
+  // 每次月结都按当前 world.player.roles.mayorCityId 重新判定：上任/离任/换届/破产重选/读档后立即生效。
+  if ((world.player.roles?.mayorCityId ?? null) === city.id) return { issued: false, units: 0 };
   if (government.bankruptcy.status === 'bankrupt') return { issued: false, units: 0 };
   if (issuanceBlockedByCaretaker(world, city, config)) return { issued: false, units: 0 };
   const issuedThisTick = bondsOf(world).issuances.filter(

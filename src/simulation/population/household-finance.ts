@@ -445,9 +445,30 @@ function isGroupSplitFragment(loan: HouseholdLoanContract): boolean {
 }
 
 /**
- * 把同一城同一群体内的“群体变化拆分合同”合并为一笔：
+ * 合并前要求的“还款条件完全相同”签名。
+ *
+ * v0.7.1 复验问题 A：旧实现用 min(startTick)/min(nextDueTick)/max(termMonths) 合并任意碎片，
+ * 会把不同月份发放、到期月不同的贷款并成一笔——新贷款被拖进旧贷款的“最后一期”，
+ * 末期按剩余未偿全额结清，导致新贷款提前到期（复现：旧贷 M24 应还 100，新贷月供 100，
+ * 合并后 M24 却要求 2500）。
+ * 现在只合并开始月、期限、下次还款月、月利率、状态完全一致的碎片：这类合同的每一期
+ * 应还本金/利息/到期日天然相同，聚合后各期金额就是原合同之和，不会改变任何还款安排。
+ */
+function loanScheduleKey(loan: HouseholdLoanContract): string {
+  return [
+    loan.startTick,
+    loan.termMonths,
+    loan.nextDueTick,
+    loan.rateMonthly.toFixed(6),
+    loan.status,
+  ].join('|');
+}
+
+/**
+ * 把同一城同一群体内**还款条件完全相同**的“群体变化拆分合同”合并为一笔：
  * 拆分每月都会发生，若不合并，碎片会继续被拆分，合同数与存档体积指数增长。
- * 合并只做账面聚合：Σ未偿/欠息守恒，payments 拼接，不产生还款记录。
+ * 合并只做账面聚合：Σ未偿/欠息/月供守恒，payments 拼接，不产生还款记录；
+ * 开始月、期限、下次还款月、利率、状态必须完全一致，故各期还款计划与原合同保持一致。
  */
 function consolidateGroupSplitFragments(
   finance: NonNullable<WorldState['householdFinance']>,
@@ -465,27 +486,37 @@ function consolidateGroupSplitFragments(
     )
     .sort((a, b) => a.id.localeCompare(b.id));
   if (fragments.length <= 1) return 0;
-  const target = fragments[0]!;
-  for (const fragment of fragments.slice(1)) {
-    target.principal = round2(target.principal + fragment.principal);
-    target.outstanding = round2(target.outstanding + fragment.outstanding);
-    target.paidPrincipal = round2(target.paidPrincipal + fragment.paidPrincipal);
-    target.paidInterest = round2(target.paidInterest + fragment.paidInterest);
-    target.accruedInterest = round2(target.accruedInterest + fragment.accruedInterest);
-    target.arrearsPrincipal = round2(target.arrearsPrincipal + fragment.arrearsPrincipal);
-    target.arrearsInterest = round2(target.arrearsInterest + fragment.arrearsInterest);
-    target.payments = [...target.payments, ...fragment.payments];
-    target.startTick = Math.min(target.startTick, fragment.startTick);
-    target.nextDueTick = Math.min(target.nextDueTick, fragment.nextDueTick);
-    target.termMonths = Math.max(target.termMonths, fragment.termMonths);
-    if (fragment.status === 'defaulted') target.status = 'defaulted';
+  const buckets = new Map<string, HouseholdLoanContract[]>();
+  for (const fragment of fragments) {
+    const key = loanScheduleKey(fragment);
+    const bucket = buckets.get(key);
+    if (bucket) bucket.push(fragment);
+    else buckets.set(key, [fragment]);
   }
-  const mergedIds = new Set(fragments.slice(1).map((fragment) => fragment.id));
+  const mergedIds = new Set<string>();
+  for (const bucket of buckets.values()) {
+    if (bucket.length <= 1) continue;
+    bucket.sort((a, b) => a.id.localeCompare(b.id));
+    const target = bucket[0]!;
+    for (const fragment of bucket.slice(1)) {
+      target.principal = round2(target.principal + fragment.principal);
+      target.outstanding = round2(target.outstanding + fragment.outstanding);
+      target.paidPrincipal = round2(target.paidPrincipal + fragment.paidPrincipal);
+      target.paidInterest = round2(target.paidInterest + fragment.paidInterest);
+      target.accruedInterest = round2(target.accruedInterest + fragment.accruedInterest);
+      target.arrearsPrincipal = round2(target.arrearsPrincipal + fragment.arrearsPrincipal);
+      target.arrearsInterest = round2(target.arrearsInterest + fragment.arrearsInterest);
+      // 各期月供相加 = 聚合合同每期应还的本金；不重算、不改期限/开始月/下次还款月。
+      target.monthlyPrincipal = round2(target.monthlyPrincipal + fragment.monthlyPrincipal);
+      target.missedPayments = Math.max(target.missedPayments, fragment.missedPayments);
+      target.payments = [...target.payments, ...fragment.payments].sort((a, b) => a.tick - b.tick);
+      mergedIds.add(fragment.id);
+    }
+    // 账面恒等式：principal − paidPrincipal === outstanding。
+    target.principal = round2(target.outstanding + target.paidPrincipal);
+  }
+  if (mergedIds.size === 0) return 0;
   finance.loans = finance.loans.filter((loan) => !mergedIds.has(loan.id));
-  target.principal = round2(target.outstanding + target.paidPrincipal);
-  target.monthlyPrincipal = round2(
-    target.outstanding / Math.max(1, remainingLoanTerm(target)),
-  );
   return mergedIds.size;
 }
 

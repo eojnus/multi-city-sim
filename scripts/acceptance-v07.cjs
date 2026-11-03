@@ -4,7 +4,7 @@
  * 与 smoke-fiscal-ui.cjs 的差异：本脚本走真实 Electron 界面按钮与 store 命令，
  * 覆盖「市长发债 → AI 认购 → 资金入账 → 存读档」「玩家认购 AI 城市债券」
  * 「非市长看不到破产金额 / 该城市长可见」「1100x700 无横向溢出」，并把截图落到
- * docs/evidence_v0.7/（artifacts/ 被 gitignore，证据必须入仓）。
+ * docs/evidence_v0.7.2/（artifacts/ 被 gitignore，证据必须入仓）。
  *
  * 用法：Xvfb :99 & DISPLAY=:99 node_modules/electron/dist/electron --no-sandbox \
  *        --disable-dev-shm-usage --enable-unsafe-swiftshader scripts/acceptance-v07.cjs
@@ -16,7 +16,7 @@ const { registerSaveHandlers } = require('../dist/electron/saveIpc.js');
 
 const root = path.resolve(__dirname, '..');
 const artifacts = path.join(root, 'artifacts', 'acceptance-v07');
-const evidence = path.join(root, 'docs', 'evidence_v0.7');
+const evidence = path.join(root, 'docs', 'evidence_v0.7.2');
 fs.mkdirSync(artifacts, { recursive: true });
 fs.mkdirSync(evidence, { recursive: true });
 const userData = path.join(artifacts, 'electron-user-data');
@@ -156,12 +156,54 @@ app.whenReady().then(async () => {
     await capture(win, 'v07-02-citizen-fiscal-restricted.png');
   }
 
+  // ---- 7. 玩家市长城市月结不再自动发债；非玩家城市同月仍由 AI 发债 ----
+  {
+    await setMayor(win, 'lanport');
+    let lanportNew = 0;
+    let ironvaleNew = 0;
+    for (let attempt = 0; attempt < 4 && ironvaleNew === 0; attempt += 1) {
+      await read(win, `(() => {
+        const s = window.__lanwan.store;
+        for (const city of s.world.cities) {
+          city.treasury = 0;
+          city.fiscalExpenseBaseline = 1000000;
+        }
+        s.emit();
+        return true;
+      })()`);
+      await tickOnce(win);
+      const result = await read(win, `(() => {
+        const s = window.__lanwan.store;
+        const tick = s.world.time.tick;
+        return {
+          tick,
+          lanport: s.world.bonds.issuances.filter((item) => item.cityId === 'lanport' && item.issuedTick === tick).length,
+          aiCity: s.world.bonds.issuances.filter((item) => item.cityId !== 'lanport' && item.issuedTick === tick).length,
+        };
+      })()`);
+      lanportNew = Math.max(lanportNew, result?.lanport ?? 0);
+      ironvaleNew = Math.max(ironvaleNew, result?.aiCity ?? 0);
+    }
+    check('玩家市长城市月结不再自动发债', lanportNew === 0, `lanportNew=${lanportNew}`);
+    check('非玩家城市同月仍由 AI 自动发债', ironvaleNew > 0, `aiCityNew=${ironvaleNew}`);
+    await capture(win, 'v07-09-player-mayor-no-auto-bond.png');
+    await setMayor(win, null);
+  }
+
   // ---- 3. 市长发债 → 推进一个月 → AI 认购 → 财政入账 → 存读档 ----
   let issuedId = null;
   let treasuryAfterIssue = null;
   {
     await setMayor(win, 'lanport');
     await enterCity(win, 'lanport');
+    // 前置：给发行城市一个正常的财政余额（上一场景把财政清零以触发 AI 发债判定）。
+    await read(win, `(() => {
+      const s = window.__lanwan.store;
+      const city = s.world.cities.find((entry) => entry.id === 'lanport');
+      city.treasury = 30000000;
+      s.emit();
+      return true;
+    })()`);
     await read(win, `(() => {
       const input = document.querySelector('[data-testid="bond-plan-units"]');
       if (input) { input.value = '100'; input.dispatchEvent(new Event('input', { bubbles: true })); }
@@ -236,6 +278,8 @@ app.whenReady().then(async () => {
       return { tick: s.world.time.tick, soldUnits: issuance?.soldUnits ?? 0, treasury: s.world.cities.find((c) => c.id === 'lanport').treasury };
     })()`);
     check('存读档后债券成交与财政一致', JSON.stringify(beforeReload) === JSON.stringify(afterReload), `${JSON.stringify(beforeReload)} vs ${JSON.stringify(afterReload)}`);
+    // 后续场景（AI 城市债券、破产走查）需要玩家不是市长，恢复默认身份。
+    await setMayor(win, null);
   }
 
   // ---- 4. 玩家认购另一座 AI 城市的债券（真实资金，禁止自动扣款） ----
@@ -344,9 +388,9 @@ app.whenReady().then(async () => {
   check('控制台无错误', errors.length === 0, errors.slice(0, 5).join(' | '));
 
   const passed = checks.filter((item) => item.pass).length;
-  const summary = { tick: await read(win, 'window.__lanwan.store.world.time.tick'), passed, total: checks.length, checks, errors, evidenceDir: 'docs/evidence_v0.7' };
-  fs.writeFileSync(path.join(artifacts, 'acceptance-v07.json'), JSON.stringify(summary, null, 2));
-  fs.writeFileSync(path.join(evidence, 'acceptance-v07.json'), JSON.stringify(summary, null, 2));
+  const summary = { tick: await read(win, 'window.__lanwan.store.world.time.tick'), passed, total: checks.length, checks, errors, evidenceDir: 'docs/evidence_v0.7.2' };
+  fs.writeFileSync(path.join(artifacts, 'acceptance-v072.json'), JSON.stringify(summary, null, 2));
+  fs.writeFileSync(path.join(evidence, 'acceptance-v072.json'), JSON.stringify(summary, null, 2));
   console.log(`\nACCEPTANCE v0.7: ${passed}/${checks.length} passed, console errors ${errors.length}`);
   app.exit(passed === checks.length ? 0 : 1);
 });

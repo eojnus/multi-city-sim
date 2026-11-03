@@ -1,0 +1,136 @@
+// v0.7.1 复验问题 B：玩家担任现任市长时，AI 不得代替玩家自动发债。
+//
+// 验收口径：
+// - 完整月结路径（Simulation.tick → settleGovernmentDebt）判定，而不是只直接调用单函数；
+// - 每次月结按当前 world.player.roles.mayorCityId 判定：上任/离任/换届/重选/读档后立即生效；
+// - 非玩家市长城市保留 AI 自动发债；玩家仍可主动发债，居民投资实体/企业仍可按规则认购；
+// - 政府可向银行借款、债券到期银行无条件垫付、破产兑付勾销规则不变（本文件不触碰这些路径）。
+import { describe, expect, it } from 'vitest';
+import { DEMO_CONFIG } from '../../src/data/config';
+import { Simulation } from '../../src/simulation/core/simulation';
+import { parseSave, serializeSave } from '../../src/simulation/core/save';
+import type { WorldState } from '../../src/simulation/contracts/types';
+import { bondsOf, issueGovernmentBond } from '../../src/simulation/government/bonds';
+import { appointPlayerMayor } from '../../src/simulation/politics/politics';
+import { cityById } from './helpers';
+
+const CONFIG = DEMO_CONFIG;
+const PLAYER_CITY = 'lanport';
+const AI_CITY = 'ironvale';
+
+/** 制造财政紧张：每个城市财政为 0、上月财政支出基线 100 万，使 AI 发债条件全部满足。 */
+function makeFiscalTense(world: WorldState): void {
+  for (const city of world.cities) {
+    city.treasury = 0;
+    city.fiscalExpenseBaseline = 1_000_000;
+  }
+}
+
+function issuancesAt(world: WorldState, cityId: string, tick: number) {
+  return bondsOf(world).issuances.filter(
+    (issuance) => issuance.cityId === cityId && issuance.issuedTick === tick,
+  );
+}
+
+describe('问题B：玩家市长城市禁止 AI 自动发债（完整月结路径）', () => {
+  it('玩家任岚港市长：本城同月不出现 AI 发行计划，非玩家城市铁谷照常发债', () => {
+    const sim = Simulation.create();
+    expect(appointPlayerMayor(sim.state, PLAYER_CITY).ok).toBe(true);
+    makeFiscalTense(sim.state);
+
+    const result = sim.tick();
+    expect(result.ok, result.ok ? '' : result.error).toBe(true);
+    const tick = sim.state.time.tick;
+
+    expect(sim.state.player.roles.mayorCityId).toBe(PLAYER_CITY);
+    expect(issuancesAt(sim.state, PLAYER_CITY, tick)).toHaveLength(0);
+    expect(issuancesAt(sim.state, AI_CITY, tick).length).toBeGreaterThan(0);
+  });
+
+  it('玩家离任后下一个完整月结立即恢复 AI 发债（不重启世界）', () => {
+    const sim = Simulation.create();
+    expect(appointPlayerMayor(sim.state, PLAYER_CITY).ok).toBe(true);
+    makeFiscalTense(sim.state);
+    expect(sim.tick().ok).toBe(true);
+    const firstTick = sim.state.time.tick;
+    expect(issuancesAt(sim.state, PLAYER_CITY, firstTick)).toHaveLength(0);
+
+    // 离任：只改当前身份，不重建世界。
+    sim.state.player.roles.mayorCityId = null;
+    makeFiscalTense(sim.state);
+    expect(sim.tick().ok).toBe(true);
+    const secondTick = sim.state.time.tick;
+    expect(issuancesAt(sim.state, PLAYER_CITY, secondTick).length).toBeGreaterThan(0);
+  });
+
+  it('玩家上任后立即停止本城 AI 发债：上任前已发一期，上任后同月不再新增', () => {
+    const sim = Simulation.create();
+    makeFiscalTense(sim.state);
+    expect(sim.tick().ok).toBe(true);
+    const beforeTick = sim.state.time.tick;
+    expect(issuancesAt(sim.state, PLAYER_CITY, beforeTick).length).toBeGreaterThan(0);
+
+    expect(appointPlayerMayor(sim.state, PLAYER_CITY).ok).toBe(true);
+    makeFiscalTense(sim.state);
+    expect(sim.tick().ok).toBe(true);
+    const afterTick = sim.state.time.tick;
+    expect(issuancesAt(sim.state, PLAYER_CITY, afterTick)).toHaveLength(0);
+  });
+
+  it('读档后立即按存档中的市长身份判定：岚港不再 AI 发债，铁谷照常', () => {
+    const sim = Simulation.create();
+    expect(appointPlayerMayor(sim.state, PLAYER_CITY).ok).toBe(true);
+    makeFiscalTense(sim.state);
+    expect(sim.tick().ok).toBe(true);
+
+    const parsed = parseSave(serializeSave(sim.state));
+    expect(parsed.ok, parsed.ok ? '' : parsed.error).toBe(true);
+    const loaded = parsed.world!;
+    expect(loaded.player.roles.mayorCityId).toBe(PLAYER_CITY);
+    makeFiscalTense(loaded);
+
+    const resumed = new Simulation(loaded, CONFIG);
+    expect(resumed.tick().ok).toBe(true);
+    const tick = resumed.state.time.tick;
+    expect(issuancesAt(resumed.state, PLAYER_CITY, tick)).toHaveLength(0);
+
+    // 对照：同一份存档把市长身份清空后，同样条件下 AI 会发债——证明上面的 0 是身份判定生效。
+    const controlParsed = parseSave(serializeSave(sim.state));
+    const controlWorld = controlParsed.world!;
+    controlWorld.player.roles.mayorCityId = null;
+    makeFiscalTense(controlWorld);
+    const controlSim = new Simulation(controlWorld, CONFIG);
+    expect(controlSim.tick().ok).toBe(true);
+    expect(issuancesAt(controlSim.state, PLAYER_CITY, controlSim.state.time.tick).length).toBeGreaterThan(0);
+  });
+
+  it('玩家市长仍可主动发债，居民投资实体/企业仍按既有规则在窗口关闭时认购', () => {
+    const sim = Simulation.create();
+    expect(appointPlayerMayor(sim.state, PLAYER_CITY).ok).toBe(true);
+    makeFiscalTense(sim.state);
+    const tick = sim.state.time.tick;
+    const city = cityById(sim.state, PLAYER_CITY);
+    const issued = issueGovernmentBond(sim.state, city, CONFIG, 20, tick);
+    expect(issued.ok, issued.ok ? '' : issued.error).toBe(true);
+    expect(issued.issuance!.status).toBe('offering');
+
+    // 让居民投资实体有真实可用资金，窗口关闭时可按规则认购。
+    for (const group of sim.state.investors) group.cash = 0;
+    sim.state.investors[0]!.cash = 10_000;
+    for (const company of sim.state.companies) company.cash = 0;
+
+    expect(sim.tick().ok).toBe(true);
+    const issuance = bondsOf(sim.state).issuances.find(
+      (entry) => entry.id === issued.issuance!.id,
+    )!;
+    expect(issuance.closedTick).not.toBeNull();
+    expect(issuance.soldUnits).toBeGreaterThan(0);
+    expect(issuance.principal).toBeCloseTo(issuance.soldUnits * issuance.faceValue, 2);
+    // 玩家没有主动发债以外的本城 AI 发行（本 tick 唯一一期就是玩家发起的这一期）。
+    expect(
+      bondsOf(sim.state).issuances.filter(
+        (entry) => entry.cityId === PLAYER_CITY && entry.issuedTick === sim.state.time.tick,
+      ),
+    ).toHaveLength(0);
+  });
+});

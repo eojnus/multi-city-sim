@@ -3,7 +3,7 @@
 // v0.2 新增证券/治理/居民投资/协议/通知数据；旧 v1 存档由 core/save.ts 迁移。
 
 export const SAVE_FORMAT_VERSION = 7;
-export const GAME_VERSION = '0.7.1';
+export const GAME_VERSION = '0.7.2';
 
 export type GoodId =
   | 'grain'
