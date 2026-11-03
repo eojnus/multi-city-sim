@@ -12,10 +12,17 @@ import {
   renderLogDock,
   renderMapGuide,
   renderMapLegend,
-  renderRightCity,
   renderRightFoot,
-  renderRightRegion,
 } from './panels';
+import { DEFAULT_RIGHT_TAB, renderRightPanelParts } from './right-panel';
+import {
+  STOCK_WINDOW_MIN_HEIGHT,
+  STOCK_WINDOW_MIN_WIDTH,
+  clampStockWindowRect,
+  defaultStockWindowRect,
+  renderStockWindow,
+} from './stock-window';
+import type { StockDraft, StockSide, StockViewport, StockWindowRect } from './stock-window';
 import type { ModalKind, ModalState } from './modals';
 import { renderModal } from './modals';
 import { bindPieInteractions } from './charts/pie';
@@ -88,6 +95,7 @@ const SKELETON = `
       </div>
     </div>
     <div class="hud-menu" role="group" aria-label="存档与信息">
+      <button type="button" class="ken-btn ken-btn--gold" data-action="open-stock-market" data-testid="btn-stock-market" title="股票市场：查看行情、持仓与下单">股票</button>
       <button type="button" class="ken-btn ken-btn--grey" data-action="open-save" data-testid="btn-save" title="存档 / 手动槽位">保存</button>
       <button type="button" class="ken-btn ken-btn--grey" data-action="open-load" data-testid="btn-load" title="读取存档 / 新建世界">读取</button>
       <button type="button" class="ken-btn ken-btn--grey" data-action="open-assumptions" data-testid="btn-assumptions" title="参数与假设">参数</button>
@@ -113,6 +121,7 @@ const SKELETON = `
     </aside>
   </div>
   <div class="toast-stack" id="toast-stack" aria-live="polite" aria-atomic="false"></div>
+  <div class="stock-layer" id="stock-layer" hidden></div>
   <div class="modal-host" id="modal-host" hidden></div>
 `;
 
@@ -168,6 +177,7 @@ export class GameUI {
   private leftFoot: HTMLDivElement | null = null;
   private rightScroll: HTMLDivElement | null = null;
   private rightFoot: HTMLDivElement | null = null;
+  private stockLayer: HTMLDivElement | null = null;
   private logDock: HTMLDivElement | null = null;
   private logContent: HTMLDivElement | null = null;
   private mapGuide: HTMLDivElement | null = null;
@@ -193,6 +203,24 @@ export class GameUI {
   private focusCompanyId: string | null = null;
   private showAllGoods = false;
   private logCollapsed = false;
+
+  /** 右侧栏标签状态（纯 UI 状态；切换标签不调用任何 GameStore 命令）。 */
+  private rightTab: string = DEFAULT_RIGHT_TAB;
+  private rightPanelContextKey: string | null = null;
+
+  /** 股票大窗口的 UI 状态：位置尺寸、表单草稿与最近一次下单结果。 */
+  private stockRect: StockWindowRect | null = null;
+  private stockDraft: StockDraft = { side: 'buy', shares: '', limitPrice: '' };
+  private stockDraftCompanyId: string | null = null;
+  private stockOrderNote: string | null = null;
+  private stockInputTimer: number | null = null;
+  private stockDrag: {
+    mode: 'move' | 'resize';
+    pointerId: number;
+    startX: number;
+    startY: number;
+    rect: StockWindowRect;
+  } | null = null;
 
   private lastView: 'region' | 'city' = 'region';
   private lastCityId: string | null = null;
@@ -236,6 +264,7 @@ export class GameUI {
     this.mountNotifications();
     if (this.rightScroll) bindPieInteractions(this.rightScroll);
     this.bindEvents(overlay);
+    this.bindStockWindowEvents();
     this.bindExternalEvents();
 
     this.lastView = this.store.view;
@@ -275,6 +304,7 @@ export class GameUI {
     this.mapGuide = overlay.querySelector<HTMLDivElement>('#map-guide');
     this.mapLegend = overlay.querySelector<HTMLDivElement>('#map-legend');
     this.toastStack = overlay.querySelector<HTMLDivElement>('#toast-stack');
+    this.stockLayer = overlay.querySelector<HTMLDivElement>('#stock-layer');
     this.modalHost = overlay.querySelector<HTMLDivElement>('#modal-host');
     this.notificationHost = overlay.querySelector<HTMLDivElement>('#notification-host');
 
@@ -352,22 +382,13 @@ export class GameUI {
         store.view === 'region' ? renderLeftRegion(store) : renderLeftCity(store);
     }
     if (this.leftFoot) this.leftFoot.innerHTML = renderLeftFoot(store);
-    if (this.rightScroll) {
-      this.rightScroll.innerHTML =
-        store.view === 'region'
-          ? renderRightRegion(store, {
-              focusCompanyId: this.focusCompanyId,
-              showAllGoods: this.showAllGoods,
-            })
-          : renderRightCity(store, {
-              focusCompanyId: this.focusCompanyId,
-              showAllGoods: this.showAllGoods,
-            });
-    }
+    // 右侧栏改为「固定标题/标签 + 可滚动正文」，标签状态由 GameUI 持有。
+    this.renderRightPanel();
     if (this.rightFoot) this.rightFoot.innerHTML = renderRightFoot(store);
     this.renderLog();
     if (this.mapGuide) this.mapGuide.innerHTML = renderMapGuide(store);
     if (this.mapLegend) this.mapLegend.innerHTML = renderMapLegend(store);
+    this.syncStockWindow();
 
     if (this.overlay) {
       this.overlay.dataset.view = store.view;
@@ -381,17 +402,210 @@ export class GameUI {
     this.restoreFocus(focusKey);
   }
 
-  private renderRightPanel(): void {
+  /**
+   * 重绘右侧栏（标题 + 标签栏 + 当前标签正文）。
+   * - 标签状态只写 this.rightTab；翻页/切标签不会调用 GameStore 命令，也不会推进模拟；
+   * - 上下文键变化（选中城市/企业/建筑/街区改变）时由 resolveRightTab 回到「概况」；
+   * - 默认保留滚动位置；切标签时传 resetScroll 回到顶部。
+   */
+  private renderRightPanel(options: { resetScroll?: boolean } = {}): void {
     if (!this.rightScroll) return;
     const focusKey = this.captureFocusKey();
     const scrollTop = this.rightScroll.scrollTop;
-    const state = { focusCompanyId: this.focusCompanyId, showAllGoods: this.showAllGoods };
-    this.rightScroll.innerHTML =
-      this.store.view === 'region'
-        ? renderRightRegion(this.store, state)
-        : renderRightCity(this.store, state);
-    this.rightScroll.scrollTop = scrollTop;
+    const parts = renderRightPanelParts(this.store, {
+      tab: this.rightTab,
+      focusCompanyId: this.focusCompanyId,
+      showAllGoods: this.showAllGoods,
+      previousContextKey: this.rightPanelContextKey,
+    });
+    const contextChanged = parts.contextKey !== this.rightPanelContextKey;
+    this.rightTab = parts.tab;
+    this.rightPanelContextKey = parts.contextKey;
+    this.rightScroll.innerHTML = `<div class="right-panel" data-testid="right-panel" data-context="${parts.context}">
+      ${parts.headHtml}
+      ${parts.bodyHtml}
+    </div>`;
+    if (options.resetScroll || contextChanged) this.rightScroll.scrollTop = 0;
+    else this.rightScroll.scrollTop = scrollTop;
     this.restoreFocus(focusKey);
+  }
+
+  // ---------------------------------------------------------------- 股票市场大窗口
+
+  private stockViewport(): StockViewport {
+    return { width: window.innerWidth, height: window.innerHeight };
+  }
+
+  /** 打开窗口：只切 UI 状态与 store 的只读视图开关，不改变暂停/自动推进状态。 */
+  private openStockMarket(companyId?: string | null): void {
+    if (!this.stockRect) this.stockRect = defaultStockWindowRect(this.stockViewport());
+    this.stockDraftCompanyId = null;
+    this.stockOrderNote = null;
+    this.store.openStockMarket(companyId ?? undefined);
+  }
+
+  private closeStockMarket(): void {
+    this.stockInputTimer !== null && window.clearTimeout(this.stockInputTimer);
+    this.stockInputTimer = null;
+    this.stockDrag = null;
+    this.stockOrderNote = null;
+    this.store.closeStockMarket();
+  }
+
+  /** 重绘股票窗口（数据全部来自 store.stockMarketView()）。 */
+  private syncStockWindow(): void {
+    if (!this.stockLayer) return;
+    if (!this.store.stockMarketOpen) {
+      this.stockLayer.hidden = true;
+      this.stockLayer.innerHTML = '';
+      return;
+    }
+    const viewport = this.stockViewport();
+    this.stockRect = clampStockWindowRect(
+      this.stockRect ?? defaultStockWindowRect(viewport),
+      viewport,
+    );
+    const view = this.store.stockMarketView();
+    const selectedId = view.selected?.company.id ?? null;
+    if (selectedId !== this.stockDraftCompanyId) {
+      this.stockDraft = { side: 'buy', shares: '', limitPrice: '' };
+      this.stockDraftCompanyId = selectedId;
+      this.stockOrderNote = null;
+    }
+    this.stockLayer.hidden = false;
+    this.stockLayer.innerHTML = renderStockWindow(view, {
+      rect: this.stockRect,
+      draft: this.stockDraft,
+      orderNote: this.stockOrderNote,
+      monthLabel: this.store.dateLabel,
+      autoRunning: this.store.autoRunning,
+    });
+  }
+
+  /** 只重绘股票窗口并尽量保留输入焦点（用于表单草稿的防抖刷新）。 */
+  private refreshStockWindowDraft(): void {
+    if (!this.stockLayer || !this.store.stockMarketOpen) return;
+    const active = document.activeElement as HTMLInputElement | null;
+    const focusKey = active?.closest<HTMLElement>('[data-focus-key]')?.dataset.focusKey ?? null;
+    const caret = active?.selectionStart ?? null;
+    this.syncStockWindow();
+    if (!focusKey) return;
+    const next = this.stockLayer.querySelector<HTMLInputElement>(`[data-focus-key="${focusKey}"]`);
+    next?.focus({ preventScroll: true });
+    if (next && caret !== null && next.type !== 'number') next.setSelectionRange(caret, caret);
+    else if (next && caret !== null) {
+      try {
+        next.setSelectionRange(caret, caret);
+      } catch {
+        // number 输入在部分浏览器不支持 setSelectionRange，忽略即可。
+      }
+    }
+  }
+
+  private bindStockWindowEvents(): void {
+    if (!this.stockLayer) return;
+    this.stockLayer.addEventListener('pointerdown', (event) => {
+      const target = event.target as HTMLElement | null;
+      if (!target) return;
+      const rect = this.stockRect;
+      if (!rect) return;
+      const viewport = this.stockViewport();
+      const dragHandle = target.closest<HTMLElement>('[data-stock-drag]');
+      const resizeHandle = target.closest<HTMLElement>('[data-stock-resize]');
+      if (dragHandle) {
+        const start = clampStockWindowRect(rect, viewport);
+        this.stockDrag = {
+          mode: 'move',
+          pointerId: event.pointerId,
+          startX: event.clientX,
+          startY: event.clientY,
+          rect: start,
+        };
+        this.stockLayer?.setPointerCapture(event.pointerId);
+        event.preventDefault();
+      } else if (resizeHandle) {
+        const start = clampStockWindowRect(rect, viewport);
+        this.stockDrag = {
+          mode: 'resize',
+          pointerId: event.pointerId,
+          startX: event.clientX,
+          startY: event.clientY,
+          rect: start,
+        };
+        this.stockLayer?.setPointerCapture(event.pointerId);
+        event.preventDefault();
+      }
+    });
+    this.stockLayer.addEventListener('pointermove', (event) => {
+      const drag = this.stockDrag;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      const dx = event.clientX - drag.startX;
+      const dy = event.clientY - drag.startY;
+      const next: StockWindowRect =
+        drag.mode === 'move'
+          ? { ...drag.rect, left: drag.rect.left + dx, top: drag.rect.top + dy }
+          : {
+              ...drag.rect,
+              width: Math.max(STOCK_WINDOW_MIN_WIDTH, drag.rect.width + dx),
+              height: Math.max(STOCK_WINDOW_MIN_HEIGHT, drag.rect.height + dy),
+            };
+      this.stockRect = clampStockWindowRect(next, this.stockViewport());
+      this.applyStockWindowRect();
+    });
+    const endDrag = (event: PointerEvent): void => {
+      if (!this.stockDrag || this.stockDrag.pointerId !== event.pointerId) return;
+      this.stockDrag = null;
+    };
+    this.stockLayer.addEventListener('pointerup', endDrag);
+    this.stockLayer.addEventListener('pointercancel', endDrag);
+    this.stockLayer.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape' || this.modalKind) return;
+      event.preventDefault();
+      this.closeStockMarket();
+    });
+    this.stockLayer.addEventListener('input', (event) => this.onStockInput(event));
+    this.stockLayer.addEventListener('change', (event) => this.onStockChange(event));
+  }
+
+  /** 拖动/缩放时只改样式，不重排整块 HTML，避免打断指针捕获。 */
+  private applyStockWindowRect(): void {
+    const windowEl = this.stockLayer?.querySelector<HTMLElement>('.stock-window');
+    if (!windowEl || !this.stockRect) return;
+    windowEl.style.left = `${this.stockRect.left}px`;
+    windowEl.style.top = `${this.stockRect.top}px`;
+    windowEl.style.width = `${this.stockRect.width}px`;
+    windowEl.style.height = `${this.stockRect.height}px`;
+  }
+
+  private onStockInput(event: Event): void {
+    const target = event.target as HTMLInputElement | null;
+    if (!target) return;
+    if (target.matches('[data-stock-shares]')) this.stockDraft.shares = target.value;
+    else if (target.matches('[data-stock-limit]')) this.stockDraft.limitPrice = target.value;
+    else return;
+    // 草稿刷新防抖：只重绘股票窗口，不触碰 GameStore。
+    if (this.stockInputTimer !== null) window.clearTimeout(this.stockInputTimer);
+    this.stockInputTimer = window.setTimeout(() => {
+      this.stockInputTimer = null;
+      this.refreshStockWindowDraft();
+    }, 220);
+  }
+
+  private onStockChange(event: Event): void {
+    const target = event.target as HTMLInputElement | HTMLSelectElement | null;
+    if (!target) return;
+    if (target.matches('[data-stock-search]')) {
+      this.store.setStockMarketFilter({ search: target.value });
+      return;
+    }
+    const filter = target.dataset.stockFilter;
+    if (filter === 'city') {
+      this.store.setStockMarketFilter({ cityId: target.value || null });
+      return;
+    }
+    if (filter === 'industry') {
+      this.store.setStockMarketFilter({ industry: target.value || null });
+    }
   }
 
   private renderLog(): void {
@@ -482,7 +696,9 @@ export class GameUI {
     const buildingChanged = this.lastBuildingId !== store.selectedBuildingId;
     const districtChanged = this.lastDistrictId !== store.selectedDistrictId;
 
-    if (viewChanged || cityChanged) this.focusCompanyId = null;
+    // 选中对象变化时清理企业聚焦：否则区域/城市视图残留的 focusCompanyId
+    // 会盖过建筑/街区上下文（resolveRightContext 优先级：企业 > 建筑 > 街区）。
+    if (viewChanged || cityChanged || buildingChanged || districtChanged) this.focusCompanyId = null;
     this.renderAll({
       resetLeft: viewChanged,
       resetRight: viewChanged || cityChanged || buildingChanged || districtChanged,
@@ -632,7 +848,17 @@ export class GameUI {
 
   private bindExternalEvents(): void {
     window.addEventListener('lanwan:escape', () => {
+      // 模态框优先；否则关闭股票大窗口。两者的关闭都不改变暂停状态。
       if (this.modalKind) this.closeModal();
+      else if (this.store.stockMarketOpen) this.closeStockMarket();
+    });
+    window.addEventListener('resize', () => {
+      if (!this.store.stockMarketOpen) return;
+      this.stockRect = clampStockWindowRect(
+        this.stockRect ?? defaultStockWindowRect(this.stockViewport()),
+        this.stockViewport(),
+      );
+      this.syncStockWindow();
     });
     window.addEventListener('lanwan:open-save', () => {
       void this.openModal('save');
@@ -828,11 +1054,15 @@ export class GameUI {
         if (this.store.selectedCityId) this.store.runForMayor(this.store.selectedCityId);
         break;
       case 'show-companies': {
-        // KPI 卡片直达企业列表：只滚动右侧栏，不改选择状态。
-        const target = this.overlay?.querySelector<HTMLElement>(
-          '#right-scroll [data-testid="companies-section"]',
-        );
-        target?.scrollIntoView({ block: 'start', behavior: 'auto' });
+        // KPI 卡片直达企业标签：先切到「企业」标签，再滚动到企业列表；不改选择状态。
+        this.rightTab = 'companies';
+        this.renderRightPanel({ resetScroll: true });
+        window.requestAnimationFrame(() => {
+          const target = this.overlay?.querySelector<HTMLElement>(
+            '#right-scroll [data-testid="companies-section"]',
+          );
+          target?.scrollIntoView({ block: 'start', behavior: 'auto' });
+        });
         break;
       }
       case 'invest-transport': {
@@ -883,6 +1113,121 @@ export class GameUI {
       case 'expand-capacity':
         if (companyId) this.store.expandCapacity(companyId);
         break;
+      // ---------------------------------------------------------- v0.8 右侧栏标签
+      case 'right-tab': {
+        const tab = element.dataset.tab;
+        if (!tab) break;
+        // 只切 UI 视图状态；不调用任何模拟命令，也不推进时间。
+        this.rightTab = tab;
+        this.renderRightPanel({ resetScroll: true });
+        break;
+      }
+      // ---------------------------------------------------------- v0.8 股票市场大窗口
+      case 'open-stock-market':
+        this.openStockMarket(companyId);
+        break;
+      case 'close-stock-market':
+        this.closeStockMarket();
+        break;
+      case 'stock-kind': {
+        const kind = element.dataset.kind;
+        if (kind !== 'voting' && kind !== 'nonVoting') {
+          this.rejectAction('股份类别无效。');
+          break;
+        }
+        this.store.setStockMarketKind(kind);
+        break;
+      }
+      case 'stock-focus':
+        if (companyId) this.store.setStockMarketFocus(companyId);
+        break;
+      case 'stock-view': {
+        const view = element.dataset.view;
+        if (view !== 'all' && view !== 'holdings') {
+          this.rejectAction('股票列表范围无效。');
+          break;
+        }
+        this.store.setStockMarketView(view);
+        break;
+      }
+      case 'stock-side': {
+        const side = element.dataset.side;
+        if (side !== 'buy' && side !== 'sell') break;
+        this.stockDraft.side = side;
+        this.stockOrderNote = null;
+        this.refreshStockWindowDraft();
+        break;
+      }
+      case 'stock-quick-shares': {
+        const shares = Number(element.dataset.shares ?? '');
+        if (!Number.isInteger(shares) || shares <= 0) {
+          this.rejectAction('快捷股数无效。');
+          break;
+        }
+        this.stockDraft.shares = String(shares);
+        this.stockOrderNote = null;
+        this.refreshStockWindowDraft();
+        break;
+      }
+      case 'stock-order-submit': {
+        const detail = this.store.stockMarketView().selected;
+        if (!detail) {
+          this.rejectAction('请先选择一家企业。');
+          break;
+        }
+        const windowEl = element.closest<HTMLElement>('[data-testid="stock-window"]');
+        const sharesInput =
+          windowEl?.querySelector<HTMLInputElement>('[data-stock-shares]') ?? null;
+        const limitInput = windowEl?.querySelector<HTMLInputElement>('[data-stock-limit]') ?? null;
+        const shares = Number(sharesInput?.value.trim() ?? '');
+        const limitPrice = Number(limitInput?.value.trim() ?? '');
+        if (!Number.isInteger(shares) || shares <= 0) {
+          this.rejectAction('股数必须是正整数。');
+          break;
+        }
+        if (!Number.isFinite(limitPrice) || limitPrice <= 0) {
+          this.rejectAction('限价必须大于 0。');
+          break;
+        }
+        // 前端预检只是提前提示；真正的资金/持股校验仍由 store.tradeShares 完成。
+        if (this.stockDraft.side === 'buy' && shares * limitPrice > detail.playerCash) {
+          this.rejectAction(`可投资现金不足（需要 ${money(shares * limitPrice)}）。`);
+          break;
+        }
+        if (this.stockDraft.side === 'sell' && shares > detail.playerShares) {
+          this.rejectAction(`可卖股数不足（持有 ${num(detail.playerShares)} 股）。`);
+          break;
+        }
+        this.stockDraft.shares = String(shares);
+        this.stockDraft.limitPrice = String(limitPrice);
+        const result = this.store.tradeShares(
+          detail.company.id,
+          detail.kind,
+          this.stockDraft.side,
+          shares,
+          limitPrice,
+        );
+        if (!result.ok) {
+          this.stockOrderNote = result.error ?? '下单失败：请检查股数、限价与资金。';
+        } else if ((result.shares ?? 0) > 0) {
+          this.stockOrderNote = `已成交 ${num(result.shares ?? 0)} 股，成交额 ${money(result.value ?? 0)}；剩余未成交部分保留为挂单。`;
+        } else {
+          this.stockOrderNote = '订单已挂出，暂时没有对手方；可在下方委托列表撤单。';
+        }
+        this.refreshStockWindowDraft();
+        break;
+      }
+      case 'stock-cancel-order': {
+        const orderId = element.dataset.orderId;
+        if (!orderId) {
+          this.rejectAction('委托参数缺失。');
+          break;
+        }
+        const result = this.store.cancelStockOrder(orderId);
+        this.stockOrderNote = result.ok ? '已撤销该委托；未冻结的资金与股份不受影响。' : result.error ?? '撤单失败。';
+        this.refreshStockWindowDraft();
+        break;
+      }
       // ---------------------------------------------------------- v0.4 银行
       case 'bank-deposit': {
         if (!Number.isFinite(amount) || amount <= 0) {

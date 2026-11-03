@@ -8232,3 +8232,853 @@ kbd {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+/* ==========================================================================
+   组件：右侧栏标签（.right-panel / .rp-*）
+   标题与标签栏固定在滚动区顶部，正文按标签分组；标签切换纯 UI 状态。
+   ========================================================================== */
+
+.right-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.right-panel-head {
+  position: sticky;
+  top: -12px;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0 0 2px;
+  padding: 8px 6px 6px;
+  border-bottom: 1px solid var(--line);
+  background:
+    linear-gradient(180deg, rgba(6, 15, 24, 0.98) 70%, rgba(6, 15, 24, 0.86)),
+    radial-gradient(120% 90% at 0% 0%, rgba(95, 227, 192, 0.06), transparent 60%);
+  backdrop-filter: blur(6px);
+}
+
+.rp-head-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.rp-heading {
+  min-width: 0;
+}
+
+.rp-title {
+  margin: 1px 0 2px;
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--pixel);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rp-subtitle {
+  margin: 0;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 7.2px;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rp-close {
+  flex: none;
+}
+
+.rp-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  overflow-x: auto;
+  padding-bottom: 1px;
+  scrollbar-width: none;
+}
+
+.rp-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.rp-tab {
+  flex: none;
+  padding: 3px 7px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--faint);
+  font-family: var(--pixel);
+  font-size: 8px;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+
+.rp-tab:hover {
+  color: var(--text);
+  border-color: var(--line);
+}
+
+.rp-tab.is-active {
+  border-color: rgba(242, 193, 78, 0.45);
+  background: rgba(242, 193, 78, 0.1);
+  color: var(--gold);
+}
+
+.rp-tab:focus-visible {
+  outline: 1px solid var(--cyan);
+  outline-offset: 1px;
+}
+
+.rp-tabs-meta {
+  margin-left: auto;
+  padding-left: 6px;
+  color: var(--faint);
+  font-size: 6.6px;
+  white-space: nowrap;
+  opacity: 0.8;
+}
+
+.right-tabpanel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* ==========================================================================
+   组件：股票市场大窗口（.stock-*）
+   ========================================================================== */
+
+.stock-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  /* 只让窗口本身接收指针：HUD 的时间/暂停/继续按钮保持可操作。 */
+  pointer-events: none;
+}
+
+.stock-layer[hidden] {
+  display: none;
+}
+
+.stock-layer::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(80% 70% at 50% 40%, rgba(2, 8, 14, 0.18), rgba(2, 8, 14, 0.5));
+  pointer-events: none;
+}
+
+.stock-window {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background:
+    radial-gradient(120% 80% at 100% 0%, rgba(79, 195, 247, 0.05), transparent 60%),
+    linear-gradient(180deg, rgba(8, 20, 31, 0.99), rgba(4, 11, 18, 0.99));
+  box-shadow: 0 30px 70px rgba(0, 0, 0, 0.66), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  pointer-events: auto;
+  font-size: 8px;
+}
+
+.stock-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  height: 34px;
+  padding: 0 6px 0 10px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(13, 30, 46, 0.98), rgba(7, 17, 28, 0.98));
+  cursor: move;
+  user-select: none;
+  touch-action: none;
+}
+
+.stock-title {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+
+.stock-title b {
+  color: var(--text);
+  font-family: var(--pixel);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+}
+
+.stock-title em {
+  color: var(--faint);
+  font-size: 7px;
+  font-style: normal;
+}
+
+.stock-title-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 7.4px;
+}
+
+.stock-month {
+  color: var(--gold);
+}
+
+.stock-open-note {
+  color: var(--faint);
+  font-family: var(--ui-font);
+  font-size: 6.6px;
+}
+
+.stock-close {
+  flex: none;
+  cursor: pointer;
+}
+
+.stock-body {
+  display: grid;
+  grid-template-columns: minmax(230px, 300px) minmax(300px, 1fr) minmax(270px, 340px);
+  gap: 1px;
+  flex: 1;
+  min-height: 0;
+  background: var(--line);
+}
+
+.stock-list,
+.stock-market,
+.stock-side {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 7px 8px;
+  background: rgba(5, 13, 21, 0.94);
+  scrollbar-width: thin;
+}
+
+.stock-list-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: none;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--line);
+}
+
+.stock-search {
+  width: 100%;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: rgba(3, 10, 16, 0.85);
+  color: var(--text);
+  font-family: var(--ui-font);
+  font-size: 7.6px;
+}
+
+.stock-search:focus {
+  border-color: var(--cyan);
+  outline: none;
+}
+
+.stock-filter-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+}
+
+.stock-filter-row select {
+  width: 100%;
+  padding: 3px 4px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: rgba(3, 10, 16, 0.85);
+  color: var(--muted);
+  font-family: var(--ui-font);
+  font-size: 7.2px;
+}
+
+.stock-view-switch,
+.stock-kind-switch,
+.stock-side-switch {
+  display: flex;
+  gap: 3px;
+}
+
+.stock-view-switch .chip-btn,
+.stock-kind-switch .chip-btn,
+.stock-side-switch .chip-btn {
+  flex: 1;
+}
+
+.stock-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.stock-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 5px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: rgba(9, 23, 36, 0.6);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.stock-row:hover {
+  border-color: var(--line);
+  background: rgba(13, 31, 48, 0.8);
+}
+
+.stock-row.is-selected {
+  border-color: rgba(242, 193, 78, 0.5);
+  background: rgba(242, 193, 78, 0.08);
+}
+
+.stock-row.is-locked {
+  opacity: 0.66;
+}
+
+.stock-row-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.stock-row-main b {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 7.8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stock-row-main em {
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 6.4px;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stock-row-nums {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  flex: none;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.stock-row-nums b {
+  color: var(--muted);
+  font-size: 7.4px;
+}
+
+.stock-row-nums em {
+  font-size: 6.6px;
+  font-style: normal;
+}
+
+.stock-row-flags {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  flex: none;
+}
+
+.stock-holding-flag {
+  padding: 0 3px;
+  border-radius: 2px;
+  background: rgba(95, 227, 192, 0.12);
+  color: var(--teal);
+  font-size: 6px;
+}
+
+.stock-order-flag {
+  color: var(--gold);
+  font-size: 6px;
+}
+
+.stock-locked-flag {
+  color: var(--faint);
+  font-size: 6px;
+}
+
+.stock-list-empty {
+  margin: auto 0;
+}
+
+.stock-list-foot {
+  flex: none;
+  margin: 2px 0 0;
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
+  color: var(--faint);
+  font-size: 6.4px;
+}
+
+.stock-market {
+  gap: 6px;
+}
+
+.stock-market-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  flex: none;
+}
+
+.stock-market-head h3 {
+  margin: 1px 0 2px;
+  color: var(--text);
+  font-family: var(--pixel);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+
+.stock-market-sub {
+  margin: 0;
+  color: var(--faint);
+  font-size: 6.8px;
+}
+
+.stock-quote {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  flex: none;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.quote-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 6px;
+  background: rgba(7, 18, 29, 0.94);
+}
+
+.quote-cell span {
+  color: var(--faint);
+  font-size: 6.2px;
+}
+
+.quote-cell b {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 8.2px;
+  font-variant-numeric: tabular-nums;
+}
+
+.quote-cell small {
+  color: var(--faint);
+  font-size: 6px;
+}
+
+.quote-cell.is-up b,
+.stock-row-nums .is-up {
+  color: var(--green);
+}
+
+.quote-cell.is-down b,
+.stock-row-nums .is-down {
+  color: var(--red);
+}
+
+.stock-chart {
+  flex: none;
+  padding: 4px 5px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: rgba(3, 10, 17, 0.72);
+}
+
+.stock-chart svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.stock-chart .grid {
+  stroke: rgba(124, 196, 205, 0.1);
+  stroke-width: 1;
+}
+
+.stock-chart .axis-line {
+  stroke: var(--line-strong);
+  stroke-width: 1;
+}
+
+.stock-chart .axis {
+  fill: var(--faint);
+  font-family: var(--mono);
+  font-size: 6.4px;
+}
+
+.stock-chart .stock-candle .wick {
+  stroke: currentColor;
+  stroke-width: 1;
+}
+
+.stock-chart .stock-candle .body {
+  fill: currentColor;
+}
+
+.stock-chart .stock-candle .vol {
+  fill: currentColor;
+  opacity: 0.24;
+}
+
+.stock-chart .stock-candle.is-up {
+  color: var(--green);
+}
+
+.stock-chart .stock-candle.is-down {
+  color: var(--red);
+}
+
+.stock-chart-meta {
+  display: flex;
+  justify-content: space-between;
+  color: var(--faint);
+  font-size: 6.2px;
+}
+
+.stock-chart-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  flex: 1;
+  min-height: 150px;
+  padding: 12px;
+  border: 1px dashed var(--line);
+  border-radius: 3px;
+  text-align: center;
+}
+
+.stock-chart-empty p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.stock-chart-empty small {
+  max-width: 320px;
+  color: var(--faint);
+  font-size: 6.6px;
+  line-height: 1.6;
+}
+
+.stock-market-note {
+  margin: 0;
+  color: var(--faint);
+  font-size: 6.6px;
+  line-height: 1.6;
+}
+
+.stock-side {
+  gap: 7px;
+}
+
+.stock-company,
+.stock-position,
+.stock-order,
+.stock-orders {
+  flex: none;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+}
+
+.stock-kv {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 1px 0;
+}
+
+.stock-kv span {
+  color: var(--faint);
+  font-size: 6.6px;
+}
+
+.stock-kv b {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 7.4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.stock-order-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+
+.stock-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 4px;
+}
+
+.stock-field span {
+  color: var(--faint);
+  font-size: 6.4px;
+}
+
+.stock-field input {
+  width: 100%;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: rgba(3, 10, 16, 0.85);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
+.stock-field input:focus {
+  border-color: var(--cyan);
+  outline: none;
+}
+
+.stock-quick-row {
+  display: flex;
+  gap: 3px;
+  margin: 2px 0 5px;
+}
+
+.stock-quick-row .chip-btn {
+  flex: 1;
+}
+
+.stock-order-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-bottom: 5px;
+  color: var(--faint);
+  font-size: 6.4px;
+}
+
+.stock-order-meta b {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.stock-submit {
+  width: 100%;
+}
+
+.stock-submit[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.stock-order-hint {
+  margin: 3px 0 0;
+  color: var(--teal);
+  font-size: 6.4px;
+  line-height: 1.55;
+}
+
+.stock-order-hint.is-warn {
+  color: var(--gold);
+}
+
+.stock-order-status {
+  margin-top: 3px;
+  color: var(--faint);
+  font-size: 6.2px;
+  line-height: 1.55;
+}
+
+.stock-order-status.is-visible {
+  color: var(--muted);
+}
+
+.stock-order-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stock-order-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 4px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: rgba(9, 23, 36, 0.55);
+}
+
+.stock-order-side {
+  flex: none;
+  padding: 0 3px;
+  border-radius: 2px;
+  font-size: 6.2px;
+}
+
+.stock-order-side.is-buy {
+  background: rgba(159, 224, 122, 0.12);
+  color: var(--green);
+}
+
+.stock-order-side.is-sell {
+  background: rgba(255, 122, 112, 0.12);
+  color: var(--red);
+}
+
+.stock-order-main {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 6.6px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stock-order-item em {
+  flex: none;
+  color: var(--faint);
+  font-size: 6px;
+  font-style: normal;
+}
+
+.stock-order-item .chip-btn {
+  flex: none;
+}
+
+.stock-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex: none;
+  padding: 4px 10px;
+  border-top: 1px solid var(--line);
+  background: rgba(5, 13, 21, 0.98);
+  color: var(--faint);
+  font-size: 6.2px;
+  line-height: 1.5;
+}
+
+.stock-foot-note {
+  flex: none;
+  color: var(--muted);
+}
+
+.stock-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+  touch-action: none;
+  background:
+    linear-gradient(135deg, transparent 50%, var(--line-strong) 50%, var(--line-strong) 62%, transparent 62%),
+    linear-gradient(135deg, transparent 72%, var(--faint) 72%, var(--faint) 80%, transparent 80%);
+}
+
+/* 标签正文里的旧面板在窄栏中保持紧凑 */
+.right-tabpanel > .panel-section:first-child,
+.right-tabpanel > .company-detail:first-child {
+  margin-top: 0;
+}
+
+@media (max-width: 1180px) {
+  .stock-body {
+    grid-template-columns: minmax(210px, 250px) minmax(280px, 1fr) minmax(250px, 300px);
+  }
+
+  .stock-quote {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .rp-tabs-meta {
+    display: none;
+  }
+}
+
+@media (max-height: 720px) {
+  .stock-body {
+    grid-template-columns: minmax(200px, 240px) minmax(260px, 1fr) minmax(240px, 290px);
+  }
+
+  .stock-market-head h3 {
+    font-size: 11px;
+  }
+
+  .stock-chart svg {
+    max-height: 140px;
+  }
+
+  .stock-list,
+  .stock-market,
+  .stock-side {
+    padding: 5px 6px;
+  }
+}
+
+/* 股票窗口标题栏内的时间/暂停操作：与 HUD 按钮同一命令，窗口本身不改变暂停状态 */
+.stock-title-actions {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.stock-title-actions .chip-btn {
+  padding: 1px 5px;
+  font-size: 6.4px;
+}

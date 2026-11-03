@@ -1,4 +1,5 @@
 import type {
+  CityTaxMonth,
   Company,
   HolderRef,
   InvestmentResult,
@@ -56,6 +57,7 @@ import {
   visibleLogEntries,
   visibleNotifications as filterVisibleNotifications,
 } from '../simulation/government/fiscal-view';
+import { latestTaxMonth } from '../simulation/government/taxes';
 import {
   bondSubscriptionCloseTick,
   issueGovernmentBond,
@@ -153,6 +155,100 @@ export interface SaveSlotView extends SaveSlotInfo {
   label: string;
 }
 
+// ---------------------------------------------------------------- v0.8 股票市场视图
+
+/** 股票列表中的一行（每家企业一行；价格按当前选中股份类别展示）。 */
+export interface StockListRow {
+  companyId: string;
+  companyName: string;
+  cityId: string;
+  cityName: string;
+  industry: string;
+  kind: ShareKind;
+  classId: string;
+  issuedShares: number;
+  /** 当前类别最近一笔真实成交价；没有成交时为 null（不伪造）。 */
+  lastPrice: number | null;
+  lastTradeTick: number | null;
+  bookPrice: number;
+  /** 相对上一根月 K 线收盘价的涨跌幅（百分比）；没有可靠比较基准时为 null。 */
+  changePct: number | null;
+  playerShares: number;
+  playerStake: number;
+  playerOpenOrders: number;
+  tradable: boolean;
+}
+
+export interface StockCandleView {
+  tick: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  trades: number;
+}
+
+export interface StockOrderView {
+  id: string;
+  side: 'buy' | 'sell';
+  shares: number;
+  limitPrice: number;
+  createdTick: number;
+}
+
+export interface StockDetailView {
+  company: {
+    id: string;
+    name: string;
+    cityId: string;
+    cityName: string;
+    industry: string;
+    note: string;
+    employees: number;
+    capacity: number;
+    utilization: number;
+  };
+  kind: ShareKind;
+  classId: string;
+  issuedShares: number;
+  lastPrice: number | null;
+  lastTradeTick: number | null;
+  bookPrice: number;
+  changePct: number | null;
+  candles: StockCandleView[];
+  bestBid: number | null;
+  bestAsk: number | null;
+  playerShares: number;
+  playerStake: number;
+  playerCash: number;
+  playerOrders: StockOrderView[];
+  tradable: boolean;
+  note: string;
+}
+
+export interface StockMarketView {
+  open: boolean;
+  view: 'all' | 'holdings';
+  search: string;
+  cityFilter: string | null;
+  industryFilter: string | null;
+  cities: { id: string; name: string }[];
+  industries: string[];
+  rows: StockListRow[];
+  selected: StockDetailView | null;
+  kind: ShareKind;
+  note: string;
+}
+
+export interface CityTaxPanelView {
+  cityId: string;
+  cityName: string;
+  latest: CityTaxMonth | null;
+  history: CityTaxMonth[];
+  note: string;
+}
+
 const SAVE_SLOTS: { slot: string; label: string }[] = [
   { slot: 'autosave', label: '自动存档' },
   { slot: 'manual-1', label: '手动存档 1' },
@@ -205,6 +301,14 @@ export class GameStore {
   autosaveDisabled = false;
   autosaveDisabledReason: string | null = null;
   layouts: Record<string, CityLayout> = {};
+  // v0.8 股票市场窗口状态（纯 UI 视图状态，不参与模拟）。
+  stockMarketOpen = false;
+  stockMarketKind: ShareKind = 'voting';
+  stockMarketViewMode: 'all' | 'holdings' = 'all';
+  stockMarketFocusCompanyId: string | null = null;
+  stockMarketSearch = '';
+  stockMarketCityFilter: string | null = null;
+  stockMarketIndustryFilter: string | null = null;
   private listeners = new Set<() => void>();
   private toastId = 0;
   private menuCleanup: (() => void) | null = null;
@@ -831,6 +935,269 @@ export class GameStore {
       unitPrice: result.unitPrice,
       value: result.value,
     };
+  }
+
+  // ---------------------------------------------------------------- v0.8 股票市场
+
+  openStockMarket(companyId?: string, kind?: ShareKind): void {
+    this.stockMarketOpen = true;
+    if (kind) this.stockMarketKind = kind;
+    const focus = companyId ?? this.stockMarketFocusCompanyId ?? this.selectedCompanyId;
+    if (focus && this.world.companies.some((company) => company.id === focus)) {
+      this.stockMarketFocusCompanyId = focus;
+    }
+    this.emit();
+  }
+
+  closeStockMarket(): void {
+    this.stockMarketOpen = false;
+    this.emit();
+  }
+
+  setStockMarketKind(kind: ShareKind): void {
+    this.stockMarketKind = kind;
+    this.emit();
+  }
+
+  setStockMarketFocus(companyId: string): void {
+    this.stockMarketFocusCompanyId = companyId;
+    this.emit();
+  }
+
+  setStockMarketView(view: 'all' | 'holdings'): void {
+    this.stockMarketViewMode = view;
+    this.emit();
+  }
+
+  setStockMarketFilter(patch: { search?: string; cityId?: string | null; industry?: string | null }): void {
+    if (patch.search !== undefined) this.stockMarketSearch = patch.search;
+    if (patch.cityId !== undefined) this.stockMarketCityFilter = patch.cityId;
+    if (patch.industry !== undefined) this.stockMarketIndustryFilter = patch.industry;
+    this.emit();
+  }
+
+  /** 股票市场大窗口的只读视图：列表、明细、K 线、玩家持仓与本人类别的挂单。 */
+  stockMarketView(): StockMarketView {
+    const kind = this.stockMarketKind;
+    const cityNameOf = (id: string) => this.world.cities.find((city) => city.id === id)?.name ?? id;
+    const companies = [...this.world.companies].sort(
+      (a, b) =>
+        cityNameOf(a.cityId).localeCompare(cityNameOf(b.cityId), 'zh-Hans-CN') ||
+        a.name.localeCompare(b.name, 'zh-Hans-CN'),
+    );
+    const cities = [...new Set(companies.map((company) => company.cityId))].map((id) => ({
+      id,
+      name: cityNameOf(id),
+    }));
+    const industries = [...new Set(companies.map((company) => company.sector).filter(Boolean))].sort();
+
+    let rows = companies.map((company) => this.buildStockRow(company, kind));
+    if (this.stockMarketViewMode === 'holdings') rows = rows.filter((row) => row.playerShares > 0);
+    const search = this.stockMarketSearch.trim().toLowerCase();
+    if (search) {
+      rows = rows.filter((row) =>
+        `${row.companyName} ${row.cityName} ${row.industry}`.toLowerCase().includes(search),
+      );
+    }
+    if (this.stockMarketCityFilter) rows = rows.filter((row) => row.cityId === this.stockMarketCityFilter);
+    if (this.stockMarketIndustryFilter) {
+      rows = rows.filter((row) => row.industry === this.stockMarketIndustryFilter);
+    }
+    const focusId = this.stockMarketFocusCompanyId ?? this.selectedCompanyId;
+    const selectedRow = rows.find((row) => row.companyId === focusId) ?? rows[0] ?? null;
+
+    return {
+      open: this.stockMarketOpen,
+      view: this.stockMarketViewMode,
+      search: this.stockMarketSearch,
+      cityFilter: this.stockMarketCityFilter,
+      industryFilter: this.stockMarketIndustryFilter,
+      cities,
+      industries,
+      rows,
+      kind,
+      selected: selectedRow ? this.buildStockDetail(selectedRow.companyId, kind) : null,
+      note:
+        '行情来自真实成交（玩家撮合与月度撮合）；某月无成交则不生成 K 线，旧存档历史显示“暂无数据”。' +
+        '最近成交价与账面参考价分开标注，两者不可互相冒充。',
+    };
+  }
+
+  /** 撤销玩家自己的未成交股票委托；不改变现金与持股。 */
+  cancelStockOrder(orderId: string): { ok: boolean; error?: string } {
+    const index = this.world.securities.orders.findIndex((order) => order.id === orderId);
+    if (index < 0) {
+      this.toast('委托不存在或已成交。', 'error');
+      this.emit();
+      return { ok: false, error: '委托不存在' };
+    }
+    const order = this.world.securities.orders[index];
+    if (!order) {
+      this.toast('委托不存在或已成交。', 'error');
+      this.emit();
+      return { ok: false, error: '委托不存在' };
+    }
+    if (order.holder.type !== 'player' || order.holder.id !== 'player') {
+      this.toast('只能撤销自己的委托。', 'error');
+      this.emit();
+      return { ok: false, error: '不是玩家的委托' };
+    }
+    this.world.securities.orders.splice(index, 1);
+    this.toast('委托已撤销；未冻结的资金与股份不受影响。', 'success');
+    void this.autosave();
+    this.emit();
+    return { ok: true };
+  }
+
+  /**
+   * 市长税收面板（基准税额、交通系数、加成/损耗与最终入账）。
+   * 仅该城市现任市长可见；非市长返回 null（财政信息白名单）。
+   */
+  taxView(cityId: string): CityTaxPanelView | null {
+    if (viewerIdentity(this.world).mayorCityId !== cityId) return null;
+    const city = this.world.cities.find((candidate) => candidate.id === cityId);
+    if (!city) return null;
+    const history = this.world.taxes.historyByCity[cityId] ?? [];
+    return {
+      cityId,
+      cityName: city.name,
+      latest: latestTaxMonth(this.world, cityId) ?? null,
+      history,
+      note:
+        '基准税额由居民与企业按税法缴纳；交通税收系数只调整政府最终入账。系数 >1 的差额记为交通财政加成（系统注入），' +
+        '<1 的差额记为交通征收损耗（不再退回纳税人）；两者都不是债务、贷款或 GDP。',
+    };
+  }
+
+  private buildStockRow(company: Company, kind: ShareKind): StockListRow {
+    const shareClass = classOf(this.world, company.id, kind);
+    const classId = shareClass?.id ?? shareClassId(company.id, kind);
+    const issuedShares = shareClass?.issuedShares ?? 0;
+    const last = this.stockLastTrade(classId);
+    const candles = this.stockCandles(classId);
+    const playerShares = this.stockPlayerShares(classId);
+    const playerOpenOrders = this.world.securities.orders.filter(
+      (order) =>
+        order.shareClassId === classId && order.holder.type === 'player' && order.holder.id === 'player',
+    ).length;
+    return {
+      companyId: company.id,
+      companyName: company.name,
+      cityId: company.cityId,
+      cityName: this.world.cities.find((city) => city.id === company.cityId)?.name ?? company.cityId,
+      industry: company.sector,
+      kind,
+      classId,
+      issuedShares,
+      lastPrice: last ? last.price : null,
+      lastTradeTick: last ? last.tick : null,
+      bookPrice: bookPrice(this.world, company),
+      changePct: this.stockChangePct(candles, last ? last.price : null),
+      playerShares,
+      playerStake: issuedShares > 0 ? playerShares / issuedShares : 0,
+      playerOpenOrders,
+      tradable: Boolean(shareClass) && issuedShares > 0,
+    };
+  }
+
+  private buildStockDetail(companyId: string, kind: ShareKind): StockDetailView | null {
+    const company = this.world.companies.find((candidate) => candidate.id === companyId);
+    if (!company) return null;
+    const shareClass = classOf(this.world, company.id, kind);
+    const classId = shareClass?.id ?? shareClassId(company.id, kind);
+    const issuedShares = shareClass?.issuedShares ?? 0;
+    const last = this.stockLastTrade(classId);
+    const candles = this.stockCandles(classId);
+    const orders = openOrdersFor(this.world, company.id).filter((order) => order.shareClassId === classId);
+    const bids = orders.filter((order) => order.side === 'buy' && order.shares > 0);
+    const asks = orders.filter((order) => order.side === 'sell' && order.shares > 0);
+    const playerShares = this.stockPlayerShares(classId);
+    const playerOrders = orders
+      .filter((order) => order.holder.type === 'player' && order.holder.id === 'player')
+      .map((order) => ({
+        id: order.id,
+        side: order.side,
+        shares: order.shares,
+        limitPrice: order.limitPrice,
+        createdTick: order.createdTick,
+      }));
+    return {
+      company: {
+        id: company.id,
+        name: company.name,
+        cityId: company.cityId,
+        cityName: this.world.cities.find((city) => city.id === company.cityId)?.name ?? company.cityId,
+        industry: company.sector,
+        note: company.note,
+        employees: company.employees,
+        capacity: company.capacity,
+        utilization: company.utilization,
+      },
+      kind,
+      classId,
+      issuedShares,
+      lastPrice: last ? last.price : null,
+      lastTradeTick: last ? last.tick : null,
+      bookPrice: bookPrice(this.world, company),
+      changePct: this.stockChangePct(candles, last ? last.price : null),
+      candles,
+      bestBid: bids.length > 0 ? Math.max(...bids.map((order) => order.limitPrice)) : null,
+      bestAsk: asks.length > 0 ? Math.min(...asks.map((order) => order.limitPrice)) : null,
+      playerShares,
+      playerStake: issuedShares > 0 ? playerShares / issuedShares : 0,
+      playerCash: this.world.player.cash,
+      playerOrders,
+      tradable: Boolean(shareClass) && issuedShares > 0,
+      note:
+        '最近成交价 = 最近一笔真实成交；账面参考价 = 企业账面估值参考，不是可成交价；本月无成交时 K 线为空档。',
+    };
+  }
+
+  private stockPlayerShares(classId: string): number {
+    return this.world.securities.holdings
+      .filter(
+        (holding) =>
+          holding.shareClassId === classId &&
+          holding.holder.type === 'player' &&
+          holding.holder.id === 'player',
+      )
+      .reduce((total, holding) => total + holding.shares, 0);
+  }
+
+  private stockCandles(classId: string): StockCandleView[] {
+    const history = this.world.securities.history.find((entry) => entry.shareClassId === classId);
+    if (!history) return [];
+    return history.candles.map((candle) => ({
+      tick: candle.tick,
+      open: candle.open,
+      high: candle.high,
+      low: candle.low,
+      close: candle.close,
+      volume: candle.volume,
+      trades: candle.trades,
+    }));
+  }
+
+  private stockLastTrade(classId: string): { price: number; tick: number } | null {
+    const history = this.world.securities.history.find((entry) => entry.shareClassId === classId);
+    if (history?.lastTrade) return { price: history.lastTrade.price, tick: history.lastTrade.tick };
+    const trades = this.world.securities.lastTrades.filter((trade) => trade.shareClassId === classId);
+    if (trades.length === 0) return null;
+    const latest = trades.reduce((best, trade) => (trade.tick >= best.tick ? trade : best));
+    return { price: latest.unitPrice, tick: latest.tick };
+  }
+
+  /** 相对上一根月 K 线收盘价的涨跌幅；只有一根或没有成交时返回 null。 */
+  private stockChangePct(candles: readonly StockCandleView[], lastPrice: number | null): number | null {
+    const closes = candles.map((candle) => candle.close).filter((value) => value > 0);
+    if (closes.length >= 2) {
+      const previous = closes[closes.length - 2] ?? 0;
+      const latest = closes[closes.length - 1] ?? 0;
+      if (previous > 0) return Math.round((latest / previous - 1) * 10000) / 100;
+      return null;
+    }
+    if (closes.length === 1 || lastPrice === null) return null;
+    return null;
   }
 
   acceptFinancingOffer(offerId: string): boolean {

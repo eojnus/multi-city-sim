@@ -521,7 +521,7 @@ export function renderLeftCity(store: GameStore): string {
     ${renderDistrictList(store)}`;
 }
 
-function renderCityIdentity(store: GameStore, city: City, options: { enter: boolean }): string {
+export function renderCityIdentity(store: GameStore, city: City, options: { enter: boolean }): string {
   return `
     <header class="city-head" style="--city-color:${esc(city.color)}">
       <div class="city-title-row">
@@ -551,7 +551,7 @@ function renderCityIdentity(store: GameStore, city: City, options: { enter: bool
     </header>`;
 }
 
-function renderKpis(store: GameStore, city: City): string {
+export function renderKpis(store: GameStore, city: City): string {
   const rate = unemploymentRate(city);
   return `
     <div class="kpi-grid">
@@ -668,7 +668,7 @@ export function renderMayorDemo(store: GameStore, city: City): string {
     </div>`;
 }
 
-function renderPulse(city: City): string {
+export function renderPulse(city: City): string {
   const history = city.gdpHistory.slice(-18).map((point) => point.value);
   return `
     <div class="pulse-strip">
@@ -686,7 +686,7 @@ function renderPulse(city: City): string {
     </div>`;
 }
 
-function renderSystems(store: GameStore, city: City): string {
+export function renderSystems(store: GameStore, city: City): string {
   const politics = store.world.politics.cities.find((entry) => entry.cityId === city.id) ?? null;
   const isPlayerMayor = store.mayorCityId === city.id;
   const leaderName = isPlayerMayor ? '玩家（演示市长）' : politics?.leader?.name ?? '暂未产生';
@@ -1042,6 +1042,7 @@ export function renderGovernmentSection(store: GameStore, city: City): string {
             </div>`
       }
       ${isPlayerMayor ? renderMayorFiscalPanel(store, city) : ''}
+      ${isPlayerMayor ? renderCityTaxPanel(store, city) : ''}
       <div class="gov-active">
         <div class="gov-sub-head"><span>生效政策</span><em>${view.active.length} 项</em></div>
         ${activeCards}
@@ -1253,6 +1254,70 @@ export function renderMayorFiscalPanel(store: GameStore, city: City): string {
  * 公开破产事件（§7：破产事件公开，非市长可见）。
  * 仅展示破产事实与处置结果：看守期、银行垫付兑付、已勾销单列、无股东股份托管。
  */
+/**
+ * 市长税收结算面板（v0.8）。
+ *
+ * 数据只来自 `store.taxView(city.id)`（契约投影，非市长返回 null）。交通系数只调整政府最终入账：
+ * 系数 >1 的差额是交通财政加成（系统注入），<1 的差额是交通征收损耗（不退纳税人）。
+ * 两者都不是债务、贷款或 GDP。非市长不渲染任何金额。
+ */
+export function renderCityTaxPanel(store: GameStore, city: City): string {
+  const view = store.taxView(city.id);
+  if (!view) {
+    return `
+      <div class="fiscal-brief is-restricted" data-testid="city-tax-panel">
+        <div class="gov-sub-head"><span>税收结算</span><em>仅市长可见</em></div>
+        <p class="fiscal-empty">基准税额、交通系数与最终入账仅该城市现任市长可见。</p>
+      </div>`;
+  }
+  const latest = view.latest;
+  const rows = view.history
+    .slice(-6)
+    .reverse()
+    .map(
+      (month) => `
+      <tr>
+        <td>${esc(tickDate(month.tick))}</td>
+        <td>${money(month.totalBase)}</td>
+        <td title="交通保障率 ${pct(month.transportGuarantee, 0)}">×${month.transportFactor.toFixed(2)}</td>
+        <td class="${month.transportBonus > 0 ? 'is-teal' : ''}">${money(month.transportBonus)}</td>
+        <td class="${month.transportLoss > 0 ? 'is-warn' : ''}">${money(month.transportLoss)}</td>
+        <td><b>${money(month.totalRevenue)}</b></td>
+      </tr>`,
+    )
+    .join('');
+  return `
+    <div class="fiscal-brief tax-panel" data-testid="city-tax-panel">
+      <div class="gov-sub-head"><span>税收结算 · 基准税与交通系数</span><em>${latest ? `最近 ${esc(tickDate(latest.tick))}` : '尚无结算'}</em></div>
+      ${
+        latest
+          ? `<div class="tax-grid">
+              <div class="tax-cell"><span>基准税额</span><b>${money(latest.totalBase)}</b></div>
+              <div class="tax-cell"><span>交通系数</span><b>×${latest.transportFactor.toFixed(2)}</b><small>保障率 ${pct(latest.transportGuarantee, 0)}</small></div>
+              <div class="tax-cell is-teal"><span>交通加成</span><b>${money(latest.transportBonus)}</b><small>系统注入，不向纳税人补收</small></div>
+              <div class="tax-cell ${latest.transportLoss > 0 ? 'is-warn' : ''}"><span>交通损耗</span><b>${money(latest.transportLoss)}</b><small>基准税未入账部分，不退还</small></div>
+              <div class="tax-cell is-gold"><span>最终入账</span><b>${money(latest.totalRevenue)}</b></div>
+            </div>
+            <div class="tax-breakdown">
+              <span><i>个税</i><b>${money(latest.incomeTaxRevenue)}</b><em>基准 ${money(latest.incomeTaxBase)}</em></span>
+              <span><i>企税</i><b>${money(latest.corporateTaxRevenue)}</b><em>基准 ${money(latest.corporateTaxBase)}</em></span>
+              <span><i>消费税</i><b>${money(latest.consumptionTaxRevenue)}</b><em>基准 ${money(latest.consumptionTaxBase)}</em></span>
+              <span><i>股息税</i><b>${money(latest.dividendTaxRevenue)}</b><em>基准 ${money(latest.dividendTaxBase)}</em></span>
+            </div>
+            <div class="table-wrap">
+              <table class="sec-table tax-history-table" aria-label="${esc(city.name)} 逐月税收结算">
+                <thead>
+                  <tr><th scope="col">月份</th><th scope="col">基准税</th><th scope="col">交通系数</th><th scope="col">加成</th><th scope="col">损耗</th><th scope="col">最终入账</th></tr>
+                </thead>
+                <tbody>${rows || '<tr><td class="mini-empty" colspan="6">尚无税收结算记录。</td></tr>'}</tbody>
+              </table>
+            </div>`
+          : '<p class="fiscal-empty">尚无月度税收结算；推进 1 月后生成。</p>'
+      }
+      <p class="tax-note">${esc(view.note)}</p>
+    </div>`;
+}
+
 export function renderPublicBankruptcyNotice(store: GameStore, city: City): string {
   const notice = store.publicBankruptcy(city.id);
   if (!notice) return '';
@@ -1605,7 +1670,7 @@ export function renderTransportSection(store: GameStore, city: City): string {
     </section>`;
 }
 
-function renderMarket(city: City, showAllGoods: boolean): string {
+export function renderMarket(city: City, showAllGoods: boolean): string {
   const goods = showAllGoods
     ? GOODS
     : GOODS.filter((good) => good.category === 'consumer');
@@ -1667,7 +1732,7 @@ function renderMarket(city: City, showAllGoods: boolean): string {
     </section>`;
 }
 
-function companyRow(store: GameStore, company: Company, focused: boolean): string {
+export function companyRow(store: GameStore, company: Company, focused: boolean): string {
   const stake = store.playerStake(company.id);
   const profit = company.lastMonth.profit;
   const cashEnough = store.world.player.cash >= QUICK_INVEST;
@@ -1803,7 +1868,7 @@ function renderCompanyLifecycle(store: GameStore, city: City): string {
     </div>`;
 }
 
-function renderCompanies(store: GameStore, city: City, focusCompanyId: string | null): string {
+export function renderCompanies(store: GameStore, city: City, focusCompanyId: string | null): string {
   const companies = [...store.companiesForCity(city.id)].sort(
     (a, b) => b.employees - a.employees || a.name.localeCompare(b.name, 'zh-CN'),
   );
@@ -1825,7 +1890,7 @@ function renderCompanies(store: GameStore, city: City, focusCompanyId: string | 
     </section>`;
 }
 
-function renderTradeSummary(store: GameStore): string {
+export function renderTradeSummary(store: GameStore): string {
   const flows = store.currentTradeFlows();
   const groups = aggregateTradeFlows(flows);
   const totalValue = groups.reduce((total, group) => total + group.value, 0);
@@ -2050,11 +2115,12 @@ export function renderRightRegion(store: GameStore, state: PanelState): string {
     ${renderAgreementsSection(store, city)}`;
 }
 
-function renderBuildingDetail(
+export function renderBuildingDetail(
   store: GameStore,
   city: City,
   building: BuildingDefinition,
   company: Company | null,
+  options: { includeCompany?: boolean } = {},
 ): string {
   const district = store.selectedLayout?.districts.find(
     (entry) => entry.id === building.districtId,
@@ -2087,7 +2153,7 @@ function renderBuildingDetail(
       }
     </article>
     ${
-      company
+      company && options.includeCompany !== false
         ? renderCompanyDetail(store, company, {
             showClose: false,
             investTestId: true,
@@ -2097,7 +2163,7 @@ function renderBuildingDetail(
     <p class="selection-context">${esc(city.name)} · ${esc(district?.name ?? '城市街区')}</p>`;
 }
 
-function renderDistrictDetail(store: GameStore, city: City, district: DistrictDefinition): string {
+export function renderDistrictDetail(store: GameStore, city: City, district: DistrictDefinition): string {
   const layout = store.selectedLayout;
   const buildings = layout?.buildings.filter((building) => building.districtId === district.id) ?? [];
   const estimatedPopulation = city.population.total * district.populationShare;
@@ -2153,9 +2219,19 @@ function renderDistrictDetail(store: GameStore, city: City, district: DistrictDe
     </article>`;
 }
 
+export type CompanyDetailSection =
+  | 'all'
+  | 'overview'
+  | 'operation'
+  | 'finance'
+  | 'governance'
+  | 'stocks';
+
 export interface CompanyDetailOptions {
   showClose?: boolean;
   investTestId?: boolean;
+  /** 只渲染指定标签页的分区；缺省 all 保持旧版完整详情。 */
+  section?: CompanyDetailSection;
 }
 
 export function renderCompanyDetail(
@@ -2404,7 +2480,7 @@ export function renderCompanyDetail(
           })
           .join('');
 
-  return `
+  const html = `
     <article
       class="company-detail"
       id="company-panel"
@@ -2716,10 +2792,66 @@ export function renderCompanyDetail(
           </div>
           ${offersHtml}
         </div>
+        <div class="stock-entry">
+          <button
+            type="button"
+            class="ken-btn ken-btn--gold ken-btn--mini"
+            data-action="open-stock-market"
+            data-company-id="${esc(company.id)}"
+            data-testid="open-stock-window-${esc(company.id)}"
+            data-focus-key="open-stock-${esc(company.id)}"
+            title="打开股票市场浮动窗口：月 K 线、盘口、我的委托与下单"
+          >查看股票行情</button>
+          <span class="fin-hint">浮动窗口可查看月 K 线与盘口；打开窗口不会暂停模拟。</span>
+        </div>
       </section>
       ${renderCompanyOperatorBlock(store, company)}
       <p class="warning-note">企业现金不足会触发营运资金信贷 / 债务重组（演示）。该机制不是正式金融模型。</p>
     </article>`;
+  return options.section && options.section !== 'all'
+    ? selectCompanyDetailSection(html, options.section)
+    : html;
+}
+
+/**
+ * 企业详情按标签页取分区。这里只切割已渲染好的 HTML，不重复任何业务计算；
+ * 「经营」= 自动经营 + 经营者区块，「财务」= 损益/岗位/库存/注资，其余按原顺序。
+ */
+function selectCompanyDetailSection(
+  html: string,
+  section: Exclude<CompanyDetailSection, 'all'>,
+): string {
+  const at = (marker: string): number => html.indexOf(marker);
+  const sectionStart = (marker: string): number => {
+    const index = at(marker);
+    return index < 0 ? -1 : html.lastIndexOf('<section', index);
+  };
+  const slice = (start: number, end: number): string =>
+    start < 0 || end <= start ? '' : html.slice(start, end);
+
+  const aiAt = sectionStart('company-ai');
+  const financeAt = at('<div class="finance-grid">');
+  const holdersAt = sectionStart('data-testid="company-holders"');
+  const tradingAt = sectionStart('data-testid="company-trading"');
+  const operatorAt = sectionStart('data-testid="company-operator"');
+  const warningAt = at('<p class="warning-note">');
+
+  const overview = slice(0, aiAt).replace(/<article[\s\S]*?>/, '');
+
+  switch (section) {
+    case 'operation':
+      return `${slice(aiAt, financeAt)}${slice(operatorAt, warningAt)}`;
+    case 'finance':
+      return slice(financeAt, holdersAt);
+    case 'governance':
+      return slice(holdersAt, tradingAt);
+    case 'stocks':
+      return slice(tradingAt, operatorAt);
+    case 'overview':
+      return overview;
+    default:
+      return overview;
+  }
 }
 
 // ---------------------------------------------------------------- v0.4 居民阶层 · 人才市场 · 银行 · 经营者

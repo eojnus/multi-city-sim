@@ -125,6 +125,11 @@ app.whenReady().then(async () => {
   await new Promise((resolve) => setTimeout(resolve, 300));
   const layerAfter = await read(win, 'window.__lanwan.store.layer');
 
+  // v0.8：企业列表移入右栏「企业」标签，先切标签再点注资（默认标签是概况）。
+  await click(win, '#right-tab-city-companies');
+  await waitFor(win, `document.querySelector('[data-testid="company-invest-lp-food"]')`, 5000);
+  await new Promise((resolve) => setTimeout(resolve, 400));
+
   // 企业注资
   const cashBeforeInvest = await read(win, 'window.__lanwan.store.world.player.cash');
   const clickedInvest = await click(win, '[data-testid="company-invest-lp-food"]');
