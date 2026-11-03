@@ -8,7 +8,7 @@
 // - 每类股份保留最近 config.securities.historyMonths 根 K 线；无成交的月份不生成 K 线。
 // - lastTrade 记录最近一次真实成交（可跨月），用于“最近成交价”。
 // - 行情是持久数据：读档后继续累积即可，禁止从 world.securities.lastTrades 反推历史。
-// - 已退市（股份类别被移除）的行情条目会被清理，避免存档校验引用不存在的类别。
+// - 企业退出/倒闭（股份类别被移除）后行情条目保留为历史，标记 exitedTick，只读不可交易。
 
 import type {
   StockCandle,
@@ -30,7 +30,9 @@ function sortedHistory(world: WorldState): StockClassHistory[] {
 /**
  * 确保行情结构存在且与当前股份类别一致：
  * - 缺失的类别补一条空行情（candles: []）；
- * - 已移除的类别 / 企业或 kind 不匹配的条目会被清理；
+ * - 已移除的类别（企业退出/倒闭）**保留**历史行情，并标记 exitedTick，
+ *   绝不因企业退出而清理真实成交记录（v0.8 复验问题 3）；
+ * - 仍存续的类别同步企业名称快照与 companyId/kind；
  * - 按 shareClassId 排序，保证遍历与存档确定性。
  * 幂等：反复调用不会产生重复条目，也不会改变已有 K 线。
  */
@@ -38,6 +40,7 @@ export function ensureStockHistory(world: WorldState): StockClassHistory[] {
   if (!Array.isArray(world.securities.history)) {
     world.securities.history = [];
   }
+  const companyNames = new Map(world.companies.map((company) => [company.id, company.name]));
   const classes = [...world.securities.classes].sort((a, b) => a.id.localeCompare(b.id));
   const classById = new Map(classes.map((shareClass) => [shareClass.id, shareClass]));
   const existing = new Map(world.securities.history.map((entry) => [entry.shareClassId, entry]));
@@ -46,9 +49,11 @@ export function ensureStockHistory(world: WorldState): StockClassHistory[] {
   for (const shareClass of classes) {
     const entry = existing.get(shareClass.id);
     if (entry) {
-      // 类别元数据以 securities.classes 为权威。
+      // 类别元数据以 securities.classes 为权威；名称快照随企业更新。
       entry.companyId = shareClass.companyId;
       entry.kind = shareClass.kind;
+      entry.companyName = companyNames.get(shareClass.companyId) ?? entry.companyName;
+      delete entry.exitedTick;
       next.push(entry);
       continue;
     }
@@ -56,11 +61,17 @@ export function ensureStockHistory(world: WorldState): StockClassHistory[] {
       shareClassId: shareClass.id,
       companyId: shareClass.companyId,
       kind: shareClass.kind,
+      companyName: companyNames.get(shareClass.companyId),
       candles: [],
     });
   }
-  // 不在 classById 中的历史类别自然被丢弃（企业退市后行情不再保留，避免坏档）。
-  world.securities.history = next;
+  // 不在 classById 中的历史类别=已退出企业：保留真实成交与 K 线，标记退出月份。
+  for (const entry of world.securities.history) {
+    if (classById.has(entry.shareClassId)) continue;
+    if (entry.exitedTick === undefined) entry.exitedTick = world.time.tick;
+    next.push(entry);
+  }
+  world.securities.history = next.sort((a, b) => a.shareClassId.localeCompare(b.shareClassId));
   return world.securities.history;
 }
 
@@ -101,7 +112,8 @@ export function recordStockTrade(
 
   const history = ensureStockHistory(world);
   const entry = history.find((candidate) => candidate.shareClassId === trade.shareClassId);
-  if (!entry) return;
+  // 已退出企业的类别不再接受新成交（防御性：撮合层应先拒绝）。
+  if (!entry || entry.exitedTick !== undefined) return;
 
   const existingCandle = entry.candles.find((candle) => candle.tick === trade.tick);
   if (existingCandle) {

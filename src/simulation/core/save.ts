@@ -1352,12 +1352,28 @@ function validateSecurities(
     const history = value.history[index];
     const path = `securities.history[${index}]`;
     if (!isRecord(history)) return `${path} 不是对象`;
-    if (typeof history.shareClassId !== 'string' || !classById.has(history.shareClassId)) {
+    if (typeof history.shareClassId !== 'string' || history.shareClassId.length === 0) {
       return `${path}.shareClassId 无效`;
     }
-    const shareClass = classById.get(history.shareClassId)!;
-    if (history.companyId !== shareClass.companyId) return `${path}.companyId 与股份类别不一致`;
-    if (history.kind !== shareClass.kind) return `${path}.kind 与股份类别不一致`;
+    if (typeof history.companyId !== 'string' || history.companyId.length === 0) {
+      return `${path}.companyId 无效`;
+    }
+    if (history.kind !== 'voting' && history.kind !== 'nonVoting') {
+      return `${path}.kind 无效`;
+    }
+    const shareClass = classById.get(history.shareClassId);
+    // 企业退出/倒闭后，股份类别与企业记录会被删除，但真实成交历史必须保留
+    // （v0.8 复验问题 3）：允许历史引用已不存在的类别/企业，只校验自身字段。
+    if (shareClass) {
+      if (history.companyId !== shareClass.companyId) return `${path}.companyId 与股份类别不一致`;
+      if (history.kind !== shareClass.kind) return `${path}.kind 与股份类别不一致`;
+    }
+    if (history.companyName !== undefined && typeof history.companyName !== 'string') {
+      return `${path}.companyName 无效`;
+    }
+    if (history.exitedTick !== undefined && !isInteger(history.exitedTick)) {
+      return `${path}.exitedTick 无效`;
+    }
     if (!Array.isArray(history.candles)) return `${path}.candles 必须是数组`;
     let previousTick = -Infinity;
     for (let candleIndex = 0; candleIndex < history.candles.length; candleIndex++) {

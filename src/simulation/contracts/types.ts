@@ -3,7 +3,7 @@
 // v0.2 新增证券/治理/居民投资/协议/通知数据；旧 v1 存档由 core/save.ts 迁移。
 
 export const SAVE_FORMAT_VERSION = 8;
-export const GAME_VERSION = '0.8.0';
+export const GAME_VERSION = '0.8.1';
 
 export type GoodId =
   | 'grain'
@@ -532,6 +532,10 @@ export interface StockClassHistory {
   candles: StockCandle[];
   /** 最近一次真实成交（可跨月），用于“最近成交价”；无成交时缺省。 */
   lastTrade?: { tick: number; price: number; shares: number };
+  /** 企业摘牌/退出时的名称快照：企业记录被删除后仍能识别历史行情的归属（v0.8 复验）。 */
+  companyName?: string;
+  /** 股份类别被移除（企业退出）时的游戏月；存在即表示“已退出，不可交易”。 */
+  exitedTick?: number;
 }
 
 export interface FinancingOffer {

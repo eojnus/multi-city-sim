@@ -8,6 +8,7 @@ import type {
   PlayerNotification,
   PublicBondOfferView,
   ShareKind,
+  StockClassHistory,
   TradeActionResult,
   TradeFlow,
   ViewerIdentity,
@@ -177,6 +178,8 @@ export interface StockListRow {
   playerStake: number;
   playerOpenOrders: number;
   tradable: boolean;
+  /** 企业已退出/倒闭：只保留真实历史行情，不可再交易（v0.8 复验）。 */
+  exited: boolean;
 }
 
 export interface StockCandleView {
@@ -224,6 +227,9 @@ export interface StockDetailView {
   playerCash: number;
   playerOrders: StockOrderView[];
   tradable: boolean;
+  exited: boolean;
+  /** 已退出企业仍可查到的最后交易月份（无成交时 null）。 */
+  exitedTick: number | null;
   note: string;
 }
 
@@ -896,9 +902,13 @@ export class GameStore {
     const classId =
       kind === 'voting' ? shareClassId(companyId, 'voting') : shareClassId(companyId, 'nonVoting');
     const company = this.world.companies.find((candidate) => candidate.id === companyId);
-    if (!company) {
-      this.toast('企业不存在', 'error');
-      return { ok: false, error: '企业不存在' };
+    const liveClass = this.world.securities.classes.some(
+      (candidate) => candidate.id === classId,
+    );
+    if (!company || !liveClass) {
+      this.toast('该企业已退出市场或股份已注销：不可再交易。', 'error');
+      this.emit();
+      return { ok: false, error: '该企业已退出市场或股份已注销：不可再交易。' };
     }
     const result = tradeImmediately(
       this.world,
@@ -943,7 +953,7 @@ export class GameStore {
     this.stockMarketOpen = true;
     if (kind) this.stockMarketKind = kind;
     const focus = companyId ?? this.stockMarketFocusCompanyId ?? this.selectedCompanyId;
-    if (focus && this.world.companies.some((company) => company.id === focus)) {
+    if (focus && this.hasStockHistoryFor(focus)) {
       this.stockMarketFocusCompanyId = focus;
     }
     this.emit();
@@ -991,7 +1001,13 @@ export class GameStore {
     }));
     const industries = [...new Set(companies.map((company) => company.sector).filter(Boolean))].sort();
 
-    let rows = companies.map((company) => this.buildStockRow(company, kind));
+    const companyIds = new Set(companies.map((company) => company.id));
+    const classIds = new Set(this.world.securities.classes.map((candidate) => candidate.id));
+    const exitedRows = this.world.securities.history
+      .filter((entry) => entry.kind === kind && !classIds.has(entry.shareClassId))
+      .map((entry) => this.buildExitedStockRow(entry))
+      .filter((row) => !companyIds.has(row.companyId));
+    let rows = [...companies.map((company) => this.buildStockRow(company, kind)), ...exitedRows];
     if (this.stockMarketViewMode === 'holdings') rows = rows.filter((row) => row.playerShares > 0);
     const search = this.stockMarketSearch.trim().toLowerCase();
     if (search) {
@@ -1097,12 +1113,90 @@ export class GameStore {
       playerStake: issuedShares > 0 ? playerShares / issuedShares : 0,
       playerOpenOrders,
       tradable: Boolean(shareClass) && issuedShares > 0,
+      exited: false,
+    };
+  }
+
+  /** 已退出企业的历史行：只读、不可交易，但保留真实成交与 K 线（v0.8 复验问题 3）。 */
+  private buildExitedStockRow(entry: StockClassHistory): StockListRow {
+    const candles = this.stockCandles(entry.shareClassId);
+    const last = this.stockLastTrade(entry.shareClassId);
+    const playerShares = this.stockPlayerShares(entry.shareClassId);
+    return {
+      companyId: entry.companyId,
+      companyName: entry.companyName ?? entry.companyId,
+      cityId: '',
+      cityName: '已退出市场',
+      industry: '已退出',
+      kind: entry.kind,
+      classId: entry.shareClassId,
+      issuedShares: 0,
+      lastPrice: last ? last.price : null,
+      lastTradeTick: last ? last.tick : null,
+      bookPrice: 0,
+      changePct: this.stockChangePct(candles, last ? last.price : null),
+      playerShares,
+      playerStake: 0,
+      playerOpenOrders: 0,
+      tradable: false,
+      exited: true,
+    };
+  }
+
+  private hasStockHistoryFor(companyId: string): boolean {
+    return (
+      this.world.companies.some((company) => company.id === companyId) ||
+      this.world.securities.history.some((entry) => entry.companyId === companyId)
+    );
+  }
+
+  /** 已退出企业的明细：历史 K 线只读，禁止下单或恢复注销股份。 */
+  private buildExitedStockDetail(entry: StockClassHistory): StockDetailView {
+    const candles = this.stockCandles(entry.shareClassId);
+    const last = this.stockLastTrade(entry.shareClassId);
+    return {
+      company: {
+        id: entry.companyId,
+        name: entry.companyName ?? entry.companyId,
+        cityId: '',
+        cityName: '已退出市场',
+        industry: '已退出',
+        note: '该企业已退出市场：以下为退出前的真实成交历史，仅用于查阅，不可再交易。',
+        employees: 0,
+        capacity: 0,
+        utilization: 0,
+      },
+      kind: entry.kind,
+      classId: entry.shareClassId,
+      issuedShares: 0,
+      lastPrice: last ? last.price : null,
+      lastTradeTick: last ? last.tick : null,
+      bookPrice: 0,
+      changePct: this.stockChangePct(candles, last ? last.price : null),
+      candles,
+      bestBid: null,
+      bestAsk: null,
+      playerShares: this.stockPlayerShares(entry.shareClassId),
+      playerStake: 0,
+      playerCash: this.world.player.cash,
+      playerOrders: [],
+      tradable: false,
+      exited: true,
+      exitedTick: entry.exitedTick ?? null,
+      note:
+        '企业已退出市场：这里只展示退出前真实成交形成的 K 线与最后成交时间；' +
+        '已注销股份不可恢复，也不能再对其下单。',
     };
   }
 
   private buildStockDetail(companyId: string, kind: ShareKind): StockDetailView | null {
     const company = this.world.companies.find((candidate) => candidate.id === companyId);
-    if (!company) return null;
+    if (!company) {
+      const history = this.world.securities.history.find(
+        (entry) => entry.companyId === companyId && entry.kind === kind,
+      );
+      return history ? this.buildExitedStockDetail(history) : null;
+    }
     const shareClass = classOf(this.world, company.id, kind);
     const classId = shareClass?.id ?? shareClassId(company.id, kind);
     const issuedShares = shareClass?.issuedShares ?? 0;
@@ -1148,6 +1242,8 @@ export class GameStore {
       playerCash: this.world.player.cash,
       playerOrders,
       tradable: Boolean(shareClass) && issuedShares > 0,
+      exited: false,
+      exitedTick: null,
       note:
         '最近成交价 = 最近一笔真实成交；账面参考价 = 企业账面估值参考，不是可成交价；本月无成交时 K 线为空档。',
     };

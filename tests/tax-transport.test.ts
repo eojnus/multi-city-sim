@@ -129,16 +129,18 @@ describe('v0.8 交通税收系数：四税按系数入账、加成/损耗分账'
     expect(city.lastMonth.transportTaxLoss).toBe(0);
     expect(latestTaxMonth(world, city.id)!.tick).toBe(world.time.tick);
 
-    // 财政流水：四税 + 一条加成；无损耗条目。
+    // 财政流水口径（v0.8 复验问题 1）：四税按**基准税额**记账，交通调整单列，
+    // 流水净额 = 基准 33,000 + 加成 16,500 = 实际入账 49,500，不重复计算。
     const entries = world.fiscal.ledger.filter((entry) => entry.cityId === city.id);
     const amountOf = (kind: string) =>
       entries.filter((entry) => entry.kind === kind).reduce((sum, entry) => sum + entry.amount, 0);
-    expect(amountOf('incomeTax')).toBeCloseTo(15_000, 6);
-    expect(amountOf('corporateTax')).toBeCloseTo(30_000, 6);
-    expect(amountOf('consumptionTax')).toBeCloseTo(1_500, 6);
-    expect(amountOf('dividendTax')).toBeCloseTo(3_000, 6);
+    expect(amountOf('incomeTax')).toBeCloseTo(10_000, 6);
+    expect(amountOf('corporateTax')).toBeCloseTo(20_000, 6);
+    expect(amountOf('consumptionTax')).toBeCloseTo(1_000, 6);
+    expect(amountOf('dividendTax')).toBeCloseTo(2_000, 6);
     expect(amountOf('transportTaxBonus')).toBeCloseTo(16_500, 6);
     expect(amountOf('transportTaxLoss')).toBe(0);
+    expect(entries.reduce((sum, entry) => sum + entry.amount, 0)).toBeCloseTo(49_500, 6);
     // 月结后本月税收累计清零。
     expect(taxAccrualOf(world, city.id)).toEqual({ consumptionTax: 0, dividendTax: 0 });
   });
@@ -167,6 +169,11 @@ describe('v0.8 交通税收系数：四税按系数入账、加成/损耗分账'
     );
     expect(lossEntries).toHaveLength(1);
     expect(lossEntries[0]!.amount).toBeCloseTo(-16_500, 6);
+    // 四税仍按基准税额入账（10,000+20,000+1,000+2,000），与损耗分列；净额=16,500。
+    const taxBaseEntries = world.fiscal.ledger
+      .filter((entry) => entry.cityId === city.id && entry.kind !== 'transportTaxLoss')
+      .reduce((sum, entry) => sum + entry.amount, 0);
+    expect(taxBaseEntries).toBeCloseTo(33_000, 6);
     const bonusEntries = world.fiscal.ledger.filter(
       (entry) => entry.cityId === city.id && entry.kind === 'transportTaxBonus',
     );

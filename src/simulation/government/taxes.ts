@@ -170,6 +170,9 @@ export function settleCityTaxes(
 
   city.treasury = round2(city.treasury + totalRevenue);
 
+  // 财政流水按“基准税额 + 交通加成 − 交通征收损耗”记账，使流水净额恒等于政府实际入账。
+  // 不能同时记“调整后的四税”和“加成/损耗”：市长面板按流水正负分别汇总收入/支出，
+  // 那样会把同一笔交通调整重复计算（v0.8 验收问题 1）。
   const record = (kind: Parameters<typeof recordFiscal>[1]['kind'], amount: number, source: string): void => {
     if (amount <= 0) return;
     recordFiscal(
@@ -178,10 +181,10 @@ export function settleCityTaxes(
       config,
     );
   };
-  record('incomeTax', income.revenue, '个人所得税（基准税额 × 交通税收系数）');
-  record('corporateTax', corporate.revenue, '企业所得税（基准税额 × 交通税收系数）');
-  record('consumptionTax', consumption.revenue, '消费税（含税标价 5%，基准税额 × 交通税收系数）');
-  record('dividendTax', dividend.revenue, '股息税（实际分红 10%，基准税额 × 交通税收系数）');
+  record('incomeTax', round2(input.incomeTaxBase), '个人所得税（基准税额；交通调整单列）');
+  record('corporateTax', round2(input.corporateTaxBase), '企业所得税（基准税额；交通调整单列）');
+  record('consumptionTax', round2(accrual.consumptionTax), '消费税（基准税额；交通调整单列）');
+  record('dividendTax', round2(accrual.dividendTax), '股息税（基准税额；交通调整单列）');
   record('transportTaxBonus', transportBonus, '交通财政加成（系数 >1，系统注入，不向纳税人补收）');
   if (transportLoss > 0) {
     recordFiscal(
