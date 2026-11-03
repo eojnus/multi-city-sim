@@ -228,3 +228,83 @@ DISPLAY=:99 node_modules/electron/dist/electron --no-sandbox \
 - 分支：`feature/stock-market-ui-tax`（不在 main 上提交、不合并、不 force push、不改写已推送历史）
 - 基线：`6c45000efc4c406d30e22c0a12bd066fc2df61f7`
 - 最终提交与远程 SHA：见文末提交记录（本报告随文档提交一并推送）。
+
+# 17. v0.8.1 复验修复记录（2026-11-03）
+
+- 开发基线：`010888ecdc62febfd4ef527ded8d97524f5ad886`
+- 本轮代码提交：`bc0b43b`（模拟/税收/历史）、`a0eac87`（K 线/股票窗口/桌面脚本）；文档与证据提交随本次推送给出
+- `SAVE_FORMAT_VERSION` 保持 8，`GAME_VERSION` 升级为 `0.8.1`（仅新增可选字段与放宽校验，v8 旧档可读）
+
+## 17.1 交通税收加成/损耗在财政流水中重复计算
+
+**根因**：`settleCityTaxes` 先把“调整后的最终税收”记入财政流水，又各记一笔 `transportTaxBonus` / 负数 `transportTaxLoss`；市长财政视图按流水金额正负分别汇总为收入/支出，于是系数 1.5 时收入显示为基准 100 + 调整 50（加倍），系数 0.5 时收入 50、支出 50、净额 0。
+
+**修复**：财政流水改为按**基准税额**记四税，交通调整单列：
+
+- `incomeTax` / `corporateTax` / `consumptionTax` / `dividendTax` 分录金额 = 各自基准税额（备注“基准税额；交通调整单列”）；
+- `transportTaxBonus` 记正数、`transportTaxLoss` 记负数，净额 = 实际入账；
+- 政府财政余额仍只增加“最终入账”（基准 × 系数），纳税人仍只付基准税额；加成由系统注入、损耗按原口径单独流出；
+- 四税可分别查询基准税额、交通调整额与最终收入（`CityTaxMonth` 四组 base/revenue + `transportBonus/Loss`），市长面板“基准税 / 交通系数 / 加成 / 损耗 / 最终入账”与流水逐项一致。
+
+**测试**：新增 `tests/tax-ledger-consistency.test.ts`（5 项）：系数 1.5 → 财政 +150、流水 `incomeTax 100 + bonus 50`、面板收入 150/支出 0/净额 150；系数 1.0；系数 0.5 → 收入 100/支出 50/净额 50；四税 taxNet = `totalRevenue`、重复结算清账；读档后再结算不重复入账。按新口径更新 `tests/tax-transport.test.ts`（四税基准分录 + 加成/损耗，净额 49,500）。
+
+## 17.2 K 线无成交月份的时间轴
+
+**根因**：`renderStockChart` 以蜡烛数组下标均匀排布横坐标，1 月与 12 月有成交时仍相邻；成交量柱在固定高度 SVG 内可越出底部被裁切。
+
+**修复**：`src/ui/stock-window/chart.ts`
+
+- 横坐标按真实游戏月份映射：`x(tick) = left + (tick - firstTick + 0.5) × slot`，无成交月不生成蜡烛，只留空档；
+- 月份刻度（最多 6 个）、空档纵向虚线 `.gap-mark` 与提示，meta 显示“覆盖 N 个月 · 空档 M 个月无成交”，悬停月份取该蜡烛真实 tick；
+- 价格区与成交量区各自预留高度（`PRICE_BOTTOM = 高度 − 边距 − 成交量区 − 间隔`），成交量柱底边量化为整数并限制在基线（168）以内，不再越界；
+- 新增 `data-months` / `data-gap-months` / 蜡烛 `data-tick`，便于回归测试与验收脚本核对；
+- 不伪造任何 OHLCV：无成交月份没有蜡烛，成交量柱为空。
+
+**测试**：`tests/ui-stock-window.test.ts` 增至 18 项（1 月与 12 月有成交 → 覆盖 12 个月、空档 10 个月且两根蜡烛间距 > 400px；连续月份无空档；单笔成交居中且 `data-tick` 正确；成交量柱底 ≤ 168；两类股份标题与数据独立；已退出企业只读渲染）。
+
+## 17.3 企业退出前的真实股票历史
+
+**根因**：`ensureStockHistory` 以现存 `securities.classes` 为依据清理历史；企业退出时股份类别被移除，随后一次调用就删掉该企业全部 K 线。
+
+**修复**：
+
+- `StockClassHistory` 增加可选 `companyName`、`exitedTick`；`ensureStockHistory` 保留不在现存类别中的历史条目并标记首次退出月份，存续类别同步名称并清除退出标记；`recordStockTrade` 忽略已退出类别，不会给退出企业追加成交；
+- `validateSecurities` 放宽为：历史条目只要 `shareClassId/companyId` 为非空字符串、`kind` 合法即可（允许引用已退出企业），类别仍存在时继续校验一致；可选字段类型校验；
+- `GameStore.stockMarketView` 在经营中企业之后追加已退出历史行（`exited: true`、`tradable: false`），明细展示企业名、类别、最后成交、退出月份与 K 线；`tradeShares` 对已退出企业/注销股份返回失败（“该企业已退出市场或股份已注销：不可再交易。”）；
+- 股票窗口对退出企业显示“已退出 / 不可交易”标识与说明，隐藏下单表单；读档、刷新、其他企业交易均不清除历史。
+
+**测试**：新增 `tests/stock-history-retention.test.ts`（4 项）：退出后 K 线/最后成交/名称快照保留并带 `exitedTick`；反复刷新与其他企业交易不清除、退出月不变；v8 存档校验允许历史引用已退出企业与类别；GameStore 列表/明细只读且下单被拒。
+
+## 17.4 桌面证据与窗口交互复查
+
+`scripts/acceptance-v08.cjs` 扩展为 42 项检查并重跑（Xvfb + Electron，隔离 userData）：
+
+- 新增 `ensureWindowInside`：极限拖动触发夹取后，把窗口缩放到 ≤1200×760 并拖回 (16,16)，断言完整可见（`left/top ≥ 0`、`right/bottom ≤ 视口`）后再截图；
+- 新增空档 K 线检查（最多推进 8 个月寻找 `months - candles ≥ 2` 的类别，断言 `data-gap-months ≥ 2` 且空档标记数 ≥ 2）；
+- 新增两类股份切换检查（列表行全部属于 `:non-voting` 类别；无真实成交时显示“暂无成交”，不伪造）；
+- 新增税收一致性检查：四税 + 加成 − 损耗的流水净额 = 税收月报最终入账，且市长面板收入 − 支出 = 流水净额；
+- 新增企业退出检查：删除一家有真实成交的企业后，窗口显示“已退出”历史、保留蜡烛、无下单表单、`tradeShares` 被拒；
+- **结果：42/42 通过、0 条控制台错误**；证据（13 张 PNG + JSON）已入仓 `docs/evidence_v0.8/`，关键截图：
+  - `v08-06-stock-window-moved.png`：极限拖动后拖回屏幕内（1200×760 @ 16,16）；
+  - `v08-07-stock-window-candles.png`：真实成交的完整 K 线与成交量；
+  - `v08-11-stock-window-gap.png`：覆盖 9 个月、空档 2 个月的 K 线；
+  - `v08-12-stock-window-nonvoting.png`：两类股份切换；
+  - `v08-13-stock-exited-history.png`：企业退出后的历史行情与只读状态。
+
+## 17.5 本轮验证
+
+| 命令 | 结果 |
+| --- | --- |
+| `npm run typecheck` | 通过（渲染层 + Electron 主进程，0 错误） |
+| `npm run build` | 通过（`multi-city-sim@0.8.1`） |
+| `npx vitest run --maxWorkers=1` | **75 个测试文件 / 601 项全部通过** |
+| `node scripts/acceptance-v08.cjs`（Xvfb + Electron，隔离 userData） | **42/42 项通过、0 条控制台错误** |
+| 证据 | `docs/evidence_v0.8/`（13 张 PNG + `acceptance-v08.json`） |
+
+## 17.6 仍存在的问题与已知限制
+
+- 城内交通需求仍以“本地成交 + 进口”的货物配送量近似，不是居民通勤；实测 36 个月保障率恒为 1、系数恒为 1.50，“交通征收损耗”分支目前只由单元测试覆盖。要评估交通对税收的真实压力，需要单独的通勤/道路拥堵口径。
+- 非投票股份目前没有 AI 对手方，真实行情通常为空；窗口会显示“暂无成交”，这符合“不为成交造假”的规则，但市场活跃度有限。
+- 家庭贷款合同数仍随群体变化线性增长（36 月约 2 千笔），已用“同还款计划碎片合并”抑制指数增长，后续仍需按还款计划聚合的账本结构。
+- 股票 AI 仍为首版规则型（月度一次、无做市/组合优化），企业投资上限较小；消费税只覆盖居民消费品，股息税首版对企业/政府股东不征。
+- 桌面证据为 Xvfb 无头截图，Windows 真机表现需按第 10 节复验；经济平衡未作为本轮目标，也未调整任何数值。

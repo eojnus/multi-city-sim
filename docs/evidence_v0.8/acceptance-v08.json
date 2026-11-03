@@ -1,9 +1,9 @@
 {
-  "version": "0.8.0",
-  "ranAt": "2026-11-03T10:19:24.775Z",
+  "version": "0.8.1",
+  "ranAt": "2026-11-03T11:15:06.385Z",
   "display": ":99",
-  "total": 36,
-  "passed": 36,
+  "total": 42,
+  "passed": 42,
   "failed": [],
   "checks": [
     {
@@ -107,6 +107,11 @@
       "detail": "{\"left\":-1200,\"top\":0,\"width\":1360,\"height\":860,\"right\":160,\"bottom\":860}"
     },
     {
+      "name": "极限拖动后窗口可拖回屏幕内且完整可见",
+      "pass": true,
+      "detail": "{\"left\":16,\"top\":16,\"right\":1216,\"bottom\":776,\"width\":1200,\"height\":760,\"vw\":1599,\"vh\":969}"
+    },
+    {
       "name": "切换到「仅分红」类别后列表与行情独立刷新",
       "pass": true,
       "detail": "{\"pressed\":\"true\",\"rows\":17,\"emptyChart\":true}"
@@ -119,7 +124,17 @@
     {
       "name": "选中有成交的企业后渲染月度 OHLCV 蜡烛",
       "pass": true,
-      "detail": "{\"companyId\":\"gf-garment\",\"kind\":\"voting\",\"candles\":2,\"empty\":false,\"meta\":\"共 2 根月 K\\n2026.02 → 2026.03\"}"
+      "detail": "{\"companyId\":\"gf-garment\",\"kind\":\"voting\",\"candles\":2,\"empty\":false,\"meta\":\"共 2 根月 K · 覆盖 2 个月\\n2026.02 → 2026.03\"}"
+    },
+    {
+      "name": "K 线按真实月份排布：无成交月份留空档并标记",
+      "pass": true,
+      "detail": "{\"months\":\"9\",\"gapMonths\":\"2\",\"candles\":7,\"gapMarks\":2,\"meta\":\"共 7 根月 K · 覆盖 9 个月 · 空档 2 个月无成交\\n2026.02 → 2026.10\"}"
+    },
+    {
+      "name": "切换到仅分红股份后列表/行情按该类别独立刷新",
+      "pass": true,
+      "detail": "{\"kind\":\"nonVoting\",\"rows\":26,\"classIds\":[\"lp-garment:non-voting\",\"lp-textile:non-voting\"],\"candles\":0,\"empty\":true,\"month\":\"2026 年 10 月\",\"nonVotingTarget\":null}"
     },
     {
       "name": "玩家限价买单提交后生成未成交委托",
@@ -134,7 +149,7 @@
     {
       "name": "撤单后委托消失且不改变现金",
       "pass": true,
-      "detail": "{\"orders\":0,\"cash\":2000000,\"worldOrders\":65,\"status\":\"已撤销该委托；未冻结的资金与股份不受影响。\"}"
+      "detail": "{\"orders\":0,\"cash\":2000000,\"worldOrders\":88,\"status\":\"已撤销该委托；未冻结的资金与股份不受影响。\"}"
     },
     {
       "name": "关闭按钮关闭股票窗口",
@@ -149,7 +164,7 @@
     {
       "name": "市长政府标签显示城市税收面板（含交通系数）",
       "pass": true,
-      "detail": "{\"hasPanel\":true,\"text\":\"税收结算 · 基准税与交通系数\\n最近 2026.03\\n基准税额3519.0 万\\n交通系数×1.50保障率 100%\\n交通加成1759.5 万系统注入，不向纳税人补收\\n交通损耗0基准税未入账部分，不退还\\n最终入账5278.5 万\\n个税3953.5 万基准 2635.7 万 企税247.4 万基准 164.9 万 消费税824.8 万基准 549.9 万 股息税252.7 万基准 168.5 万\\n月份\\t基准税\\t交通系数\\t加成\\t损耗\\t最终入账\\n2026.03\\t3519.0 万\\t×1.50\\t1759.5 万\\t0\\t5278.\",\"factor\":1.5,\"history\":2}"
+      "detail": "{\"hasPanel\":true,\"text\":\"税收结算 · 基准税与交通系数\\n最近 2026.10\\n基准税额1084.7 万\\n交通系数×1.50保障率 100%\\n交通加成542.4 万系统注入，不向纳税人补收\\n交通损耗0基准税未入账部分，不退还\\n最终入账1627.1 万\\n个税1314.0 万基准 876.0 万 企税9.1 万基准 6.1 万 消费税288.5 万基准 192.4 万 股息税15.4 万基准 10.3 万\\n月份\\t基准税\\t交通系数\\t加成\\t损耗\\t最终入账\\n2026.10\\t1084.7 万\\t×1.50\\t542.4 万\\t0\\t1627.1 万\\n2026.\",\"factor\":1.5,\"history\":9}"
     },
     {
       "name": "非市长看不到城市税收金额明细",
@@ -159,27 +174,42 @@
     {
       "name": "税收历史含四税与交通系数，且入账可对账",
       "pass": true,
-      "detail": "{\"tick\":2,\"incomeTaxBase\":26356870.4,\"corporateTaxBase\":1649409.84,\"consumptionTaxBase\":5498874.77,\"dividendTaxBase\":1684773.21,\"transportGuarantee\":1,\"transportFactor\":1.5,\"incomeTaxRevenue\":39535305.6,\"corporateTaxRevenue\":2474114.76,\"consumptionTaxRevenue\":8248312.15,\"dividendTaxRevenue\":2527159.82,\"transportBonus\":17594964.11,\"transportLoss\":0,\"totalBase\":35189928.22,\"totalRevenue\":52784892.33}"
+      "detail": "{\"tick\":9,\"incomeTaxBase\":8760182.2,\"corporateTaxBase\":60543.35,\"consumptionTaxBase\":1923649.59,\"dividendTaxBase\":102764.22,\"transportGuarantee\":1,\"transportFactor\":1.5,\"incomeTaxRevenue\":13140273.3,\"corporateTaxRevenue\":90815.03,\"consumptionTaxRevenue\":2885474.39,\"dividendTaxRevenue\":154146.33,\"transportBonus\":5423569.69,\"transportLoss\":0,\"totalBase\":10847139.36,\"totalRevenue\":16270709.05}"
     },
     {
       "name": "消费税与股息税进入财政分录/城市月报",
       "pass": true,
-      "detail": "[\"transportMaintenance\",\"incomeTax\",\"corporateTax\",\"consumptionTax\",\"dividendTax\",\"publicWages\",\"benefits\",\"policySpending\",\"transportTaxBonus\"]"
+      "detail": "[\"transportMaintenance\",\"incomeTax\",\"corporateTax\",\"consumptionTax\",\"dividendTax\",\"publicWages\",\"benefits\",\"policySpending\",\"transportTaxBonus\",\"debtForgiven\"]"
+    },
+    {
+      "name": "税收流水净额 = 税收月报最终入账；市长面板收支=财政流水净额（不重复计算）",
+      "pass": true,
+      "detail": "{\"ok\":true,\"tick\":9,\"net\":-31468940.95,\"taxNet\":16270709.05,\"totalRevenue\":16270709.05,\"monthIncome\":16270709.05,\"monthExpense\":47739650,\"fourSum\":16270709.05,\"byKind\":{\"transportMaintenance\":-1050,\"policySpending\":-20000,\"incomeTax\":8760182.2,\"corporateTax\":60543.35,\"consumptionTax\":1923649.59,\"dividendTax\":102764.22,\"transportTaxBonus\":5423569.69,\"publicWages\":-21000000,\"benefits\":-26677900},\"bases\":{\"incomeTax\":8760182.2,\"corporateTax\":60543.35,\"consumptionTax\":1923649.59,\"dividendTax\":102764.22}}"
+    },
+    {
+      "name": "四税财政分录按基准税额记账，加成/损耗单列",
+      "pass": true,
+      "detail": "{\"byKind\":{\"transportMaintenance\":-1050,\"policySpending\":-20000,\"incomeTax\":8760182.2,\"corporateTax\":60543.35,\"consumptionTax\":1923649.59,\"dividendTax\":102764.22,\"transportTaxBonus\":5423569.69,\"publicWages\":-21000000,\"benefits\":-26677900},\"bases\":{\"incomeTax\":8760182.2,\"corporateTax\":60543.35,\"consumptionTax\":1923649.59,\"dividendTax\":102764.22}}"
     },
     {
       "name": "存读档保留股票行情历史且不重复/不乱序",
       "pass": true,
-      "detail": "{\"saved\":2,\"after\":2}"
+      "detail": "{\"saved\":16,\"after\":16}"
     },
     {
       "name": "存读档保留税收历史",
       "pass": true,
-      "detail": "{\"saved\":795,\"after\":795}"
+      "detail": "{\"saved\":3579,\"after\":3579}"
     },
     {
       "name": "1100x700 无横向溢出且城市标签仍完整",
       "pass": true,
       "detail": "{\"overflowX\":false,\"tabs\":6,\"stockWindow\":false}"
+    },
+    {
+      "name": "企业退出后行情历史保留，界面标识已退出且禁止下单",
+      "pass": true,
+      "detail": "{\"ok\":true,\"companyName\":\"青原纤维农场\",\"exited\":true,\"tradable\":false,\"candles\":2,\"hasNotice\":true,\"hasOrderForm\":false,\"orderOk\":false,\"orderError\":\"该企业已退出市场或股份已注销：不可再交易。\"}"
     },
     {
       "name": "控制台无未过滤错误",
