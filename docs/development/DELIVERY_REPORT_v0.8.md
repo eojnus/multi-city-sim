@@ -389,3 +389,44 @@ DISPLAY=:99 node_modules/electron/dist/electron --no-sandbox \
 | `npx vitest run --maxWorkers=1` | **76 个测试文件 / 608 项全部通过** |
 | `node scripts/acceptance-v08.cjs` | **43/43 项通过、0 条控制台错误** |
 | 证据 | `docs/evidence_v0.8/`（18 张 PNG + JSON） |
+
+# 19. v0.8.3 股息收益率精度修复（2026-11-03）
+
+## 19.1 基线
+
+- 分支：`feature/stock-market-ui-tax`；修复前基线：`90da20259c403ca325613d8c267adba923ed7fce`（v0.8.2）
+- `SAVE_FORMAT_VERSION` 保持 8，`GAME_VERSION` 升级为 `0.8.3`。
+
+## 19.2 问题
+
+`dividendYieldOf` 把无量纲的股息收益率按货币精度 `round2` 舍入后再比较惜售阈值（`nonVotingDividendHoldThreshold = 0.002`，即月 0.2%）：
+
+- 真实收益率 0.003 被舍入为 0，惜售不触发；
+- 0.006 被舍入为 0.01 才触发；
+- 买入评分中的 `min(yield, 0.1) × 权重` 也先被抹平；此外 `score` 本身按 `round2` 存储，进一步丢弃 0.004 量级的股息贡献。
+
+## 19.3 修复
+
+- `src/simulation/investors/investors.ts`：`dividendYieldOf` 直接返回原始比率（仅做有限性/正值保护），不再 `round2`；新增导出的纯函数 `nonVotingScoreBonus(yield, config)` 承担“基础偏好 + 股息率 × 权重”，供买入评分与精度测试共用；买入候选的 `score` 不再按货币精度舍入，排序保留原始精度。
+- 金额（成交额、限价、预算）仍按 `round2` 处理；展示格式不变。未修改撮合、持仓、资金与 K 线规则，未调整任何经济/市场数值。
+
+## 19.4 测试
+
+新增 4 项边界测试（`tests/stock-ai-nonvoting.test.ts`）：
+
+- 收益率 0.0019（低于 0.2%）：不触发惜售，卖单数量 = floor(持仓 × 基础比例)；
+- 收益率 0.002（恰好 0.2%）：触发惜售（`>=`），卖单数量按 0.6 系数下降；
+- 收益率 0.0021（高于 0.2%）：触发惜售（旧实现会被舍入为 0.00 而不触发）；
+- 收益率参与买入评分的精度：0.0019 与 0.0021 的评分加成差 = (0.0021 − 0.0019) × 权重，不再被舍入抹平。
+
+同时按新订单排序重锁 36 月破产序列（岚港 t29 破产、t19 34.8%、t36 岚港 38.9% / 铁谷 66.1%，结构/守恒断言保留）。
+
+## 19.5 验证
+
+| 命令 | 结果 |
+| --- | --- |
+| `npm run typecheck` | 通过（渲染层 + Electron 主进程，0 错误） |
+| `npm run build` | 通过（`multi-city-sim@0.8.3`） |
+| `npx vitest run --maxWorkers=1` | **76 个测试文件 / 612 项全部通过** |
+
+桌面验收未在本轮重复执行（本轮仅修改收益率精度与测试，未触及界面结构；桌面证据沿用 `docs/evidence_v0.8/`）。

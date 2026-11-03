@@ -16,7 +16,9 @@ import {
 } from '../src/simulation/securities/securities';
 import { stockHistoryFor } from '../src/simulation/securities/history';
 import {
+  dividendYieldOf,
   groupHolder,
+  nonVotingScoreBonus,
   planInvestorOrders,
 } from '../src/simulation/investors/investors';
 import { parseSave, serializeSave } from '../src/simulation/core/save';
@@ -315,5 +317,108 @@ describe('仅分红股份的 AI 交易（v0.8.2）', () => {
       tick: 2,
     });
     expect(matchOrders(world, 2, DEMO_CONFIG)).toHaveLength(0);
+  });
+});
+
+describe('股息收益率精度（v0.8.3）', () => {
+  function yieldWorld(targetYield: number) {
+    const world = newWorld(2);
+    // 选持仓最大的居民实体仅分红持仓，避免边界用例因持仓过小被 <10 股过滤。
+    let picked: { groupId: string; shareClassId: string; companyId: string; shares: number } | null =
+      null;
+    for (const holding of world.securities.holdings) {
+      if (holding.holder.type !== 'investorGroup') continue;
+      const shareClass = classById(world, holding.shareClassId);
+      if (!shareClass || shareClass.kind !== 'nonVoting') continue;
+      if (!picked || holding.shares > picked.shares) {
+        picked = {
+          groupId: holding.holder.id,
+          shareClassId: shareClass.id,
+          companyId: shareClass.companyId,
+          shares: holding.shares,
+        };
+      }
+    }
+    if (!picked) throw new Error('缺少仅分红持仓样本');
+    const company = world.companies.find((candidate) => candidate.id === picked!.companyId)!;
+    // 让 cashPressed 为 false，避免现金压力分支改变卖出比例。
+    for (const group of world.investors) group.cash = 50_000_000;
+    const price = bookPrice(world, company);
+    company.lastMonth.dividendsPaid = round2(targetYield * price * company.totalShares);
+    return { world, company, picked, price };
+  }
+
+  function plannedNonVotingSell(world: WorldState, groupId: string, shareClassId: string) {
+    planInvestorOrders(world, DEMO_CONFIG, world.time.tick);
+    return world.securities.orders.find(
+      (order) =>
+        order.side === 'sell' &&
+        order.shareClassId === shareClassId &&
+        order.holder.type === 'investorGroup' &&
+        order.holder.id === groupId,
+    );
+  }
+
+  it('低于 0.2% 月股息率不触发惜售，卖单数量按基础比例计算', () => {
+    const { world, company, picked } = yieldWorld(0.0019);
+    const ai = DEMO_CONFIG.securities.ai;
+    const order = plannedNonVotingSell(world, picked.groupId, picked.shareClassId);
+    expect(order).toBeDefined();
+    const expected = Math.floor(picked.shares * ai.nonVotingSellShare);
+    expect(order!.shares).toBe(expected);
+    // 收益率本身必须是 0.0019，而不是被货币精度舍入成 0。
+    expect(dividendYieldOf(company, bookPrice(world, company))).toBeCloseTo(0.0019, 4);
+  });
+
+  it('恰好 0.2% 月股息率触发惜售（>= 阈值），卖单数量按惜售系数下降', () => {
+    const { world, company, picked } = yieldWorld(0.002);
+    const ai = DEMO_CONFIG.securities.ai;
+    const order = plannedNonVotingSell(world, picked.groupId, picked.shareClassId);
+    expect(order).toBeDefined();
+    const expected = Math.floor(
+      picked.shares * ai.nonVotingSellShare * ai.nonVotingDividendHoldFactor,
+    );
+    expect(order!.shares).toBe(expected);
+    expect(order!.shares).toBeLessThan(Math.floor(picked.shares * ai.nonVotingSellShare));
+    expect(dividendYieldOf(company, bookPrice(world, company))).toBeCloseTo(0.002, 4);
+  });
+
+  it('高于 0.2% 月股息率触发惜售，且不被舍入成 0.01 后才生效', () => {
+    const { world, company, picked } = yieldWorld(0.0021);
+    const ai = DEMO_CONFIG.securities.ai;
+    const order = plannedNonVotingSell(world, picked.groupId, picked.shareClassId);
+    expect(order).toBeDefined();
+    const expected = Math.floor(
+      picked.shares * ai.nonVotingSellShare * ai.nonVotingDividendHoldFactor,
+    );
+    expect(order!.shares).toBe(expected);
+    expect(dividendYieldOf(company, bookPrice(world, company))).toBeCloseTo(0.0021, 4);
+  });
+
+  it('股息收益率以原始精度参与买入评分（不被 round2 抹平）', () => {
+    const world = newWorld(2);
+    const company = world.companies[0]!;
+    const price = bookPrice(world, company);
+    company.lastMonth.dividendsPaid = round2(0.0019 * price * company.totalShares);
+    const lowYield = dividendYieldOf(company, price);
+    expect(lowYield).toBeCloseTo(0.0019, 4);
+    const lowBonus = nonVotingScoreBonus(lowYield, DEMO_CONFIG);
+
+    company.lastMonth.dividendsPaid = round2(0.0021 * price * company.totalShares);
+    const highYield = dividendYieldOf(company, price);
+    expect(highYield).toBeCloseTo(0.0021, 4);
+    const highBonus = nonVotingScoreBonus(highYield, DEMO_CONFIG);
+
+    // 旧实现把 0.0019/0.0021 都舍入为 0（或 0.01），两者加成相同；修复后应保留差异。
+    expect(highBonus).toBeGreaterThan(lowBonus);
+    expect(highBonus - lowBonus).toBeCloseTo(
+      (highYield - lowYield) * DEMO_CONFIG.securities.ai.nonVotingDividendWeight,
+      6,
+    );
+    expect(lowBonus).toBeCloseTo(
+      DEMO_CONFIG.securities.ai.nonVotingBuyBias +
+        lowYield * DEMO_CONFIG.securities.ai.nonVotingDividendWeight,
+      6,
+    );
   });
 });

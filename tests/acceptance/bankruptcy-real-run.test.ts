@@ -7,13 +7,13 @@ import { checkInvariants } from '../../src/simulation/core/invariants';
  * F 组「真实破产样本」：固定条件 36 个月、玩家无操作、默认种子 20261101。
  * 复现命令：npx vitest run tests/acceptance/bankruptcy-real-run.test.ts
  *
- * v0.8.2 仅分红股 AI 交易（居民投资实体开始对仅分红股份挂卖单/买单）改变了股票市场
- * 的真实现金流与公司利润→股息→财政链条，36 月真实序列再次漂移，本文件按最终代码
- * 实测值锁定：
- *   - 岚港 t30 破产（v0.8.1 基线 t28），铁谷、青原在 36 月内均未破产；
- *   - 岚港破产后恢复发行债券（t31/33/35）与政府贷款，铁谷全程正常融资；
- *   - t36 负债率：岚港 36.3%（normal）、铁谷 55.3%（watch）、青原 0%。
- *   结构/守恒断言全部保留；数值与原因同步写入交付报告 §18。
+ * v0.8.3 修复股息收益率精度（不再按 round2 舍入比率、买入评分保留原始精度）后，
+ * 仅分红 AI 订单的排序与成交序列发生细微变化，36 月真实序列再次漂移，本文件按最终
+ * 代码实测值锁定：
+ *   - 岚港 t29 破产（v0.8.2 基线 t30），铁谷、青原在 36 月内均未破产；
+ *   - 岚港破产后恢复发行债券（t30/32/34/36）与政府贷款，铁谷全程正常融资；
+ *   - t36 负债率：岚港 38.9%（normal）、铁谷 66.1%（watch）、青原 0%。
+ *   结构/守恒断言全部保留；数值与原因同步写入交付报告 §19。
  * 本文件按 v0.8 实测序列更新锁定值，但保留 AC-F-R1~R8 的守恒/结构断言
  * （兑付本金+利息==银行垫付、计划=成交+未售、writtenOff 清零、不伪造/不抹账、
  * 次月重建、破产同 tick 重选、不变量为空）。数值同时写入交付报告 §15 与 v0.8 回归说明。
@@ -50,38 +50,38 @@ describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v
       .flatMap((entry) => entry.government!.records)
       .sort((a, b) => a.tick - b.tick);
 
-  it('F-R1 触发月份：岚港 t30 破产一次，铁谷、青原 36 月内不破产', () => {
-    expect(city('lanport').government!.records.map((record) => record.tick)).toEqual([30]);
+  it('F-R1 触发月份：岚港 t29 破产一次，铁谷、青原 36 月内不破产', () => {
+    expect(city('lanport').government!.records.map((record) => record.tick)).toEqual([29]);
     expect(city('ironvale').government!.records).toHaveLength(0);
     expect(city('greenfield').government!.records).toHaveLength(0);
   });
 
-  it('F-R2 风险分级：t19 岚港 33.6%（normal）、t30 破产清算后归零、t36 铁谷 55.3%（watch）；判定月比率≥100%', () => {
+  it('F-R2 风险分级：t19 岚港 34.8%（normal）、t29 破产清算后归零、t36 铁谷 66.1%（watch）；判定月比率≥100%', () => {
     const lanportPre = monthEndRatio.get(19)?.get('lanport');
-    expect(lanportPre?.ratio).toBeCloseTo(0.335522, 5);
+    expect(lanportPre?.ratio).toBeCloseTo(0.347736, 5);
     expect(lanportPre?.riskLevel).toBe('normal');
-    const lanportAfter = monthEndRatio.get(30)?.get('lanport');
+    const lanportAfter = monthEndRatio.get(29)?.get('lanport');
     expect(lanportAfter?.ratio).toBeCloseTo(0, 5);
     expect(lanportAfter?.riskLevel).toBe('normal');
     const lanportLate = monthEndRatio.get(36)?.get('lanport');
-    expect(lanportLate?.ratio).toBeCloseTo(0.363419, 5);
+    expect(lanportLate?.ratio).toBeCloseTo(0.389298, 5);
     expect(lanportLate?.riskLevel).toBe('normal');
     const ironvaleLate = monthEndRatio.get(36)?.get('ironvale');
-    expect(ironvaleLate?.ratio).toBeCloseTo(0.55337, 5);
+    expect(ironvaleLate?.ratio).toBeCloseTo(0.66071, 5);
     expect(ironvaleLate?.riskLevel).toBe('watch');
 
     const lanportRecord = city('lanport').government!.records[0]!;
-    expect(lanportRecord.debtRatio).toBeCloseTo(1.021496, 5);
+    expect(lanportRecord.debtRatio).toBeCloseTo(1.019933, 5);
     // 结构断言：破产判定月实际债务/判定 GDP 必须达到破产门槛（不是伪造的低比率）。
     expect(lanportRecord.debtRatio).toBeGreaterThanOrEqual(1);
-    expect(lanportRecord.totalDebtAtJudgement).toBeCloseTo(393_938_466.96, 2);
-    expect(lanportRecord.gdpJudgementValue).toBeCloseTo(385_648_652.51, 2);
+    expect(lanportRecord.totalDebtAtJudgement).toBeCloseTo(369_141_492.86, 2);
+    expect(lanportRecord.gdpJudgementValue).toBeCloseTo(361_927_294.14, 2);
     expect(lanportRecord.totalDebtAtJudgement / lanportRecord.gdpJudgementValue).toBeCloseTo(
       lanportRecord.debtRatio,
       5,
     );
     const lanportElection = world.politics!.elections.find(
-      (entry) => entry.cityId === 'lanport' && entry.tick === 30,
+      (entry) => entry.cityId === 'lanport' && entry.tick === 29,
     );
     expect(lanportElection).toBeDefined();
     expect(lanportElection!.winnerName.length).toBeGreaterThan(0);
@@ -115,18 +115,18 @@ describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v
         expect(activeHoldings).toHaveLength(0);
       }
     }
-    // 破产兑付后仍在存续期的持债为 active（共 20 笔）。
-    expect(world.bonds!.holdings.filter((holding) => holding.status === 'active')).toHaveLength(20);
-    expect(world.bonds!.holdings).toHaveLength(40);
+    // 破产兑付后仍在存续期的持债为 active（共 19 笔）。
+    expect(world.bonds!.holdings.filter((holding) => holding.status === 'active')).toHaveLength(19);
+    expect(world.bonds!.holdings).toHaveLength(37);
   });
 
-  it('F-R4 债券认购：计划=成交+未售（总量守恒），持有全部为 investorGroup（38 跨城 / 2 同城）', () => {
+  it('F-R4 债券认购：计划=成交+未售（总量守恒），持有全部为 investorGroup（35 跨城 / 2 同城）', () => {
     const totalPlan = allIssuances().reduce((sum, issuance) => sum + issuance.planUnits, 0);
     const totalSold = allIssuances().reduce((sum, issuance) => sum + issuance.soldUnits, 0);
     const totalUnsold = allIssuances().reduce((sum, issuance) => sum + issuance.unsoldUnits, 0);
-    expect(totalPlan).toBe(671_664);
-    expect(totalSold).toBe(637_411);
-    expect(totalUnsold).toBe(34_253);
+    expect(totalPlan).toBe(686_857);
+    expect(totalSold).toBe(602_672);
+    expect(totalUnsold).toBe(84_185);
     expect(totalSold + totalUnsold).toBe(totalPlan);
     for (const issuance of allIssuances()) {
       // 只有仍在发行窗口内的批次允许有未售份数；关闭后未售=计划-成交。
@@ -143,7 +143,7 @@ describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v
     }
 
     const holdings = world.bonds!.holdings;
-    expect(holdings).toHaveLength(40);
+    expect(holdings).toHaveLength(37);
     let crossCity = 0;
     let sameCity = 0;
     for (const holding of holdings) {
@@ -153,7 +153,7 @@ describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v
       if (holding.holder.id.startsWith(issuance!.cityId)) sameCity += 1;
       else crossCity += 1;
     }
-    expect(crossCity).toBe(38);
+    expect(crossCity).toBe(35);
     expect(sameCity).toBe(2);
   });
 
@@ -186,10 +186,10 @@ describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v
       expect(record.interestWrittenOff).toBeGreaterThanOrEqual(0);
     }
     const lanport = city('lanport').government!.records[0]!;
-    expect(lanport.advancesWrittenOff).toBeCloseTo(339_416_260.01, 2);
-    expect(lanport.bankLoansWrittenOff).toBeCloseTo(54_522_206.95, 2);
-    expect(lanport.interestWrittenOff).toBeCloseTo(0, 2);
-    expect(lanport.bondRedemptionCount).toBe(20);
+    expect(lanport.advancesWrittenOff).toBeCloseTo(321_235_029.99, 2);
+    expect(lanport.bankLoansWrittenOff).toBeCloseTo(47_668_122.27, 2);
+    expect(lanport.interestWrittenOff).toBeCloseTo(238_340.6, 2);
+    expect(lanport.bondRedemptionCount).toBe(18);
 
     // 未破产城市不勾销债务：铁谷只有正常政府贷款，没有 writtenOff。
     const ironvaleLoans = city('ironvale').government!.loans;
@@ -219,7 +219,7 @@ describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v
     expect(checkInvariants(world)).toEqual([]);
   });
 
-  it('F-R8 次月重建：岚港破产后恢复政府贷款与债券发行，t36 负债率 36.3% / 55.3% / 0%', () => {
+  it('F-R8 次月重建：岚港破产后恢复政府贷款与债券发行，t36 负债率 38.9% / 66.1% / 0%', () => {
     const lanportRecord = city('lanport').government!.records[0]!;
     const lanportNewLoans = city('lanport').government!.loans.filter(
       (loan) => loan.purpose === 'government' && loan.startTick > lanportRecord.tick,
@@ -242,9 +242,9 @@ describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v
     );
     expect(ironvaleNewLoans.length).toBeGreaterThanOrEqual(1);
 
-    expect(city('lanport').government!.lastDebt?.debtRatio ?? 0).toBeCloseTo(0.363419, 3);
+    expect(city('lanport').government!.lastDebt?.debtRatio ?? 0).toBeCloseTo(0.389298, 3);
     expect(city('lanport').government!.lastDebt?.riskLevel).toBe('normal');
-    expect(city('ironvale').government!.lastDebt?.debtRatio ?? 0).toBeCloseTo(0.55337, 3);
+    expect(city('ironvale').government!.lastDebt?.debtRatio ?? 0).toBeCloseTo(0.66071, 3);
     expect(city('ironvale').government!.lastDebt?.riskLevel).toBe('watch');
     expect(city('greenfield').government!.lastDebt?.debtRatio ?? 0).toBeCloseTo(0, 3);
     // 破产城市已解除破产状态（恢复为 solvent，才能继续融资）。

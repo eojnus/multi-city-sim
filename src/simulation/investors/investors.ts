@@ -234,11 +234,29 @@ function classesForCompany(world: WorldState, companyId: string): ShareClass[] {
     .sort((a, b) => a.kind.localeCompare(b.kind));
 }
 
-/** 每股股息收益率：最近一个完整月的实际派息 ÷ 总股本 ÷ 参考价（两类股份按持股比例分享同一笔分红）。 */
-function dividendYieldOf(company: Company, price: number): number {
+/**
+ * 每股股息收益率：最近一个完整月的实际派息 ÷ 总股本 ÷ 参考价
+ * （两类股份按持股比例分享同一笔分红）。
+ *
+ * 注意：收益率是无量纲比率（默认阈值 0.002 = 月 0.2%），必须保留足够精度再参与
+ * 惜售阈值比较与买入评分；若先按货币精度（round2）舍入，0.0019~0.0021 这类真实
+ * 收益率会被抹成 0 或 0.01，惜售规则与评分都会失真。金额与展示各自按需舍入。
+ */
+export function dividendYieldOf(company: Company, price: number): number {
   if (!(price > 0) || !(company.totalShares > 0)) return 0;
   const dividendPerShare = company.lastMonth.dividendsPaid / company.totalShares;
-  return dividendPerShare > 0 ? round2(dividendPerShare / price) : 0;
+  if (!(dividendPerShare > 0)) return 0;
+  const yieldValue = dividendPerShare / price;
+  return Number.isFinite(yieldValue) ? yieldValue : 0;
+}
+
+/**
+ * 仅分红股份的买入评分加成：基础偏好 + 股息率 × 权重（收益率保留原始精度）。
+ * 独立导出以便测试精度；调用方仍按真实资金与撮合规则下单，不因此制造交易。
+ */
+export function nonVotingScoreBonus(yieldValue: number, config: DemoConfig): number {
+  const ai = config.securities.ai;
+  return ai.nonVotingBuyBias + Math.min(yieldValue, 0.1) * ai.nonVotingDividendWeight;
 }
 
 interface PlannedSell {
@@ -404,9 +422,7 @@ export function planInvestorOrders(world: WorldState, config: DemoConfig, tick: 
         const trendWeight = risk * ai.riskWeight;
         const dividendYield = dividendYieldOf(company, financials.price);
         const classBonus =
-          shareClass.kind === 'nonVoting'
-            ? ai.nonVotingBuyBias + Math.min(dividendYield, 0.1) * ai.nonVotingDividendWeight
-            : 0;
+          shareClass.kind === 'nonVoting' ? nonVotingScoreBonus(dividendYield, config) : 0;
         const score =
           financials.valueGap * valueWeight +
           clamp(financials.momentum, -0.3, 0.3) * trendWeight +
@@ -418,7 +434,8 @@ export function planInvestorOrders(world: WorldState, config: DemoConfig, tick: 
           shareClassIdValue: shareClass.id,
           kind: shareClass.kind,
           financials,
-          score: round2(score),
+          // 评分只是排序用的无量纲值：保留原始精度（尤其股息率贡献），不按货币精度舍入。
+          score,
         });
       }
     }
