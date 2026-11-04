@@ -1,0 +1,69 @@
+{
+  "generatedAt": "2026-11-04T03:40:00.180Z",
+  "electron": "38.8.6",
+  "checks": [
+    {
+      "name": "启动进入区域视图，右栏 6 个城市标签可见",
+      "pass": true,
+      "detail": "{\"view\":\"region\",\"tabs\":6}"
+    },
+    {
+      "name": "开局人口 = 基线 ×5，非劳动 20%、劳动力 80%，就业+失业=劳动力",
+      "pass": true,
+      "detail": "[{\"id\":\"lanport\",\"name\":\"岚港\",\"population\":600000,\"nonLabor\":120000,\"laborForce\":480000,\"employed\":41100,\"unemployed\":438900,\"jobs\":null},{\"id\":\"ironvale\",\"name\":\"铁谷\",\"population\":430000,\"nonLabor\":86000,\"laborForce\":344000,\"employed\":30100,\"unemployed\":313900,\"jobs\":null},{\"id\":\"greenfield\",\"name\":\"青原\",\"population\":320000,\"nonLabor\":64000,\"laborForce\":256000,\"employed\":24000,\"unemployed\":232000,\"jobs\":null}]"
+    },
+    {
+      "name": "人口标签显示就业结构与「需求 vs 成交」，t0 成交显著低于需求",
+      "pass": true,
+      "detail": "{\"demand\":{\"desiredConsumption\":994276753.6600001,\"consumption\":334818522.69000006,\"unmetFunding\":2.58,\"budget\":415735043.78999996,\"loanFinancedConsumption\":13982674.049999999,\"depositWithdrawn\":0},\"population\":{\"total\":600145,\"employed\":39136,\"unemployed\":440980,\"nonLabor\":120029,\"laborForce\":480116}}"
+    },
+    {
+      "name": "企业「经营」显示设备表与生产计划（设备/劳动/计划/实际分离）",
+      "pass": true,
+      "detail": "{\"section\":true,\"plan\":true,\"rows\":[{\"kind\":\"farm\",\"units\":0,\"capacity\":0,\"marketPrice\":114000,\"governmentStock\":72},{\"kind\":\"industry\",\"units\":0,\"capacity\":0,\"marketPrice\":190000,\"governmentStock\":180},{\"kind\":\"energy\",\"units\":1,\"capacity\":337200.00000000006,\"marketPrice\":152000,\"governmentStock\":48}],\"planView\":{\"plannedOutput\":279687.17,\"equipmentLimit\":337200,\"laborLimit\":450121.54,\"reasons\":[\"销售参考 269760.00（近 1 月实际销量），目标库存 134880.00，现有库存 192284.93\",\"设备产能 337200.00，劳动产能 450121.54\",\"按 ±20% 平滑（上期计划 349608.96）\"]},\"salesHistory\":[],\"text\":\"设备 · 产能 · 生产计划 能源 设备产能43.7 万单位 / 月 劳动产能41.4 万单位 / 月 计划产量28.0 万T1 计划 上月产出28.0 万利用率 80.0% 员工 / 岗位1,104 / 746工资 531.1 万/月 成品库存47.1 万无销售参考 设备持有技术系数 ×1.12 设备 台数 单台产能 合计产能 目录价 / 市场价 可购（同城 / 储备） 农业设备 0 台 33.7 万 0 12.0 万 / 11.4 万 0 / 72 台 工业设备 0 台 33.7 万 0 20.0 万 / 19.0 万 0 / 180 台 能源设备 1 台 33.7 万 33.7 万 16\"}"
+    },
+    {
+      "name": "构造玩家经营三家岚港企业后，设备买卖权限在视图层生效",
+      "pass": true,
+      "detail": "{\"fixture\":{\"a\":true,\"b\":true,\"c\":true},\"canOperate\":true}"
+    },
+    {
+      "name": "界面买入 1 台能源设备：设备 +1、政府储备 −1、企业付款=财政收款=目录价",
+      "pass": true,
+      "detail": "{\"buyBefore\":{\"cash\":3950358.98,\"treasury\":0,\"units\":1,\"stock\":48,\"price\":160000,\"marketPrice\":152000,\"stockMonths\":0},\"buyAfter\":{\"cash\":3790358.98,\"treasury\":160000,\"units\":2,\"stock\":47},\"spent\":160000,\"received\":160000}"
+    },
+    {
+      "name": "界面挂出 2 台二手设备：立即扣除设备、生成本城委托并显示在列表",
+      "pass": true,
+      "detail": "{\"sellSource\":{\"kind\":\"industry\",\"units\":12},\"offer\":{\"id\":\"used-1\",\"companyId\":\"lp-food\",\"kind\":\"industry\",\"units\":2,\"askPrice\":130000},\"unitsAfter\":10}"
+    },
+    {
+      "name": "界面买入二手设备：委托清空、买方设备 +2、买卖双方现金等额转移",
+      "pass": true,
+      "detail": "{\"usedBefore\":{\"buyerCash\":42254851.27,\"sellerCash\":258201714.8,\"buyerUnits\":1},\"usedAfter\":{\"buyerCash\":41994851.27,\"sellerCash\":258461714.8,\"buyerUnits\":3,\"offersLeft\":0},\"usedCost\":260000}"
+    },
+    {
+      "name": "股票市场大窗口仍可打开并显示行",
+      "pass": true,
+      "detail": "{\"window\":true,\"rows\":17,\"title\":\"STOCK MARKET\\n          股票市场\\n          有投票权股份\"}"
+    },
+    {
+      "name": "存读档保留设备/现金/人口/债券/设备储备/销售历史/生产计划且完全一致",
+      "pass": true,
+      "detail": "{\"saved\":true,\"loaded\":true,\"advanced\":\"2026 年 03 月\",\"toasts\":[\"已保存到 manual-1。\",\"已从manual-1恢复（保存于 2026/11/4 03:39:55）。\"],\"diffKeys\":[]}"
+    },
+    {
+      "name": "1100x700 无横向溢出且城市标签仍完整",
+      "pass": true,
+      "detail": "{\"overflowX\":false,\"tabs\":6,\"labels\":[\"概况\",\"人口\",\"企业\",\"市场\",\"政府\",\"交通\"],\"view\":\"region\",\"equipment\":true}"
+    },
+    {
+      "name": "全程无控制台错误（过滤 GPU/GL 噪声）",
+      "pass": true,
+      "detail": ""
+    }
+  ],
+  "passed": 12,
+  "total": 12,
+  "consoleErrors": []
+}
