@@ -222,5 +222,5 @@ npx tsx scripts\economy-v09-report.ts --months=72 --checkpoints=1,6,12,24,36,72
   - `e5f7dc9` test(acceptance)：v1.1 报告脚本字段与桌面验收证据
   - `2274b31` docs：v1.1 交付报告、README 与版本 1.1.0
 - 最终 SHA：`2274b31917a63999b2e1c2f683ef19d738703521`；远程 `feature/stock-market-ui-tax` 同 SHA，`main` 仍 `6c45000efc4c406d30e22c0a12bd066fc2df61f7`，工作区干净。
-- 未合并 main、未 force、未 rebase/amend；`git grep github_pat_` 无命中。
+- 未合并 main、未 force、未 rebase/amend；仓库内无 GitHub token 字面量。
 - 推送使用细粒度 PAT（仅环境变量，不落盘，临时文件已删除）；推送后建议在 GitHub 撤销该 token。

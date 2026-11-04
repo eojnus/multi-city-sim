@@ -201,12 +201,14 @@ npx tsx scripts\economy-v09-report.ts --months=72 --checkpoints=1,6,12,24,36,72
   - `d5fe737` test(acceptance)：v1.2 报告脚本与桌面证据（9 文件，+71/−2）
   - 本报告提交：docs：v1.2 交付报告、README 与版本 1.2.0
 - 最终 SHA 与远程同步状态见 §9（推送后补记）。
-- `main` 保持 `6c45000efc4c406d30e22c0a12bd066fc2df61f7`；未合并 main、未 force、未 rebase/amend；`git grep github_pat_` 无命中，推送 token 仅作环境变量、临时文件已删除。
+- `main` 保持 `6c45000efc4c406d30e22c0a12bd066fc2df61f7`；未合并 main、未 force、未 rebase/amend；仓库内无 GitHub token 字面量，推送 token 仅作环境变量、临时文件已删除。
 
 ---
 
-## 9. 最终状态（推送后补记）
+## 9. 最终状态
 
-- 最终 SHA：待补。
-- `origin/feature/stock-market-ui-tax`：待补。
-- `git status --short`：待补。
+- 三阶段交付提交：`a07022d`（feat）、`d5fe737`（test）、`79ca6ea`（docs，本报告所在提交）。
+- 最终交付 SHA：`79ca6ea41ae5e1690e27c860f9c83d65260f3ecf`。
+- 推送核对：`origin/feature/stock-market-ui-tax` = `79ca6ea`（0fd4a0e..79ca6ea 已接受）；`main` = `6c45000efc4c406d30e22c0a12bd066fc2df61f7`。
+- 本补记提交只更新本节与 token 措辞，其 SHA 见 `git log -1`；补记推送后远程 HEAD 指向该补记提交。
+- `git status --short` 为空；`git grep` 无 GitHub token 字面量；token 临时文件已删除。
