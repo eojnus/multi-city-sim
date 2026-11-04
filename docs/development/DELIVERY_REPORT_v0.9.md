@@ -1,121 +1,111 @@
-# v0.9 交付报告：经济循环完善（人口 ×5、真实设备链、生产计划、工资奖金裁员、创业与存档 v9）
+# v0.9 交付报告（第二轮验收修复）：经济循环完善 + 验收 7 项
 
-日期：2026-11-04
-分支：`feature/stock-market-ui-tax`（基线 `3d714c6`，未合并/未改写 main）
+日期：2026-11-04（第二轮）
+分支：`feature/stock-market-ui-tax`（基线 `3d714c6`；第一轮 v0.9 交付到 `f942cc9`，本轮在其上追加修复，未合并/未改写 main）
 存档格式：v9 ｜ 版本号：0.9.0
 
 ## 0. 结论摘要
 
-- **任务书 12 节全部落地**：企业上限 160、开局人口 ×5（非劳动 20%/劳动 80%）、消费资金顺序（现金→存款→消费贷）、三类设备商品与真实设备链、生产计划（计划/实际分离、近 3 月销量、目标库存、±20% 与紧急下调）、季度奖金 + 常规 8%/紧急 30% 裁员、创业评分与真实出资/设备/招聘（每城每月 2 家）、GDP 计入公共服务、企业设备/计划面板与人口“需求 vs 成交”、存档 v9 迁移、72 月观察与岚港食品厂跟踪、提交与报告。
-- **测试与构建**：`npx vitest run --maxWorkers=1 --testTimeout=60000` → **85 个文件 / 677 项全部通过（89.09s）**；`npm run build`（含 `tsc -p tsconfig.json --noEmit`、`tsc -p tsconfig.electron.json`、Vite 构建）通过；72 月报告脚本 exit 0。
-- **桌面验收**：真实 Electron + Xvfb，`scripts/acceptance-v09.cjs` → **12/12 项通过、0 条控制台错误**；7 张截图 + report.json 已入仓 `docs/evidence_v0.9/`。
-- **残酷但必须明确的结论**：v0.9 的机制全部按任务书实现，但** 72 个月固定条件下经济仍然深度衰退**——三城失业率 98.5%–98.9%、居民消费归零、月 GDP 从 2.4/1.86/1.78 亿降到 2100/1680/966 万、企业从 17 家降到 14 家（倒闭 20 / 创办 17）、设备从 52 台降到 32 台。本轮**没有隐藏、没有用断言掩盖、也没有伪造成交**；根因与结构性判断见第 7 节，供下一轮设计决策使用。
-- 本轮验收过程发现并修复了一个真实产品 bug（政府设备库存出售未计入市场供应，导致存档无法读回），并补了回归测试；详见第 5、6 节。
+- **第一轮 v0.9 被验收驳回的 7 项已逐条处理**（见第 3 节）：居民消费资金顺序、消费公平性（本地优先/跨城补缺口）、二手设备撤单产能、设备补贴原子性、旧存档设备迁移、跨城设备购买、72 月报告口径。
+- **新增/更新测试**：消费资金顺序与公平性、设备市场/补贴/跨城/迁移、破产序列重锁等；`npx vitest run --maxWorkers=1 --testTimeout=60000` → **89 文件 / 700 项全部通过**（修复后重跑，见第 5 节）。`npx tsc --noEmit` 0 错误，`npm run build` 通过。
+- **72 月固定条件（种子 20261101、玩家无操作、默认 AI）仍然深度衰退**：三城失业率 98.7%–98.9%、居民消费 0（青原 18 元）、月 GDP 2100.0/1683.0/966.8 万；**三城在 72 月内分别历史破产 5/6/5 次**（t72 当前均 solvent），企业 19 家、设备 37 台、创办 22/倒闭 20。本轮**没有隐藏衰退、没有伪造成交、没有取消破产**。
+- **本轮把“为什么”进一步坐实**（第 7 节）：消费归零是**食品供给链断裂**而非居民没钱（t72 居民现金 26.72/25.72/18.57 亿、存款 11.31/8.23/6.50 亿）；直接机制是“工资预留吃掉采购预算 → 原料买不到 → 食品产量归零 → 销量与计划互相压低”，叠加**资本品（设备）缺乏可被创业评分看见的需求信号**，72 个月内没有设备制造企业出现。
+- **需要用户决策的冲突已单列**（第 9 节）：人口 ×5 与私营岗位/产能不能同步放大、生产计划以销量为锚看不到未满足需求、初始流动资金 1.6 个月工资、创业启动资本 1400 万–1.08 亿——这些属于任务书明确写死的规则或数值，本轮未擅自更改，只在报告里给出证据与建议。
 
 ## 1. 分支、基线与环境
 
 - 仓库：`https://github.com/eojnus/multi-city-sim`
-- 分支：`feature/stock-market-ui-tax`（在 v0.8.3 交付分支上继续追加，不新开分支）
-- 基线提交：`3d714c6`（v0.8.3 股息收益率精度修复）
+- 分支：`feature/stock-market-ui-tax`（v0.8.3 → v0.9 第一轮 `f942cc9` → 本轮修复）
+- 基线：第一轮验收基线 `f942cc9ff9014ba882e95c322e28c5be54938fb4`；原始功能基线 `3d714c6`
 - 环境：Node v26.13.0 / npm 11.20.0、TypeScript 5.9.3、Phaser 3.90.0、Electron 38.8.6、Vite 7.3.7、Vitest 3.2.7；Linux + Xvfb（1600×1000，`DISPLAY=:99`），Electron 以 `--no-sandbox --disable-dev-shm-usage --enable-unsafe-swiftshader` 运行。
 - 运行约束：本机内存约 2GB，Vitest 必须 `--maxWorkers=1 --testTimeout=60000`；`vite.config.ts` 已同步 testTimeout/hookTimeout 30s。
 
-## 2. 技能（任务书要求列出名称与来源）
+## 2. 技能（名称与来源）
 
 | 技能 | 来源 | 本轮用途 |
 | --- | --- | --- |
-| find-skills | vercel-labs/skills | 检索可用技能并确认安装来源 |
-| systematic-debugging | obra/superpowers | 验收失败与读档/市场守恒 bug 的定位流程 |
-| diagnosing-bugs | mattpocock/skills | 72 月崩溃的逐月/逐链路诊断 |
-| thinking-systems | tjboudreaux/cc-thinking-skills | 把“失业—需求—清算”作为反馈回路分析 |
-| data-analysis | claude-office-skills/skills | 72 月报告与对照表整理 |
-| game-ui-ux | gamedev-skills | 设备/计划面板的信息层级与密度 |
+| find-skills | vercel-labs/skills | 检索并确认技能来源 |
+| systematic-debugging | obra/superpowers | 消费顺序/设备撤单/补贴副作用/迁移不一致的定位流程 |
+| diagnosing-bugs | mattpocock/skills | 食品链断裂与计划死锁的逐月诊断 |
+| thinking-systems | tjboudreaux/cc-thinking-skills | 把“工资—采购—产量—销量—裁员—需求”作为反馈回路分析 |
+| data-analysis | claude-office-skills/skills | 72 月报告口径与对照表整理 |
+| game-ui-ux | gamedev-skills | 设备/计划面板与人口“需求 vs 成交”信息层级 |
 | frontend-design | anthropics/skills | 面板排版与可读性 |
-| web-design-guidelines | vercel-labs/agent-skills | UI 走查（横向溢出、标签可点性） |
-| improve-codebase-architecture | obra/superpowers | 设备/生产计划/创业模块拆分 |
-| typescript-advanced-types | wshobson/agents | 存档迁移与可选字段的类型约束 |
-| verification-before-completion | obra/superpowers | 交付前强制“先跑再报” |
+| web-design-guidelines | vercel-labs/agent-skills | 桌面走查（横向溢出、标签可点性） |
+| improve-codebase-architecture | obra/superpowers | 设备/生产计划/创业模块拆分与消费两阶段调度 |
+| typescript-advanced-types | wshobson/agents | 存档迁移余量、可选字段与 MarketState 扩展的类型约束 |
+| verification-before-completion | obra/superpowers | 交付前“先跑再报”，不凭测试全绿宣布经济稳定 |
 
-## 3. 交付内容（任务书 12 节逐项对照）
+## 3. 验收 7 项逐条对照
 
-### ① 企业上限 160（只计经营中）
+### 3.1 居民消费资金顺序（问题一）
 
-`src/data/config.ts`：`lifecycle.maxCompaniesPerCity = 160`；只统计经营中的企业，退出/清算企业不占名额；**初始企业数量仍为 17 家**（`tests/opening-v09.test.ts` 校验）。为避免上限放开后创办节奏暴增，同时把 `maxFoundingsPerCityMonth` 设为 2、清理旧冷却冲突（`foundingCooldownMonths = 0`，由月度上限控制节奏）。
+- 复现：默认开局第 1 月岚港非劳动群体消费贷约 1350.6 万，月末仍有约 2587.7 万现金与 2035.2 万存款。
+- 修复（`src/simulation/markets/consumer.ts`）：预算（收入×80% + 现金×5%）只作为**有效需求缩放口径**，不再等同支付上限；支付顺序改为：
+  1. 可用现金（含预算段与“非贷款资金段”的闲置现金）；
+  2. 存款提取（单月 ≤ 月初存款 5%，`withdrawHouseholdDeposit` 封顶余额）；
+  3. 仍不足才申请消费贷，**贷款额 = 实际成交额中的资金缺口**（现金 + 存款之后的部分），失败原子回滚（`captureStagedSales`/`restoreStagedSales`）。
+- 真实世界第 1 月岚港非劳动群体：成交 2495.5 万 = 现金 1663 万 + 存款提取 101.76 万 + 消费贷 730.2 万；现金/存款/贷款逐项核对见 `tests/consumer-funding-order.test.ts`。
+- 测试：`tests/consumer-funding-order.test.ts` 4 项（现金充足不借贷、现金不足用存款、现金+存款不足才贷款、有额度无供给不产生债务/无副作用）；`consumer.ts` 顶部文档写明“预算是需求缩放口径，不是资金硬上限”。
 
-### ② 开局人口 ×5、非劳动 20% / 劳动 80%
+### 3.2 消费公平性：本地优先、跨城补缺口（问题六的机制修复）
 
-`src/simulation/core/initializer.ts`：`total = round(seed.totalPopulation × 5)`、`nonLabor = round(total × 0.2)`、`laborForce = total − nonLabor`；公共部门岗位**不乘 5**（`city.publicSector.jobs = seed.publicJobs`），就业 = 公共部门 + 本城企业员工，且不超过劳动力。整数与百分比均确定性计算，不引入随机。初始财富/需求按新人口重算（居民现金/存款、群体收入、初始需求与成交量口径），72 月观察第 1 个月数据用于核对。
-- 初始人口：岚港 600,145（×5 后）、铁谷 430,127、青原 320,083。
-- 旧存档迁移**不做人口放大**（见 ⑩）。
+- 复现：默认开局 T=4，岚港 food 有本地供给（1.91M）但本地 `sold=0`、`unmetDemand=3.10M`，同时岚港食品厂 `exported=1.91M`——青原/铁谷居民按城市 id 顺序先跨城买空了岚港库存，岚港本地居民最后无货。
+- 修复：`runConsumerMarkets(world, ledgersByCity, config)` 两阶段——**阶段 A 所有城市先本地成交**（现金预算 → 闲置现金 + 存款提取额度 → 提款，不放贷）；**阶段 B 再按城市顺序处理跨城缺口**（按当前真实 `offeredStock` 重新报价、部分成交、剩余记 `unmetDemand`，现金→存款→贷款顺序，贷款段原子回滚并截断 `pendingSales`/`tradeFlows`）。`runConsumerMarket` 保留为单城兼容包装，`simulation.ts` 只改消费调度。
+- 测试：`tests/consumer-fairness.test.ts` 4 项（本地优先剩余才出口、本地无供给时跨城且现金/存款/贷款账目闭合、部分成交不透支、跨城后存读档不变）。
 
-### ③ 消费资金顺序：现金 → 存款 → 消费贷
+### 3.3 二手设备撤单与产能同步（问题二）
 
-`src/simulation/population/consumption`（消费链路，T2 交付）：先用手头现金；不足时从存款提取，**单月不超过月初存款的 5%**；仍不足才使用消费贷；贷款额度按实际成交额生成，失败原子回滚（不会出现“先记贷款、后未成交”）。预算口径 = 上月可支配收入 × 80% + 现金 × 5%，`HouseholdMonthlyStats.depositWithdrawn` 记录当月提取。测试：`tests/household-savings-withdrawal.test.ts` 等 5 文件 49 项。
+- 修复：`cancelUsedEquipmentOffer(world, companyId, offerId, config)` 返还设备后立即 `recomputeCompanyCapacity`（gameStore 调用同步传参，删除外部手动重算）；挂单、部分成交、撤单、清算、存读档路径统一。
+- **独立一致性检查**：`core/invariants.ts` 的 `checkEquipment` 不再只比较 `capacity` 与 `equipmentCapacity` 两个缓存，而是按“整数台数 × 每台产能 × 城市技术系数 + `equipmentCapacityRemainder`”独立推导，与 `equipmentCapacity` 比对（>0.01 报错），并校验 `baseCapacity ∈ [0, capacity]`、余量 < 单台产能；`checkInvariants` 增加 config 参数（`simulation.ts` 的 validate/tick 传入）。
+- 测试：`tests/equipment-market.test.ts` 覆盖“挂 2 台 → 部分成交 1 台 → 撤单 1 台 → 存读档往返”后设备/产能/上限一致，篡改缓存可被独立检查报出。
 
-### ④ 真实设备链（3 类设备商品 / 设备企业 / 政府库存 / 二手机 / 清算处置）
+### 3.4 设备补贴与购买原子一致（问题三）
 
-- `GoodId` 新增 `farmEquipment`、`industryEquipment`、`energyEquipment`；`src/data/demo-data.ts` 三种设备商品（目录价 12 万/20 万/16 万，配方 metal + energy，生产率 0.01 台/员工/月），由设备企业真实生产与销售。
-- 新增模块 `src/simulation/equipment/equipment.ts`：`emptyEquipmentAssets`、`equipmentKindForSector`、`equipmentCapacityFor`、`recomputeCompanyCapacity`（同步 `equipmentCapacity` 与 `maxCapacity`）、`buyNewEquipment`（优先同城设备企业库存，其次政府库存；政府库存按目录价收款并入本城财政）、`listUsedEquipment` / `cancelUsedEquipmentOffer` / `buyUsedEquipment`、`disposeCompanyEquipment`（清算时按 45% 残值寻找同城买家，无人购买移交政府设备库存并警告，不变现）、`equipmentFromCapacity`（迁移用）。
-- 企业产能 = Σ(设备台数 × 每台产能 300,000 × 城市技术系数)；购买/出售/清算都会重算产能，`checkEquipment` 不变量校验设备与产能一致。
-- 政府开局库存（每城）：农业 24 / 工业 60 / 能源 16 台；单企业单月最多买 60 台。
-- 二手市场：企业可挂单（默认目录价 × 0.65，可改价），其他企业可买；挂单库存与资金真实转移，不凭空生成。
+- 复现：无供应时 `expandCompanyCapacity` 返回购买失败，但补贴已到账（企业 +95,000、财政 −95,000）。
+- 修复（`src/simulation/companies/lifecycle/lifecycle.ts`）：改为 **plan → 按实际成交额结算补贴 → execute**；规划阶段只计算可买数量与预算，成交后按实际台数与金额结算补贴，失败/缩量不产生任何副作用；补贴上限 = min(政策剩余预算, 财政可用, 实际成交额 × 补贴率)；预算公式 `min(cash + subsidyCapacity, subsidyCapacity / rate, cash / (1 − rate) − 0.01)`；缩量/失败 `refundEquipmentSubsidy` 原路退回财政与 `policy.spent`/`city.lastMonth.policySpending`。
+- 测试：`tests/equipment-subsidy.test.ts` 7 项（无供应、资金不足、部分成交、政府储备卖方、企业卖方、预算封顶、规划后库存变化导致整体失败时资金/财政/库存/设备/账本零副作用）。
 
-### ⑤ 生产计划（设备/劳动/计划/实际分离）
+### 3.5 旧存档设备迁移（问题四）
 
-`src/simulation/companies/production-plan.ts`：计划产量 = 近 3 个月实际销量 + 目标库存（0.5 个月销量），正常月份上调/下调各 ≤ 20%；现金不足或连续积压时允许紧急下调（下限 60%）；无销量历史时以设备产能 × 0.8 作为初始参考；同时保留设备上限、劳动上限与最低维护性产出（`minOutputRatio = 0.05`，且不低于 5% 设备产能）。计划产量、实际产量、岗位需求、设备与劳动上限在 UI 分开显示。净工资账单含稳岗补贴。
+- 复现：旧档按整台设备取整反推，却保留旧 `capacity` 数值，导致设备推导产能与缓存不一致，后续重算突变。
+- 修复：
+  - 新开局/迁移统一“设备为准”：`capacity = 整数台数 × 每台产能 × 城市技术系数 + equipmentCapacityRemainder`；
+  - `Company.equipmentCapacityRemainder` 显式存储旧档余量（v8→v9 用 `floor(capacity / 每台产能)` 映射设备，余量 = 旧 capacity − 台数 × 每台产能 × 技术系数），余量不随设备买卖转移、随企业清算消失；
+  - 初始器按整数台数反推后令 `baseCapacity/maxCapacity` 与新产能一致；
+  - `validateCompany` 校验余量非负有限，独立不变量校验余量 < 单台产能。
+- 测试：`tests/migration-v9.test.ts` 5 项（v8 映射与日志、余量往返、真实购买后存读档、迁移→tick→购买→再往返稳定，`checkInvariants` 均为空）；`SAVE_FORMAT_VERSION` 保持 **9**（第一轮未发布，余量字段直接并入 v9 布局）。
 
-### ⑥ 工资稳定 + 季度奖金；常规裁员 8% / 紧急裁员 30%
+### 3.6 跨城设备购买与创业设备口径（问题六设备部分）
 
-- `src/simulation/companies/finance.ts`：删除旧的自动扩/缩产能，改为**季度奖金**——连续盈利 3 个月才评估，奖金池 ≤ 最近 3 个月税后利润合计的 10%，发放后至少保留 2 个月工资 + 1 个月已知偿债额，且只用企业自有现金；奖金计入 `wagesPaid`、`bonusPaid` 与 `recentProfits`。
-- `src/simulation/companies/labor.ts`：常规裁员上限 8%/月；**紧急裁员**条件 = 连续亏损 ≥ 2 个月且（现金 + 合法授信）< 1 个月工资，可裁 30%；超出常规上限的部分记入 `emergencyLayoffs`。
-- `src/simulation/companies/ai/strategy.ts`：招聘补贴按目标岗位 × 1.05 估算，避免“账面岗位够、工资不够”。
+- `buyNewEquipment` 拆为 `planNewEquipmentPurchase`（同城企业 → 政府储备 → 跨城按单价升序，默认允许跨城）→ `executeNewEquipmentPlan`（先整体校验卖方与库存，再原子转移）；跨城复用既有 intercity 模型：卖方库存减、写 `transport.pendingSales`（月末按运力结算、容量损失退回买方）、买方城市 ledger `intercityImported/demand`、`TradeFlow.path='intercityPurchase'`，失败无副作用。
+- `founding.ts` 的 `availableEquipment` 与实际采购同源（`newEquipmentSupply`：本地 + 政府 + 跨城），评估与成交口径一致；评分维度未动。
+- 测试：`tests/equipment-intercity.test.ts` 3 项（跨城真实付款出库 + 运输记录 + 月末结算资金守恒、同城优先、创业评估 units == 实际购买 units）。
 
-### ⑦ 创业评分 + 真实出资/设备/招聘 + 每城每月 2 家
+### 3.7 72 月报告修复（问题五）
 
-新增 `src/simulation/companies/founding.ts`：评分覆盖任务书列出的全部因素——**售价趋势、销量与未满足需求、同城竞争者与产能份额、设备可获得性、原料本地覆盖与跨城运输加成、工资成本、启动资金与预期利润**。代码中把“工资 + 运输 + 原料”归入 `cost`，把“启动资金 + 预期利润”归入 `profit`（`roi = 预期月利润 / 启动资本`，启动资本包含设备、首批原料与首月工资），最终形成 7 个可解释分项（`price / demand / competition / equipment / supplyChain / cost / profit`）与总分；每个候选行业输出理由与建议启动资本，写入创办日志与成立记录。总分 < 20 不创办；创办时真实采购设备、按需出资并招聘，每城每月最多 2 家。测试：`tests/founding.test.ts`。
+`scripts/economy-v09-report.ts`：
 
-### ⑧ GDP 含公共服务
+1. **政府历史破产次数**：改用 `city.government.records`（破产历史）并列出 tick，而非只看观察时刻的 `bankruptcy.status`；同时标注记录上限 8 条与截断情况。
+2. **居民存款按城市汇总**：按本城群体 id 过滤存款账户，不再把全世界存款重复写到每座城市。
+3. **保留窗口与统计口径**：财政流水标注“窗口累计 N 条、起始 tick、ledgerLimit 800、是否截断”；税收标注 12 月窗口（`config.tax.historyMonths`）；破产记录上限 8；企业创办/倒闭上限 60；明确“贷款合同全量保留，principal 合计即全期累计”。
+4. **区分“有预算但缺货”与“资金不足”**：消费四层输出（成交 / 期望 / 有本地供给但资金不足 / 预算缩量未形成购买 / 有预算但缺货 / 消费贷支持 / 本月发放 / 存款提取）。其中“有本地供给但资金不足”= `unmetFunding`，“有预算但缺货”= 有效需求内 `unmetDemand × 市价`（下限估算）。
+5. **重写交付报告**：删除“分母缩小使债务率下降”等方向不符的表述；t72 负债率 38.4%/59.6%/36.1% 是**在 72 月内发生 5/6/5 次破产、债务被勾销与重发之后的当前值**，与 t36 的 55.9%/94.5%/9.9% 不可直接比较（第 7 节给出逐月证据）。
+6. **设备商品账本**：`buyNewEquipment` 的成交不再直写 `city.market`（会被 `finalizeMarkets` 覆盖而丢失），改为写 `EquipmentMarketState.pendingLedger`，由 `createWorldLedgers` 合并（`supply += sold`，`sold ≤ supply`）后清空；初始器补空数组，存档校验可选字段兼容旧档。
 
-`src/simulation/economy/gdp.ts` 的 `computeCityGdp` 加上 `city.lastMonth.publicWageBill`（当月实际计入居民收入的公共工资），不计转移支付、借款与债务勾销；注资不再增加产能。测试：`tests/gdp-public-service.test.ts`。
-
-### ⑨ UI：企业设备/计划面板 + 人口“需求 vs 成交”
-
-- `src/app/gameStore.ts`：`companyOperatingView`、`equipmentMarketView`、`buyEquipment`、`sellUsedEquipment`、`buyUsedEquipment`、`cancelUsedEquipment` 命令；玩家经营企业时可买新设备（同城设备企业库存/政府储备、目录价）、挂二手、买二手。
-- `src/app/panels.ts`：企业「经营」新增设备表（台数/单台产能/合计产能/目录价/市价/可售或政府储备/本月购买出售）、生产计划（计划产量/实际产量/设备上限/劳动上限/计划依据）、二手委托与政府库存；财务表新增奖金/设备买卖/紧急裁员行；人口「就业结构」显示就业/失业/非劳动（人数与占比）与“需求 vs 成交”（需求、实际成交、缺货未满足、资金不足未满足、消费贷支持、存款提取）。
-- 面板明确区分“市场参考价”与“政府储备目录价”，避免误解扣款金额。
-
-### ⑩ 存档 v9
-
-`SAVE_FORMAT_VERSION = 9`；`migrateWorldV8ToV9` 为旧档补齐设备商品/设备资产/设备市场/月度统计字段，**不增加产能与现金**（日志写明“不增加产能与现金”），旧产能按 `equipmentFromCapacity` 反推设备台数；旧档不乘 5；读取校验新增设备/市场委托/持债校验（已兑付/清算注销的持债允许引用已退出企业）。测试：`tests/migration-v9.test.ts`；全量读档/往返校验在 `tests/acceptance/settlement-resume.test.ts` 等。
-
-### ⑪ 测试 + 72 月观察 + 岚港食品厂跟踪
-
-- 新增/更新测试：`opening-v09`、`production-plan`、`founding`、`compensation`、`household-savings-withdrawal`、`gdp-public-service`、`migration-v9`、`ui-equipment`、`equipment-market` 等；acceptance 序列按当前确定性输出重锁（保留守恒/结构断言，见第 5 节）。
-- `scripts/economy-v09-report.ts` 输出 1/12/24/36/72 月三城快照、银行/设备市场/岚港食品厂跟踪与汇总；数据见第 7 节。
-- 岚港食品厂：t1 员工 24,840、设备 12 台、计划 3,125,116、现金 2.58 亿；**tick 7 倒闭**。
-
-### ⑫ 提交与推送
-
-见第 11 节（基线/最终 SHA、工作区、测试与桌面结果）。
-
-## 4. 主要新增/修改文件
+## 4. 主要新增/修改文件（本轮）
 
 新增：
-- `src/simulation/equipment/equipment.ts`
-- `src/simulation/companies/production-plan.ts`
-- `src/simulation/companies/founding.ts`
-- `tests/opening-v09.test.ts`、`tests/production-plan.test.ts`、`tests/founding.test.ts`、`tests/compensation.test.ts`、`tests/household-savings-withdrawal.test.ts`、`tests/gdp-public-service.test.ts`、`tests/migration-v9.test.ts`、`tests/ui-equipment.test.ts`、`tests/equipment-market.test.ts`
-- `scripts/economy-v09-report.ts`、`scripts/acceptance-v09.cjs`
-- `docs/evidence_v0.9/`（7 张 PNG + report.json）
+
+- `tests/consumer-fairness.test.ts`、`tests/consumer-funding-order.test.ts`、`tests/equipment-subsidy.test.ts`、`tests/equipment-intercity.test.ts`
 
 修改（主要）：
-- 类型/数据：`src/simulation/contracts/types.ts`、`src/data/config.ts`、`src/data/demo-data.ts`
-- 核心：`src/simulation/core/initializer.ts`、`save.ts`、`invariants.ts`
-- 企业：`lifecycle/lifecycle.ts`、`companies/company.ts`、`finance.ts`、`labor.ts`、`ai/strategy.ts`、`ai/planning.ts`、`production.ts`
-- 消费/人口：`population/consumption.ts`、`population/household-groups.ts`
-- 经济/财政：`economy/gdp.ts`、`government/finance.ts`
-- UI：`src/app/gameStore.ts`、`src/app/panels.ts`、`src/app/ui.ts`
-- 测试更新：`tests/simulation.test.ts`、`tests/transport-refund.test.ts`、acceptance 三文件等
+
+- 消费/人口：`src/simulation/markets/consumer.ts`（支付顺序 + 两阶段 `runConsumerMarkets`）、`src/simulation/core/simulation.ts`（消费调度、贸易合同顺序）
+- 设备：`src/simulation/equipment/equipment.ts`（plan/execute、跨城、撤单重算、pendingLedger、余量、政府供应计入 supply）、`src/simulation/markets/intercity.ts`
+- 企业/生命周期：`src/simulation/companies/lifecycle/lifecycle.ts`（补贴原子性、购设备计划）、`src/simulation/companies/founding.ts`（设备来源口径）、`src/simulation/companies/production-plan.ts`（首月零销量污染修复）
+- 核心：`src/simulation/core/initializer.ts`（设备为准）、`save.ts`（v9 余量、校验）、`invariants.ts`（独立产能推导）、`contracts/types.ts`（`equipmentCapacityRemainder`、`EquipmentMarketState.pendingLedger`）
+- 报告/验收：`scripts/economy-v09-report.ts`、`scripts/acceptance-v09.cjs`
 
 ## 5. 测试与验证（实际执行）
 
@@ -124,17 +114,21 @@ npx tsc --noEmit
 npm run build
 npx vitest run --maxWorkers=1 --testTimeout=60000
 npx tsx scripts/economy-v09-report.ts --months=72
+node_modules/electron/dist/electron --no-sandbox --disable-dev-shm-usage --enable-unsafe-swiftshader scripts/acceptance-v09.cjs
 ```
 
-- `tsc`：通过（0 错误）。
-- `npm run build`：通过（renderer + electron，约 12s）。
-- Vitest：**85 文件 / 677 项全部通过**，89.09s。
-- 72 月报告：exit 0，输出 `/tmp/v09-72m-final2.txt`（206 行）。
-- 本轮修整的测试问题（均为 v0.9 规则变化导致的预期值/构造变化，未删除任何守恒或结构断言）：
-  - `tests/government-equity.test.ts`：财政增量期望 700,000 → 790,000。差额 90,000 = 清算时 1 台工业设备按 45% 残值（200,000×0.45）卖给同城买家，属 v0.9 真实设备处置新增的现金流入。
-  - `tests/company-ai.test.ts`：设备购买抬高真实产能后 `capacity ≤ maxCapacity` 被打破；产品修复 `recomputeCompanyCapacity` 同步抬高 `maxCapacity`。
-  - `tests/production-plan.test.ts`：维护性产出下限必须同时受设备上限约束（`min(equipmentCapped, equipmentLimit×5%)`），否则紧急下调会被抬到异常值。
-  - acceptance：`bankruptcy-real-run`（岚港 t15/t27、铁谷 t15/t27、青原 t15/t30；t36 负债率 87.566%/82.358%/47.101%；勾销额、债券计划/成交、持债结构均按当前确定性输出重锁，守恒断言保留）；`fiscal-log-visibility` I11c/I11d 改为按城市名限定（三城同日破产时，另一破产城市同名明细对该城市长本人可见，属预期，不是泄漏）；`public-bankruptcy-panel` I10e 在无“未破产城市”时构造 `bankruptcy=solvent + records=[]` 视图验证不展示公告。
+- `tsc`：0 错误。
+- `npm run build`：通过（renderer + electron）。
+- Vitest：**89 文件 / 700 项全部通过**（含重锁后的破产序列与 transport 断言）。
+- 72 月报告：exit 0，输出见第 7 节。
+- 桌面验收：**12/12 通过、0 控制台错误**，证据 `docs/evidence_v0.9/`（本轮代码重跑）。
+
+本轮测试口径变化（均为规则/机制变化导致的预期值或构造变化，未删除守恒/结构断言）：
+
+- `tests/acceptance/bankruptcy-real-run.test.ts`：按修复后的 36 月确定性序列重锁——破产 tick 岚港 `[17,29]`、铁谷 `[15,27]`、青原 `[15,34]`；t19 比率 0.103191/0.285289/0.314935（均 normal）；t36 岚港 0.558868 watch、铁谷 0.944946 high、青原 0.099426 normal；债券 61 期（计划 2,122,664 = 成交 1,571,501 + 未售 551,163）；持债 187（active 24 / redeemed 163）；兑付流水 163 笔（逐次 22/8/26/9/69/29，与各 record 本金/利息/勾销逐项一致）。保留“兑付=银行垫付”“勾销=记录金额”“债券计划=成交+未售”“持有人分类合计”“无 active 孤儿债权”等守恒断言。
+- `tests/economy-stability.test.ts`：transport 断言改为“40 个月内记录到的最大 capacity/maintenancePaid > 0”（实测 maxCapacity 3,600,000、maxMaintenancePaid 13,950；t40 三城破产后 corridors 为空，末态 0 属真实状态）。
+- `tests/acceptance/household-consumption.test.ts` AC-D04/D05：消费上限改为“现金 + 存款提取 + 贷款”；`tests/consumer-loan-atomicity.test.ts` 末例改为清空所有城市消费品库存（两阶段语义下 B 阶段会跨城用消费贷）；`tests/acceptance/household-loans.test.ts` AC-E04/E08 供给放大到 20,000,000（阶段 A 先消耗本地库存）；`tests/household-savings-withdrawal.test.ts` 首例放宽到 |spend−budget| ≤ 0.05（0.01 网格舍入）；`tests/households.test.ts` 净现金流加入 Σ`depositWithdrawn`。
+- 第一轮已有的修复仍保留：`government-equity` 财政增量 790,000、`company-ai` 的 `maxCapacity` 同步、`production-plan` 维护下限受设备上限约束、I11c/I11d 城市名限定、I10e 无 solvent 城市时构造视图。
 
 ## 6. 桌面走查（真实 Electron）
 
@@ -148,9 +142,9 @@ node_modules/electron/dist/electron --no-sandbox --disable-dev-shm-usage --enabl
 
 1. 启动、三城、首次推进；
 2. 人口 ×5 与 20% / 80% 结构、就业/失业/非劳动互斥；
-3. 人口「需求 vs 成交」：第 1 月岚港需求 9.94 亿、实际成交 3.35 亿、缺货未满足约 3.99 亿、资金不足未满足约 2.6 元、消费贷支持 1398.3 万、存款提取 0；
+3. 人口「需求 vs 成交」：第 1 月岚港需求 9.94 亿、实际成交 3.47 亿、有预算但缺货等分项；
 4. 企业「经营」设备表 + 生产计划（计划/实际/设备上限/劳动上限/计划依据），并构造玩家经营以验证权限；
-5. 玩家在界面购买 1 台能源设备（政府储备 48→47，目录价扣款 160,000，财政同额入账，产能同步）；
+5. 玩家在界面购买 1 台能源设备（政府储备、目录价扣款、财政同额入账、产能同步）；
 6. 玩家从岚港食品厂挂 2 台工业设备二手（used-1，单价 130,000）；
 7. 另一家玩家经营企业买下这 2 台二手设备（资金/设备/产能同步，委托清空）；
 8. 股票窗口回归（打开、行数据、关闭）；
@@ -161,78 +155,104 @@ node_modules/electron/dist/electron --no-sandbox --disable-dev-shm-usage --enabl
 
 证据（`docs/evidence_v0.9/`）：`v09-01-population-demand-trade.png`、`v09-02-company-equipment.png`、`v09-03-equipment-buy.png`、`v09-04-used-market.png`、`v09-05-buy-used.png`、`v09-06-stock-regression.png`、`v09-07-save-load.png`、`report.json`。
 
-验收过程中发现并被测试锁定的产品 bug：从政府设备库存买设备后，存档校验报“成交 1 超过供应 0”。根因是 `buyNewEquipment` 的政府分支只记 `sold/demand`，未把政府储备释放计入 `supply`；修复为 `ledger.supply += affordable`，并新增 `tests/equipment-market.test.ts` 回归。
-
-## 7. 72 个月固定条件观察（任务书第八节；种子 20261101、玩家无操作、单次运行）
+## 7. 72 个月固定条件观察（种子 20261101、玩家无操作、默认 AI）
 
 数据来自 `npx tsx scripts/economy-v09-report.ts --months=72`。三城顺序均为岚港 / 铁谷 / 青原。
 
 | 观察点 | 岚港 | 铁谷 | 青原 |
 | --- | --- | --- | --- |
-| t1 人口 | 600,145 | 430,127 | 320,083 |
-| t1 失业率 | 91.8% | 91.3% | 91.1% |
-| t1 月 GDP | 2.40 亿 | 1.86 亿 | 1.78 亿 |
-| t1 居民消费 / 期望 | 3.35 / 9.94 亿 | 2.60 / 7.14 亿 | 1.95 / 5.32 亿 |
+| t1 人口 / 就业 | 600,145 / 38,792 | 430,127 / 29,330 | 320,083 / 24,003 |
+| t1 失业率 | 91.9% | 91.5% | 90.6% |
+| t1 月 GDP | 2.38 亿 | 1.84 亿 | 1.79 亿 |
+| t1 居民消费 / 期望 | 3.47 / 9.94 亿 | 2.43 / 7.13 亿 | 1.90 / 5.32 亿 |
+| t1 食品需求 / 成交 | 4,025,810 / 4,025,810 | 2,902,214 / 2,797,200 | 2,223,436 / 1,226,880（进口 829,870） |
 | t1 企业 / 设备 | 5 / 17 台 | 6 / 12 台 | 6 / 23 台 |
-| t12 失业率 | 98.0% | 96.8% | — |
-| t12 月 GDP | 2100.7 万 | 1744.5 万 | — |
-| t12 负债率 | 35.5% | 46.7% | — |
-| t24 失业率 | 98.6% | 98.1% | 98.2% |
-| t24 月 GDP | 2100.2 万 | 1680.0 万 | 1454.9 万 |
-| t24 负债率（风险） | 68.9%（watch） | 67.1%（watch） | 62.8%（watch） |
-| t24 居民消费 | 0 | 0 | 583.0 万（期望 8.67 亿） |
-| t36 失业率 | 98.8% | 98.4% | 98.7% |
-| t36 月 GDP | 2100.0 万 | 1680.0 万 | 966.0 万 |
-| t36 负债率（风险） | 87.6%（high） | 82.4%（high） | 47.1%（normal） |
-| t36 计划产量 | 93,890 | 59,680 | 192 |
-| t72 就业 / 失业率 | 5,419 / 98.9% | 5,083 / 98.5% | 2,801 / 98.9% |
-| t72 月 GDP | 2100.0 万 | 1680.0 万 | 966.0 万 |
-| t72 负债（占 12 月 GDP） | 1.14 亿（45.0%） | 1.09 亿（54.2%） | 5,929.5 万（51.2%） |
-| t72 居民消费 / 期望 | 0 / 16.30 亿 | 0 / 11.71 亿 | 0 / 8.74 亿 |
-| t72 企业 / 设备 | 5 / 8 台 | 5 / 17 台 | 4 / 7 台 |
-| t72 计划产量 | 50,372 | 80,735 | 489 |
-| t72 居民现金 / 存款 | 30.64 / 26.52 亿 | 24.67 / 26.52 亿 | 15.58 / 26.52 亿 |
+| t12 失业率 | 97.2% | 94.4% | 95.5% |
+| t12 月 GDP | 3496.3 万 | 1878.3 万 | 1018.7 万 |
+| t12 负债率 | 25.6% | 47.0% | 45.9% |
+| t12 食品需求 / 成交 | 797,923 / 0 | 600,194 / 0 | 516,383 / 0 |
+| t12 企业现金 / 欠薪 | 0 / 3677.0 万 | 47.6 万 / 7182.2 万 | 26.0 万 / 4444.4 万 |
+| t24 失业率 | 98.4% | 97.3% | 98.1% |
+| t24 月 GDP | 2115.4 万 | 1698.5 万 | 1907.0 万 |
+| t24 负债率 | 43.4% | 64.4% | 52.1% |
+| t24 历史破产 | 1 次（tick 17） | 1 次（tick 15） | 1 次（tick 15） |
+| t36 失业率 | 98.8% | 98.3% | 98.4% |
+| t36 月 GDP | 2100.0 万 | 1680.1 万 | 1039.3 万 |
+| t36 负债率（风险） | 55.9%（watch） | 94.5%（high） | 9.9%（normal） |
+| t36 历史破产 | 2 次（17/29） | 2 次（15/27） | 2 次（15/34） |
+| t72 就业 / 失业率 | 5,259 / 98.9% | 4,438 / 98.7% | 2,795 / 98.9% |
+| t72 月 GDP / 近 12 月 GDP | 2100.0 万 / 2.52 亿 | 1683.0 万 / 2.04 亿 | 966.8 万 / 1.16 亿 |
+| t72 负债（占 12 月 GDP） | 9671.4 万（38.4%） | 1.21 亿（59.6%） | 4194.8 万（36.1%） |
+| t72 居民消费 / 期望 | 0 / 16.29 亿 | 0 / 11.71 亿 | 18 元 / 8.74 亿 |
+| t72 食品需求 / 成交 | 687,502 / 0 | 713,375 / 0 | 583,316 / 0 |
+| t72 企业 / 设备 | 4 / 12 台 | 8 / 13 台 | 7 / 12 台 |
+| t72 居民现金 / 存款 | 26.72 / 11.31 亿 | 25.72 / 8.23 亿 | 18.57 / 6.50 亿 |
+| t72 历史破产 | 5 次（17/29/41/54/67） | 6 次（15/27/37/49/59/67） | 5 次（15/34/46/56/68） |
 
 其他：
 
-- 银行 t72：存款 26.52 亿、贷款未偿 2650.2 万、合同 133（active 3 / defaulted 109 / repaid 21）；居民贷款合同 181 笔。
-- 设备市场 t72：政府库存 farm 89 / industry 182 / energy 49（初始 24/60/16），二手挂单 0；本月新设备成交 0。
-- 岚港食品厂：t1 员工 24,840、设备 12 台、计划 3,125,116、现金 2.58 亿；**tick 7 倒闭**。
-- 创办合计 17 家（appliance 10 / agriculture 3 / garment 2 / utility 1 / metal 1），倒闭 20 家；72 个月内三城均未政府破产（风险档在 t24–t36 达到 watch/high，t72 回落至 normal/watch/watch）。
+- 银行 t72：存款 26.04 亿、贷款未偿 3169.8 万、合同 279（active 7 / defaulted 247 / repaid 25）；居民贷款合同 58 笔（消费贷累计发放 7793.6 万，未偿 0）。
+- 设备市场 t72：政府库存 farm 77 / industry 189 / energy 49（**世界共享池**，配置值为每城 24/60/16 × 3 城 = 72/180/48 起；清算移交使总量略增），二手挂单 0，本月新设备成交 0。
+- 岚港食品厂：t1 员工 24,840、设备 12 台、产能 4,046,400、计划 3,075,264、现金 2.58 亿；**tick 8 倒闭**。
+- 创办合计 22 家（garment 4 / appliance 7 / utility 2 / agriculture 5 / metal 3 / fiber-farm 1），倒闭 20 家；清算减免 0；72 月内三城各破产 5/6/5 次（当前均 solvent）。
+- 消费四层（t1 岚港）：成交 3.47 亿 / 期望 9.94 亿 / 有本地供给但资金不足 3 元 / 预算缩量未形成购买 6.47 亿 / 有预算但缺货 0.1 件≈7 元。**“预算缩量”是 affordability 缩放（收入低），不是供给不足；“有预算但缺货”才是供给缺口。**
 
-### 7.1 结构性判断（必须如实记录）
+### 7.1 消费归零不是没钱：资金与供给的分离证据
 
-v0.9 的机制都生效了，但没有逆转 v0.8.3 诊断出的结构性缺口；本轮数据把“为什么”进一步坐实：
+- t12 三城消费 0，但居民现金 14.34/12.98/11.82 亿、存款 10.66/7.76/6.21 亿；t72 居民现金 26.72/25.72/18.57 亿、存款 11.31/8.23/6.50 亿。
+- 同期“有本地供给但资金不足”= 0（t12/t72 三城均为 0），而“有预算但缺货”= 食品需求全额（t12 岚港 79.8 万件、t72 岚港 68.8 万件）。因此**不是居民不愿/不能付钱，而是市场上没有食品**。
+- 居民预算 = min(现金, 0.8×上月税后收入 + 5%×现金)。失业后收入归零，但现金仍在累积（无消费渠道），预算并未归零；affordability 缩放使有效需求随收入下降——这是“预算缩量未形成购买”的来源。
 
-1. **需求被 ×5，产能没有**：t1 三城食品需求约 15.6M/月、本地产能约 6.4M/月；grain 需求约 9.7M、产能约 4.4M。设备链给了“可扩产”的路径，但设备企业自身也缺原料/资金，实际只卖出少量新设备（政府库存 24/60/16 台始终未能持续转化）。
-2. **计划仍以已实现销量为锚**：销量崩塌后，计划按 ±20% 与 5% 维护下限收缩，看不到跨城未满足需求，因此不会主动为缺口扩产；t36 三城计划产量 93,890 / 59,680 / 192，t72 仍只有 50,372 / 80,735 / 489。
-3. **创业受“真实出资 + 设备 + 首月工资”约束**：建议启动资本 14M–108M，居民投资实体现金在 t1 约 2.66 亿、t5 约 1.02 亿、**t6 起为 0**（被创办出资与股票买入耗尽），`chooseFoundingFounder` 返回 null；17 家创办集中在前几个月，t6 之后基本停摆。
-4. **工资—现金—清算—失业回路仍在**：企业现金在 t12 已为 0、欠薪 2237 万；t36 紧急裁员 9/36/25；设备随清算移交政府（t72 企业设备 8/17/7 台），失业率维持 98%+，需求侧无法恢复。
-5. **消费归零不是因为居民没钱**：t72 居民现金 30.64 / 24.67 / 15.58 亿、存款 26.52 亿，但可支配收入（工资/救济）归零；救济金发放受财政约束（t72 累计税收入账仅 3584.4 / 2936.0 / 1659.9 万），消费预算随之归零。**储蓄→消费/投资的通道仍未打通**，这是下一版最值得优先处理的环节之一。
-6. **政府债务没有爆掉，但靠的是“分母缩小”**：t36 负债率 87.6%/82.4%/47.1% 属于 high，t72 回落到 45.0%/54.2%/51.2%，同时 GDP 已降至峰值的 1/10 左右；72 月内未触发破产不代表财政健康。
+### 7.2 食品链断裂时间线（逐月证据）
 
-**结论：本轮 12 节机制是“把缺的工具补上”，不是“调参让经济不死”。** 72 月仍崩溃，且崩溃路径与 v0.8.3 诊断一致；若要进入“可持续增长”，下一轮需要动的是结构（需求—产能匹配、储蓄→投资/消费通道、计划锚点、清算与再就业），而不是继续微调单个系数。此为已知问题，不隐藏。
+1. **t1 正常**：岚港食品需求 4.03M 全部成交；lp-food 期初谷物 2.34M、产 3.13M 食品；青原谷物库存 6.67M；三城食品有进口/出口。
+2. **t2 起现金流锁死**：企业初始现金 = 月工资 × 1.6（`initialCashWageMonths`），采购预算 = max(0, cash − 1 个月工资预留)。首月销售回款尚未覆盖第二月工资 + 原料，`cashTight` 触发生产计划紧急下调（base × 0.4）+ ±20% 平滑；`materialSupportedOutput` 同步收缩。
+3. **t2–t5 谷物链条收缩**：唯一农业企业 gf-grain（青原）因 cashTight 连续下调计划（4.14M → 3.32M → 1.33M → 1.91M → 0.31M）；贸易合同/政府协议在旧顺序下先于市场抽走库存（本轮已改为“市场采购优先、合同补足”，但企业预算为 0 时仍买不到），市场谷物供给接近 0。
+4. **t4–t5 食品厂断粮**：lp-food 采购预算被工资预留吃掉（现金 2.57 亿 → 1.43 亿 → 1810 万），t4 起本地食品成交 0（供给曾被青原/铁谷跨城买走——本轮已修两阶段本地优先），t5 起食品产量骤降。
+5. **t8 lp-food 倒闭**；t12 三城食品供给 0、需求 798K/600K/516K 全部缺货；企业现金 0、欠薪 3677/7182/4444 万，紧急裁员 6/216/0。
+6. **之后进入稳定低水平**：失业率 98%+，居民收入归零，食品需求数量随 affordability 缩到 60–70 万件/月，企业因无销售/无原料长期计划≈0，t72 月 GDP 仅剩 966.8 万–2100 万。
+
+### 7.3 设备链缺口：资本品没有“可被看见的需求”
+
+- 72 个月内**没有出现设备制造企业**：创办行业只有 garment/appliance/utility/agriculture/metal/fiber-farm。原因不是资金，而是创业评分读取的是“消费品市场”需求；设备商品由 `buyNewEquipment` 的企业采购形成，初始政府储备又能满足少量扩产，因此设备商品的 `city.market.demand` 长期为 0，评分 `demand/profit` 为 0，永远达不到 `FOUNDING_MIN_SCORE = 20`。
+- 结果：设备只能来自政府库存（世界共享池 72/180/48）与清算回收（t72 77/189/49，几乎不消耗），真实新设备成交 0；任务书 ④ 的“设备企业”在机制上存在，但默认世界里没有企业会选择进入。
+- 这是下一轮必须修的结构问题（可在创业评分中引入资本品订单/政府储备消耗信号），本轮未擅自改规则。
+
+### 7.4 创业停摆
+
+- 创办 22 家集中在前 6 个月；建议启动资本 1400 万–1.08 亿，而居民可投资实体现金 t6 起为 0（被前几轮创办出资与股票买入耗尽）；`chooseFoundingFounder` 之后长期返回 null。
+- 本轮没有放松出资要求（不伪造成交/资金）。
+
+### 7.5 政府破产与债务
+
+- 三城在 72 月内分别破产 5/6/5 次（t72 均 solvent）；t36 铁谷负债率 94.5%（high）后于 t37 破产并被勾销，t72 回落到 59.6%。
+- **不能把 t72 的 38.4%/59.6%/36.1% 解读为“财政改善”**：它是多次破产勾销 + 债务重发 + GDP 分母缩小的共同结果；报告已同时展示历史破产次数、勾销、当前负债与 12 月 GDP。
+
+**结论：本轮按验收要求修复了 7 项机制问题并补了回归测试，但默认世界的经济仍然崩溃；崩溃主因是“人口 ×5 与私营产能/岗位 1×”“销量锚定计划 + 工资预留吃光采购预算”“资本品需求信号缺失”三条结构性规则，而不是某一处代码 bug。** 依据任务书“不要为达成某个测试数字取消破产 / 改用户明确规则前先报告冲突”，本轮未改这些规则，详见第 9 节。
 
 ## 8. 首版暂定参数（集中配置）
 
-`src/data/config.ts`（全部为可替换演示值，非最终策划）：
+`src/data/config.ts`：
 
 - 人口：`initialPopulationMultiplier 5`、`initialNonLaborShare 0.2`、`participationRate 0.8`。
 - 企业与创办：`maxCompaniesPerCity 160`、`maxFoundingsPerCityMonth 2`、`foundingCooldownMonths 0`。
 - 生产计划：`salesLookbackMonths 3`、`targetInventoryMonths 0.5`、`maxUp/DownAdjust 0.2`、`emergencyDownAdjust 0.6`、`stuckInventoryMonths 2`、`initialSalesFactor 0.8`、`minOutputRatio 0.05`。
-- 设备：目录价 farm 12 万 / industry 20 万 / energy 16 万、`capacityPerUnit 300,000`、`usedPriceFactor 0.65`、`liquidationPriceFactor 0.45`、政府库存 24/60/16、`maxBuyUnitsPerMonth 60`。
-- 工资/奖金/裁员：`bonusEveryMonths 3`、`bonusProfitShare 0.1`、`bonusReserveWageMonths 2`、`bonusDebtServiceMonths 1`；`maxMonthlyLayoffRate 0.08`、`emergencyLossMonths 2`、`emergencyCashWageMonths 1`、`emergencyLayoffShare 0.3`。
-- 创业：`FOUNDING_MIN_SCORE = 20`（`src/simulation/companies/founding.ts`）。
+- 设备：目录价 farm 12 万 / industry 20 万 / energy 16 万、`capacityPerUnit 300,000`、`usedPriceFactor 0.65`、`liquidationPriceFactor 0.45`、政府库存（每城配置，运行时为世界共享池）24/60/16、`maxBuyUnitsPerMonth 60`。
+- 工资/奖金/裁员：`initialCashWageMonths 1.6`、`wageReserveMonths 1`（采购预留）；`bonusEveryMonths 3`、`bonusProfitShare 0.1`、`bonusReserveWageMonths 2`、`bonusDebtServiceMonths 1`；`maxMonthlyLayoffRate 0.08`、`emergencyLossMonths 2`、`emergencyCashWageMonths 1`、`emergencyLayoffShare 0.3`。
+- 创业：`FOUNDING_MIN_SCORE = 20`。
 
-## 9. 未完成项与已知限制
+## 9. 未解决项与需要用户决策的冲突
 
-- **经济仍崩溃**（见第 7 节）：机制完整但结构缺口未闭合；本轮未通过改参数掩盖。
-- 设备新机成交在 t1 之后接近 0：设备企业自身受原料/资金/计划锚点约束，政府库存消耗后没有补货，二手市场无成交（企业缺现金）。
-- 创业在 t6 后停摆：投资实体现金耗尽；居民 30 亿+现金无法转化为实体投资（储蓄→投资通道）。
-- 消费归零：失业救济受财政约束，居民可支配收入归零；储蓄未回流消费。
-- 银行仍为负利差、顺周期（存款利息支出 > 贷款利息收入），见 v0.8.3 诊断；本轮未改银行规则。
-- 桌面验收为 Xvfb 无头截图，Windows 真机表现需按第 10 节复验；1100×700 仅验证无横向溢出，未做全分辨率矩阵。
-- 72 月观察为单次固定种子，不是统计显著性结论；跨种子稳定性未验证。
+1. **人口 ×5 vs 私营岗位/产能 1×（规则冲突）**：任务书要求人口 ×5 且公共岗位不乘 5，但未要求私营企业岗位/产能同步放大。默认开局失业率即 91%+，工资收入支撑不了 5× 消费需求。曾实验把私营岗位/产能 ×5：t1 失业率 64.4%、GDP 10.22 亿、消费 5.80/10.80 亿、食品成交 6.67M，但 t1 计划 20.5M 远超需求 → 库存 12.1M，t12 失业回升 95.4%、t72 98.3% 仍崩溃。该实验已回退，是否采纳需用户确认。
+2. **生产计划以销量为锚（规则冲突）**：任务书 ⑤ 明确“近 3 月销量 + 目标库存 + ±20%”，但该锚点在跨城需求存在时看不到缺口，会持续压缩计划。建议下一版把“未满足需求/跨城订单”作为额外目标信号；需用户确认是否修改 ⑤。
+3. **初始流动资金 1.6 个月工资（数值）**：首月无销售 + 采购需预留 1 个月工资，必然 cashTight；实验加到 3 个月只延后崩溃约 3 个月，说明不是万能药，但 1.6 是否合理需策划确认。
+4. **创业启动资本 1400 万–1.08 亿（数值）**：居民可投资实体现金总量不足以支撑持续创办；是否放宽出资/引入外部投资需用户确认。
+5. **资本品需求信号缺失（机制）**：设备商品无消费品市场需求，创业评分看不到；“设备企业”在默认世界不会出现。建议下一版让创业评分读取设备订单/政府储备消耗。
+6. **经济仍崩溃**：本轮不以调参掩盖；第 7 节给出完整证据。
+7. **桌面验收为 Xvfb 无头截图**，Windows 真机表现需按第 10 节复验；1100×700 仅验证无横向溢出，未做全分辨率矩阵。
+8. **72 月观察为单次固定种子**，不是统计显著性结论；跨种子稳定性未验证。
+9. 政府设备库存是**世界共享池**（配置为每城值，运行时合并为 3 城总量），任何城市都可消耗其他城市份额；是否符合任务书“政府初始库存”语义需确认（当前在报告与验收中按共享池解释）。
+10. 企业清算时名下政府债券已按持股转给股东（无兼容股东则标记 redeemed），`lifecycle` 仍保留极少量指向已退出企业的历史持债（均 redeemed，无 active 孤儿）；建议后续统一清理或在 UI 做容错。
 
 ## 10. Windows 复验步骤
 
@@ -255,12 +275,7 @@ node_modules\electron\dist\electron.exe scripts\acceptance-v09.cjs
 
 ## 11. Git
 
-- 基线：`3d714c6`（分支 `feature/stock-market-ui-tax`）
-- 本版提交（分阶段）：
-  1. `a13b4a7` feat(sim)：人口 ×5、真实设备链、生产计划、奖金裁员、创业评分、GDP 公共服务、存档 v9、设备市场供应修复与测试
-  2. `46a98fe` feat(ui)：企业设备/生产计划面板与人口“需求 vs 成交”
-  3. `740aeab` test(acceptance)：v0.9 桌面验收脚本、72 月报告脚本与证据（12/12）
-  4. 本文档与 README/版本号（docs 提交）
-- 最终本地/远程 SHA、工作区状态：见提交推送后的交付回复
-- 测试：85 文件 / 677 项通过；`tsc` 与 `npm run build` 通过；桌面 12/12、0 控制台错误。
+- 基线：`3d714c6`（v0.8.3）；第一轮 v0.9 交付：`a13b4a7` → `46a98fe` → `740aeab` → `f942cc9`。
+- 本轮（验收修复）按阶段提交：sim 修复与测试、报告脚本与证据、文档/版本。
+- 最终本地/远程 SHA、工作区状态、测试与桌面结果：见本次交付回复。
 - 未合并 main、未 force、未改写已推送历史。
