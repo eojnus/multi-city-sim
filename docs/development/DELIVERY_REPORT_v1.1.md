@@ -217,5 +217,10 @@ npx tsx scripts\economy-v09-report.ts --months=72 --checkpoints=1,6,12,24,36,72
 ## 11. Git
 
 - 开工基线：`c50e248cdd2823ae215e3989ebae2854962a0886`（v1.0，远程一致）。
-- 本轮提交与最终 SHA、远程状态、工作区状态见文末交付回复与 `git log --oneline c50e248..HEAD`；未合并 main（`main` 仍 `6c45000`）、未 force、未 rebase/amend。
+- 本轮提交（`git log --oneline c50e248..HEAD`）：
+  - `0c7cac6` feat(sim)：v1.1 经济循环继续修复（src + 测试，29 文件改动、8 个新测试文件）
+  - `e5f7dc9` test(acceptance)：v1.1 报告脚本字段与桌面验收证据
+  - `2274b31` docs：v1.1 交付报告、README 与版本 1.1.0
+- 最终 SHA：`2274b31917a63999b2e1c2f683ef19d738703521`；远程 `feature/stock-market-ui-tax` 同 SHA，`main` 仍 `6c45000efc4c406d30e22c0a12bd066fc2df61f7`，工作区干净。
+- 未合并 main、未 force、未 rebase/amend；`git grep github_pat_` 无命中。
 - 推送使用细粒度 PAT（仅环境变量，不落盘，临时文件已删除）；推送后建议在 GitHub 撤销该 token。
