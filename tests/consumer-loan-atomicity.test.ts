@@ -167,10 +167,9 @@ describe('居民消费贷与商品成交原子一致（验收问题 3）', () =>
     const after = captureSaleState(world, city, ledgers);
     const revenueBefore = before.companies.reduce((sum, company) => sum + company.revenue, 0);
     const revenueAfter = after.companies.reduce((sum, company) => sum + company.revenue, 0);
-    expect(revenueAfter - revenueBefore).toBeCloseTo(
-      round2(entry!.spend * (1 - CONFIG.tax.consumptionTaxRate)),
-      2,
-    );
+    // 消费税额按每笔成交分别取整，汇总后与“成交额×(1−税率)”允许 ≤0.05 的舍入误差。
+    const expectedRevenue = round2(entry!.spend * (1 - CONFIG.tax.consumptionTaxRate));
+    expect(Math.abs(revenueAfter - revenueBefore - expectedRevenue)).toBeLessThanOrEqual(0.05);
   });
 
   it('授信不足时只按真实可用额度放款，成交额与放款额一致，其余记资金缺口', () => {
@@ -226,18 +225,18 @@ describe('居民消费贷与商品成交原子一致（验收问题 3）', () =>
       .filter((company) => company.cityId === city.id)
       .reduce((total, company) => total + company.lastMonth.revenue, 0);
     // v0.8：居民消费含税标价，卖方按 95% 净额入账（税 5% 归消费城市财政）。
-    expect(revenueAfter - revenueBefore).toBeCloseTo(
-      round2(entry!.spend * (1 - CONFIG.tax.consumptionTaxRate)),
-      2,
-    );
+    // 消费税额按每笔成交分别取整，汇总后与“成交额×(1−税率)”允许 ≤0.05 的舍入误差。
+    const expectedRevenue = round2(entry!.spend * (1 - CONFIG.tax.consumptionTaxRate));
+    expect(Math.abs(revenueAfter - revenueBefore - expectedRevenue)).toBeLessThanOrEqual(0.05);
   });
 
   it('实际成交额低于单笔最低贷款额时不得放款、不得成交', () => {
     const { world, city, group, ledgers } = marketSetup();
     setGroupDeposits(world, group, 2_000);
     // 只留 1 单位食品库存（约 52 信用点，低于最低贷款额 100）。
+    // v0.9 验收问题六：两阶段后 B 阶段可用消费贷跨城补缺口；为保证“无额外供给”这一前提，
+    // 这里清空所有城市的消费品库存，只保留本城 1 单位食品。
     for (const company of world.companies) {
-      if (company.cityId !== city.id) continue;
       for (const goodId of CONSUMER_GOODS) company.inventory[goodId] = 0;
     }
     const seller = world.companies.find(
@@ -415,7 +414,10 @@ describe('居民消费贷与商品成交原子一致（验收问题 3）', () =>
     const financed = entry!.loanFinanced ?? 0;
     expect(financed).toBeGreaterThan(0);
     const cashSpent = round2(cashStart - group.cash);
-    expect(entry!.spend).toBeCloseTo(round2(cashSpent + financed), 2);
+    const withdrawn = entry!.depositWithdrawn ?? 0;
+    // v0.9 验收一：支付顺序为 现金 → 存款提取（≤月初存款5%）→ 消费贷，
+    // 故现金变动里还包含存款提取；成交额 = 现金支付 + 存款提取 + 放款。
+    expect(entry!.spend).toBeCloseTo(round2(cashSpent + withdrawn + financed), 2);
     const loan = (world.householdFinance?.loans ?? [])[0];
     expect(loan).toBeDefined();
     expect(loan!.principal).toBeCloseTo(financed, 2);

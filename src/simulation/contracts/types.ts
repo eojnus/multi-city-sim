@@ -153,8 +153,15 @@ export interface Company {
   ai: CompanyAiState;
   /** v0.9：设备资产（按行业类别计数的可计量资产，不是现金或商品库存）。 */
   equipment: EquipmentAssets;
-  /** v0.9：设备产能（缓存值，权威 = equipment × 单价产能 × 技术系数）。 */
+  /** v0.9：设备产能（缓存值，权威 = equipment × 单价产能 × 技术系数 + 迁移余量）。 */
   equipmentCapacity: number;
+  /**
+   * v0.9：v8 旧档迁移余量（显式存储）。
+   *
+   * 旧档只有总产能、没有设备台数，按整台设备映射后可能有余数。余量只由存档迁移写入：
+   * 不随设备买卖转移、企业清算时随企业消失；企业产能 = 设备推导产能 + 本余量。
+   */
+  equipmentCapacityRemainder: number;
   /** v0.9：最近若干月实际销量（含出口），用于生产计划的销售参考量。 */
   salesHistory: number[];
   /** v0.9：本月生产计划（计划产量、设备/劳动约束与原因），供生产模块与界面读取。 */
@@ -218,6 +225,27 @@ export interface EquipmentMarketState {
   /** 二手设备出售委托（按企业、类别、价格）。 */
   offers: UsedEquipmentOffer[];
   lastMonthSold: EquipmentAssets;
+  /**
+   * 本月设备成交的市场账本增量（按城市+商品累积，旧存档可缺省）。
+   *
+   * 设备采购发生在 `createWorldLedgers` 之前（tick 内的经营计划/创办企业）或 tick 之间
+   * （玩家操作），此时还没有当月 MarketLedger；若直接写 city.market 会被 step 12 的
+   * finalizeMarkets 覆盖，导致设备商品需求/成交永远为 0。因此成交只记录增量，由
+   * createWorldLedgers 合并进对应城市账本后清空。
+   */
+  pendingLedger?: EquipmentLedgerIncrement[];
+}
+
+/** 设备成交对市场账本的增量（sold 同时计入 supply，保证 sold ≤ supply）。 */
+export interface EquipmentLedgerIncrement {
+  cityId: string;
+  goodId: GoodId;
+  /** 本月新增需求台数（含跨城进口需求）。 */
+  demand: number;
+  /** 本月本地成交台数（跨城进口不计 sold，只计 intercityImported）。 */
+  sold: number;
+  /** 跨城进口台数。 */
+  intercityImported: number;
 }
 
 export interface MarketState {

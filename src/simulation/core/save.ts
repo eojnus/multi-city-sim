@@ -12,7 +12,7 @@ import { GOOD_IDS, createEmptyInventory } from '../companies/company';
 import { GOODS } from '../../data/demo-data';
 import {
   emptyEquipmentAssets,
-  equipmentFromCapacity,
+  equipmentFromLegacyCapacity,
   equipmentKindForSector,
 } from '../equipment/equipment';
 import { checkInvariants } from './invariants';
@@ -1099,6 +1099,12 @@ function validateCompany(value: unknown, index: number): string | null {
   }
   if (!isFiniteNumber(value.equipmentCapacity) || value.equipmentCapacity < 0) {
     return `企业 ${id}.equipmentCapacity 必须是非负数值`;
+  }
+  if (
+    !isFiniteNumber(value.equipmentCapacityRemainder) ||
+    value.equipmentCapacityRemainder < 0
+  ) {
+    return `企业 ${id}.equipmentCapacityRemainder 必须是非负数值`;
   }
   if (!Array.isArray(value.salesHistory) || value.salesHistory.some((entry) => !isFiniteNumber(entry))) {
     return `企业 ${id}.salesHistory 必须是数值数组`;
@@ -2756,13 +2762,15 @@ export function migrateWorldV8ToV9(raw: unknown): MigrationResult {
     const tech = city?.technology.productivityMultiplier ?? 1;
     if (!isRecord((company as unknown as Record<string, unknown>).equipment)) {
       const kind = equipmentKindForSector(company.sector, config);
-      const assets = emptyEquipmentAssets();
-      assets[kind] = Math.max(
-        0,
-        Math.round(company.capacity / Math.max(1, config.equipment.catalog[kind].capacityPerUnit * tech)),
-      );
-      company.equipment = assets;
+      // 旧档只有总产能：按整台设备向下取整映射，余量显式记入 equipmentCapacityRemainder，
+      // 保证迁移后 capacity = 设备推导产能 + 余量（不四舍五入导致后续重算跳变）。
+      const mapped = equipmentFromLegacyCapacity(company.capacity, tech, config, kind);
+      company.equipment = mapped.equipment;
       company.equipmentCapacity = round2(company.capacity);
+      company.equipmentCapacityRemainder = mapped.remainder;
+    }
+    if (!isFiniteNumber(company.equipmentCapacityRemainder) || company.equipmentCapacityRemainder < 0) {
+      company.equipmentCapacityRemainder = 0;
     }
     if (!Array.isArray(company.salesHistory)) company.salesHistory = [];
     if (!Array.isArray(company.recentProfits)) company.recentProfits = [];
@@ -2782,7 +2790,13 @@ export function migrateWorldV8ToV9(raw: unknown): MigrationResult {
       initialStock: emptyEquipmentAssets(),
       offers: [],
       lastMonthSold: emptyEquipmentAssets(),
+      pendingLedger: [],
     };
+  }
+
+  // v9 布局中的设备成交账本增量（旧档没有，保持为空）。
+  if (!Array.isArray(world.equipmentMarket.pendingLedger)) {
+    world.equipmentMarket.pendingLedger = [];
   }
 
   world.log.push({
@@ -2807,6 +2821,22 @@ function validateEquipmentMarket(value: unknown): string | null {
   }
   if (!isRecord(value.lastMonthSold)) return 'world.equipmentMarket.lastMonthSold 无效';
   if (!Array.isArray(value.offers)) return 'world.equipmentMarket.offers 必须是数组';
+  if (value.pendingLedger !== undefined) {
+    if (!Array.isArray(value.pendingLedger)) {
+      return 'world.equipmentMarket.pendingLedger 必须是数组';
+    }
+    for (const entry of value.pendingLedger) {
+      if (!isRecord(entry)) return 'world.equipmentMarket.pendingLedger 条目无效';
+      if (typeof entry.cityId !== 'string' || typeof entry.goodId !== 'string') {
+        return 'world.equipmentMarket.pendingLedger 条目缺少城市或商品';
+      }
+      for (const field of ['demand', 'sold', 'intercityImported']) {
+        if (!isFiniteNumber(entry[field]) || (entry[field] as number) < 0) {
+          return `world.equipmentMarket.pendingLedger.${field} 必须是非负数值`;
+        }
+      }
+    }
+  }
   for (let index = 0; index < value.offers.length; index += 1) {
     const offer = value.offers[index];
     if (!isRecord(offer)) return `设备委托 [${index}] 无效`;

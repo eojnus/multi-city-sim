@@ -1,6 +1,7 @@
 import type {
   City,
   Company,
+  EquipmentKind,
   GoodId,
   TradeFlow,
   WorldState,
@@ -226,4 +227,67 @@ export function executeIntercityPurchase(
   }
 
   return { qty: round2(bought), spend: round2(spend) };
+}
+
+// ---------------------------------------------------------------- v0.9 设备跨城采购
+
+/** 其他城市设备企业的可售清单（价格、运输加成与商品跨城完全同口径）。 */
+export function intercityEquipmentOffers(
+  world: WorldState,
+  buyerCity: City,
+  kind: EquipmentKind,
+  config: DemoConfig,
+  excludeCompanyId?: string,
+): IntercityOffer[] {
+  const goodId = config.equipment.catalog[kind].goodId;
+  return intercityOffers(world, buyerCity, goodId, config, excludeCompanyId);
+}
+
+/**
+ * 记录一笔跨城设备成交。
+ *
+ * 设备购买后立即计入企业设备资产，不像商品那样进入买方库存；因此买方城市账本只记
+ * “跨城进口 + 支出 + 需求”，不重复记 sold（成交台数由 equipmentMarket 与设备资产追踪）。
+ * 卖方所得仍走既有运输容量结算：成交时买方全额付款，期末按城市对容量统一扣减并退回差额
+ * （复用 settleTransportMonth 的既有规则，不另造运费/回滚模型）。
+ */
+export function recordIntercityEquipmentPurchase(
+  world: WorldState,
+  buyer: Company,
+  seller: Company,
+  kind: EquipmentKind,
+  units: number,
+  grossValue: number,
+  config: DemoConfig,
+): void {
+  const goodId = config.equipment.catalog[kind].goodId;
+  const buyerCity = world.cities.find((city) => city.id === buyer.cityId);
+  const corridor = corridorKey(seller.cityId, buyer.cityId);
+  recordIntercitySale(world, {
+    tick: world.time.tick,
+    path: 'intercityPurchase',
+    fromCityId: seller.cityId,
+    toCityId: buyer.cityId,
+    corridorKey: corridor,
+    sellerCompanyId: seller.id,
+    buyerCompanyId: buyer.id,
+    good: goodId,
+    qty: units,
+    grossValue,
+  });
+  // 市场账本增量由 equipment.ts 记入 equipmentMarket.pendingLedger，
+  // 再由 createWorldLedgers 合并（直接写 city.market 会被 finalizeMarkets 覆盖）。
+  world.lastTick.tradeFlows.push({
+    routeId: `market:${seller.cityId}:${buyer.cityId}`,
+    tick: world.time.tick,
+    fromCityId: seller.cityId,
+    toCityId: buyer.cityId,
+    fromCompanyId: seller.id,
+    toCompanyId: buyer.id,
+    good: goodId,
+    qty: units,
+    unitPrice: units > 0 ? round2(grossValue / units) : 0,
+    value: grossValue,
+    path: 'intercityPurchase',
+  });
 }

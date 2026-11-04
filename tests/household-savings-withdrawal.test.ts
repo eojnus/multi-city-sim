@@ -107,7 +107,10 @@ describe('居民存款提取消费（v0.9 T1）', () => {
 
     expect(entry.budget).toBeCloseTo(26, 2);
     expect(entry.spend).toBeGreaterThan(0);
-    expect(entry.spend).toBeCloseTo(entry.budget, 2);
+    // 预算只是有效需求缩放口径（见 consumer.ts 顶部支付顺序说明）：成交按 0.01 网格舍入，
+    // 可能比预算高/低 0.01；保留“提取额 = 真实资金缺口”的守恒断言（下一行）。
+    expect(entry.spend).toBeLessThanOrEqual(round2(entry.budget + TOL));
+    expect(entry.spend).toBeGreaterThanOrEqual(round2(entry.budget - TOL));
     // 提取额 = 真实资金缺口（预算由提取补足），且不超过基本需求成本 26。
     expect(withdrawn).toBeGreaterThan(0);
     expect(withdrawn).toBeCloseTo(entry.spend, 2);

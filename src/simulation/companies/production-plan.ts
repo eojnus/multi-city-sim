@@ -127,17 +127,16 @@ export function recomputeProductionPlan(
   const planCfg = config.production.plan;
   const city = world.cities.find((entry) => entry.id === company.cityId);
 
-  // ---- 1) 维护销量历史：上一完整月的实际销量（含出口） ----
+  // ---- 1) 维护销量历史：上一完整月的实际销量（含出口、跨城合同） ----
   if (!Array.isArray(company.salesHistory)) company.salesHistory = [];
   const prev = company.previousMonth;
   const lastMonthSales = round2((prev?.sold ?? 0) + (prev?.exported ?? 0));
-  const hadActivity =
-    (prev?.produced ?? 0) > 0.01 ||
-    (prev?.sold ?? 0) > 0.01 ||
-    (prev?.exported ?? 0) > 0.01 ||
-    (prev?.revenue ?? 0) > 0.01;
-  // 新开局首月 previousMonth 全为 0：不计入历史，避免把“尚未开始经营”当成零销量月份。
-  if (hadActivity || company.salesHistory.length > 0) {
+  // 记录口径（v0.9 验收问题六）：公司第一次真正卖出货之前的月份不计入销量历史。
+  // 开局时下游企业还有期初库存、区域贸易尚未启动，“有产量但还没有成交”的月份会
+  // 被误读成“需求为零”，进而把销量参考量压到 0、再被 ±20% 平滑锁死（岚港食品厂 t4 起
+  // 缺粮即是此链）。首次成交之后的零销量月份仍然照常记录，代表真实的需求消失。
+  const startedSelling = (company.salesHistory ?? []).some((entry) => entry > 0.01);
+  if (lastMonthSales > 0.01 || startedSelling) {
     company.salesHistory.push(lastMonthSales);
     while (company.salesHistory.length > planCfg.salesLookbackMonths) company.salesHistory.shift();
   }

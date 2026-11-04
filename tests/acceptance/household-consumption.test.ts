@@ -130,27 +130,37 @@ describe('AC-D03 无收入但有积蓄', () => {
 });
 
 describe('AC-D04 四层分账', () => {
-  it('成交 ≤ 现金预算 + 实际放款；资金缺口/供给缺口非负且与成交互补', () => {
+  it('成交 = 现金支付 + 存款提取 + 实际放款，且 ≤ 可用资金；资金缺口/供给缺口非负且与成交互补', () => {
     const world = newWorld(0);
     stockInventory(world, 'lanport', FOOD, 10_000);
     const group = pickGroup(world);
     zeroDeposit(world, group);
     group.cash = 3_000;
     group.lastMonth.income = 1_000;
+    const cashBefore = group.cash;
     const ledgers = createWorldLedgers(world);
     const result = runConsumerMarket(world, cityById(world, 'lanport'), ledgers.lanport!, NO_LOAN);
     const byGroup = result.byGroup![group.id]!;
-    expect(byGroup.spend).toBeLessThanOrEqual(byGroup.budget + (byGroup.loanFinanced ?? 0) + 0.01);
+    // v0.9 验收一：预算只是“有效需求缩放口径”，不是资金硬上限——本月闲置现金可先用于真实成交；
+    // 支付顺序为 现金 → 存款提取（≤月初存款5%）→ 消费贷（见 src/simulation/markets/consumer.ts 顶部说明）。
+    expect(byGroup.spend).toBeCloseTo(
+      (byGroup.cashPaid ?? 0) + (byGroup.depositWithdrawn ?? 0) + (byGroup.loanFinanced ?? 0),
+      2,
+    );
+    expect(byGroup.spend).toBeLessThanOrEqual(
+      cashBefore + (byGroup.depositWithdrawn ?? 0) + (byGroup.loanFinanced ?? 0) + 0.01,
+    );
     expect(byGroup.unmetFunding ?? 0).toBeGreaterThanOrEqual(0);
     const unmetQty = Object.values(byGroup.unmet).reduce((sum, qty) => sum + (qty ?? 0), 0);
     expect(unmetQty).toBeGreaterThanOrEqual(0);
     expect(byGroup.desiredCost).toBeGreaterThanOrEqual(byGroup.spend - 0.01);
-    expect(byGroup.budget).toBeLessThanOrEqual(group.cash + 0.01);
+    // 预算是在月初资金上算出的需求缩放口径：只能 ≤ 期初现金（成交后现金已被花掉，不再比较）。
+    expect(byGroup.budget).toBeLessThanOrEqual(cashBefore + 0.01);
   });
 });
 
 describe('AC-D05 群体隔离', () => {
-  it('各群体独立预算与现金，不挪用他群体资金；成交额不超本群体预算', () => {
+  it('各群体独立预算与现金，不挪用他群体资金；成交额不超本群体可用资金', () => {
     const world = newWorld(0);
     stockInventory(world, 'lanport', FOOD, 10_000);
     const list = groups(world);
@@ -162,6 +172,7 @@ describe('AC-D05 群体隔离', () => {
     poor.lastMonth.income = 0;
     rich.cash = 50_000;
     rich.lastMonth.income = 10_000;
+    const richCashBefore = rich.cash;
     const ledgers = createWorldLedgers(world);
     const result = runConsumerMarket(world, cityById(world, 'lanport'), ledgers.lanport!, NO_LOAN);
     const poorResult = result.byGroup![poor.id]!;
@@ -169,7 +180,13 @@ describe('AC-D05 群体隔离', () => {
     expect(poorResult.budget).toBeCloseTo(0, 2);
     expect(poorResult.spend).toBeCloseTo(0, 2);
     expect(richResult.spend).toBeGreaterThan(0);
-    expect(richResult.spend).toBeLessThanOrEqual(richResult.budget + 0.01);
+    // v0.9 验收一：budget 是有效需求缩放口径（非资金硬上限），闲置现金可支付真实成交；
+    // 因此断言可用资金上限 = 成交前现金 + 存款提取 + 放款，并核对三者之和 = 成交额。
+    expect(richResult.spend).toBeCloseTo(
+      (richResult.cashPaid ?? 0) + (richResult.depositWithdrawn ?? 0) + (richResult.loanFinanced ?? 0),
+      2,
+    );
+    expect(richResult.spend).toBeLessThanOrEqual(richCashBefore + 0.01);
     // 群体之间不共享现金：穷人现金仍为 0，未被富群体或市场扣成负数。
     expect(poor.cash).toBeGreaterThanOrEqual(0);
     expect(rich.cash).toBeGreaterThanOrEqual(0);

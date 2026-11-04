@@ -167,7 +167,9 @@ describe('AC-E04 不借超过实际成交额的钱', () => {
     expect(group.cash).toBe(0);
 
     // 补本地供给：放款只覆盖真实成交额。
-    for (const good of CONSUMER_GOODS) stockInventory(world, 'lanport', good, 20_000);
+    // v0.9 验收问题六：两阶段调度下，阶段 A 会先用所有群体的现金预算消耗本地库存，
+    // 因此“供给充足”需要足够覆盖 A 阶段消费，B 阶段才还有货可融资购买。
+    for (const good of CONSUMER_GOODS) stockInventory(world, 'lanport', good, 20_000_000);
     const ledgers2 = createWorldLedgers(world);
     const enough = runConsumerMarket(world, city, ledgers2.lanport!, NO_INTERCITY);
     const detail = enough.byGroup![group.id]!;
@@ -286,7 +288,9 @@ describe('AC-E08 贷款只补足“资金缺口”，不改有效需求口径', 
     alignCashflow(group);
     const account = depositAccountFor(world, { kind: 'household', id: group.id });
     if (account) account.balance = 30_000;
-    for (const good of CONSUMER_GOODS) stockInventory(world, 'lanport', good, 20_000);
+    // v0.9 验收问题六：两阶段调度下阶段 A 先消耗现金预算对应的本地库存，
+    // “供给充足”需足够覆盖 A 阶段消费，B 阶段贷款才有货可买。
+    for (const good of CONSUMER_GOODS) stockInventory(world, 'lanport', good, 20_000_000);
 
     const snapshot = householdConsumerBudgetSnapshot(world, group, DEMO_CONFIG, 0);
     // v0.9 T1：现金为 0、无收入，但有 30,000 存款 → 允许提取 5%=1,500 补基本需求作为现金预算；

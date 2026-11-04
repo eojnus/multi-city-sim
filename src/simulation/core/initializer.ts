@@ -182,16 +182,20 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
     if (!city) throw new Error(`公司 ${seed.id} 的城市 ${seed.cityId} 不存在`);
     const productivity = PRODUCTIVITY[seed.recipeOutput];
     const tech = city.technology.productivityMultiplier;
-    const baseCapacity = round2(seed.employees * productivity * tech * 1.08);
-    const capacity = baseCapacity;
+    const equipKind = equipmentKindForSector(seed.sector, config);
+    const perUnitCapacity = Math.max(
+      1,
+      config.equipment.catalog[equipKind].capacityPerUnit * tech,
+    );
+    const seededCapacity = round2(seed.employees * productivity * tech * 1.08);
+    // 设备台数是权威资产：新开局按“种子产能 → 整数台设备”映射后，产能必须等于
+    // 设备台数 × 每台产能 × 技术系数（不保留隐藏余量），否则首次重算就会跳变。
+    const equipment = emptyEquipmentAssets();
+    equipment[equipKind] = Math.max(1, Math.round(seededCapacity / perUnitCapacity));
+    const capacity = round2(equipment[equipKind] * perUnitCapacity);
+    const baseCapacity = capacity;
     const target = capacity * config.company.initialUtilization;
     const inventory = createEmptyInventory();
-    const equipment = emptyEquipmentAssets();
-    const equipKind = equipmentKindForSector(seed.sector, config);
-    equipment[equipKind] = Math.max(
-      1,
-      Math.round(baseCapacity / Math.max(1, config.equipment.catalog[equipKind].capacityPerUnit * tech)),
-    );
     const recipe = RECIPES[seed.recipeOutput];
     for (const input of recipe.inputs) {
       inventory[input.good] = round2(
@@ -221,6 +225,7 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
       inventory,
       equipment,
       equipmentCapacity: capacity,
+      equipmentCapacityRemainder: 0,
       salesHistory: [],
       productionPlan: null,
       recentProfits: [],
@@ -373,6 +378,7 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
       },
       offers: [],
       lastMonthSold: emptyEquipmentAssets(),
+      pendingLedger: [],
     },
     history: [],
     log: [],

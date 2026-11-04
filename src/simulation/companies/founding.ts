@@ -12,7 +12,7 @@ import { clamp, round2 } from '../core/math';
 import {
   equipmentKindForSector,
   equipmentUnitPrice,
-  localNewEquipmentSupply,
+  newEquipmentSupply,
 } from '../equipment/equipment';
 import { workforceSkillMultiplier } from '../labor/workforce';
 
@@ -54,7 +54,7 @@ export interface FoundingCandidate {
   expectedMonthlyProfit: number;
   /** 设备 + 首批原料 + 首月工资的估算启动资本。 */
   suggestedCapital: number;
-  /** 同城设备企业库存 + 政府开局库存（台）。 */
+  /** 同城设备企业库存 + 政府开局库存 + 其他城市设备企业可售量（台）。 */
   availableEquipmentUnits: number;
   unitPrice: number;
   /** 每台设备在本城技术条件下的月产能。 */
@@ -106,10 +106,9 @@ function availableEquipment(
   config: DemoConfig,
   cityId: string,
   kind: EquipmentKind,
-): { local: number; government: number; total: number } {
-  const local = Math.max(0, Math.floor(localNewEquipmentSupply(world, cityId, kind, config)));
-  const government = Math.max(0, Math.floor(world.equipmentMarket?.initialStock?.[kind] ?? 0));
-  return { local, government, total: local + government };
+): { local: number; government: number; intercity: number; total: number } {
+  // 评估与实际采购共用同一来源口径（同城库存 + 政府库存 + 其他城市可售量）。
+  return newEquipmentSupply(world, cityId, kind, config);
 }
 
 function evaluateOutput(
@@ -157,7 +156,7 @@ function evaluateOutput(
     15,
   );
 
-  // 4) 设备可获得性：同城设备企业库存 + 政府开局库存。
+  // 4) 设备可获得性：同城设备企业库存 + 政府开局库存 + 其他城市设备企业可售量。
   const equipmentScore =
     equipment.total <= 0 ? -100 : clamp(Math.min(10, equipment.total), 0, 10);
 
@@ -231,7 +230,7 @@ function evaluateOutput(
 
   const reasons: string[] = [];
   if (equipment.total <= 0) {
-    reasons.push(`当前没有可购买的${catalog.name}（本地设备企业无库存且政府库存为空）`);
+    reasons.push(`当前没有可购买的${catalog.name}（本地设备企业、政府库存与其他城市均无货）`);
   }
   reasons.push(
     `售价 ${round2(price)}（基准 ${basePrice}，趋势 ${trend > 0 ? '+' : ''}${round2(trend)}%），${price >= basePrice ? '高于' : '低于'}基准`,
@@ -243,7 +242,7 @@ function evaluateOutput(
     `同城竞争者 ${competitors.length} 家、合计产能 ${round2(competitorCapacity)}，预计可获得 ${round2(targetShare * 100)}% 份额、月销量 ${round2(reachableSales)}`,
   );
   reasons.push(
-    `可用${catalog.name} ${equipment.total} 台（本地 ${equipment.local} + 政府 ${equipment.government}），单价 ${round2(unitPrice)}`,
+    `可用${catalog.name} ${equipment.total} 台（本地 ${equipment.local} + 政府 ${equipment.government} + 其他城市 ${equipment.intercity}），本地单价 ${round2(unitPrice)}`,
   );
   reasons.push(
     inputs.length === 0

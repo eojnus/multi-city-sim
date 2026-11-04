@@ -18,7 +18,7 @@ import type { WorldLedgers } from '../markets/markets';
 import { runInputPurchasing, runProduction } from '../production/production';
 import { executeTradeRoutes } from '../trade/trade';
 import { runExternalDemand } from '../trade/external';
-import { runConsumerMarket } from '../markets/consumer';
+import { runConsumerMarkets } from '../markets/consumer';
 import { settleCompanyFinance } from '../finance/finance';
 import { settleGovernment, recordMigrationReports } from '../government/fiscal';
 import { transportTaxFactors } from '../government/taxes';
@@ -198,7 +198,7 @@ export class Simulation {
   }
 
   validate(): string[] {
-    return checkInvariants(this.state);
+    return checkInvariants(this.state, [], this.config);
   }
 
   /**
@@ -264,7 +264,15 @@ export class Simulation {
       // 倒闭企业：释放经营者、清理控制权与玩家经营记录，避免悬空引用。
       this.reconcileLifecycleAssignments();
 
-      // 6. 长期贸易合同与政府协议：真实转移货物与资金（世界内部，库存净额不变）
+      // 7. 市场期初供应（在合同/协议改变企业库存之后计算）
+      const ledgers = createWorldLedgers(this.state);
+
+      // 8. 生产资料采购：本地市场 + 区域市场补货（成交后才补足融资）
+      runInputPurchasing(this.state, ledgers, this.config, logs);
+
+      // 8b. 长期贸易合同与政府协议：在市场采购之后执行，避免合同（含补交欠量）先
+      // 抽干卖方库存、让本地/跨城市场采购看到 0 供给（v0.9 验收问题六：食品供应消失）。
+      // 市场优先、合同补足剩余，合同到货仍在本月生产之前入账，不影响当月生产。
       const tradeFlows = executeTradeRoutes(this.state, this.config, logs);
       this.state.lastTick.tradeFlows.push(...tradeFlows);
 
@@ -273,26 +281,22 @@ export class Simulation {
       maybeAutoProposeAgreements(this.state, this.config, this.state.time.tick, logs);
       this.pruneAgreementHistory();
 
-      // 7. 市场期初供应（在合同/协议改变企业库存之后计算）
-      const ledgers = createWorldLedgers(this.state);
-
-      // 8. 生产资料采购：本地市场 + 区域市场补货（成交后才补足融资）
-      runInputPurchasing(this.state, ledgers, this.config, logs);
-
       // 9. 生产：消耗库存、产出、记录增加值（受员工、技能、政策与产能限制）
       const productionRecords = runProduction(this.state, ledgers, this.config);
       this.state.lastTick.productionRecords = productionRecords;
 
       // 7. 居民消费（使用上一月已实现收入）
+      // v0.9 验收问题六：两阶段调度——阶段 A 所有城市先在本城消费（本地居民优先），
+      // 阶段 B 再按城市顺序跨城补缺口，避免先跑的城市把别的城市本地库存买空。
       const householdConsumed: Record<GoodId, number> = {} as Record<GoodId, number>;
       for (const goodId of GOOD_IDS) householdConsumed[goodId] = 0;
+      const consumerResults = runConsumerMarkets(this.state, ledgers, this.config);
       for (const city of [...this.state.cities].sort((a, b) => a.id.localeCompare(b.id))) {
-        const cityLedgers = ledgers[city.id];
-        if (!cityLedgers) continue;
-        const result = runConsumerMarket(this.state, city, cityLedgers, this.config);
+        const result = consumerResults[city.id];
+        if (!result) continue;
         city.lastMonth.consumerSpend = result.spend;
         city.lastMonth.consumerBudget = result.budget;
-        // v0.5：runConsumerMarket 内部已按群体逐笔扣款并记账（含现金流与期望消费），
+        // v0.5：runConsumerMarkets 内部已按群体逐笔扣款并记账（含现金流与期望消费），
         // 这里不再统一扣减，避免重复记账。
         for (const goodId of GOOD_IDS) {
           householdConsumed[goodId] += result.bought[goodId] ?? 0;
@@ -435,7 +439,7 @@ export class Simulation {
         });
       }
 
-      const problems = checkInvariants(this.state, audits);
+      const problems = checkInvariants(this.state, audits, this.config);
       this.state.lastTick.invariants = problems;
       if (problems.length > 0) {
         this.state = snapshot;

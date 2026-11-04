@@ -96,6 +96,20 @@ export function createWorldLedgers(world: WorldState): WorldLedgers {
     }
     ledgers[city.id] = cityLedgers;
   }
+  // v0.9：设备成交发生在市场账本创建之前或 tick 之间，增量先记在 equipmentMarket.pendingLedger，
+  // 这里并入当月账本并清空。sold 同时计入 supply（成交台数来自期初可供库存），保证 sold ≤ supply。
+  const pending = world.equipmentMarket?.pendingLedger;
+  if (pending && pending.length > 0) {
+    for (const entry of pending) {
+      const ledger = ledgers[entry.cityId]?.[entry.goodId];
+      if (!ledger) continue;
+      ledger.demand = round2(ledger.demand + entry.demand);
+      ledger.sold = round2(ledger.sold + entry.sold);
+      ledger.supply = round2(ledger.supply + entry.sold);
+      ledger.intercityImported = round2(ledger.intercityImported + entry.intercityImported);
+    }
+    world.equipmentMarket.pendingLedger = [];
+  }
   return ledgers;
 }
 

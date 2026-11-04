@@ -472,7 +472,11 @@ describe('居民群体：收入、消费与储蓄入账', () => {
 
     const cashChange = cityHouseholdCash(sim.state, city.id) - cashBefore;
     const netCashChange = sumOf(groups, (group) => group.lastMonth.netCashChange);
-    // 统计口径应与实际现金变动闭合：现金变动 = 收入 − 消费 − 储蓄 + 本月新借 − 本月还本付息。
+    // v0.9 T1：存款提取是“存款→现金”的内部转账，netCashChange 的定义（income − consumption −
+    // savingsContribution，见 types.ts HouseholdMonthlyStats）不含它，但它会增加手头现金，
+    // 因此净现金流恒等式需单独加上本月提取额。
+    const withdrawnThisTick = sumOf(groups, (group) => group.lastMonth.depositWithdrawn ?? 0);
+    // 统计口径应与实际现金变动闭合：现金变动 = 收入 − 消费 − 储蓄 + 本月新借 − 本月还本付息 + 本月存款提取。
     const loop = (sim.state.householdFinance?.loans ?? []).filter(
       (loan) => loan.cityId === city.id,
     );
@@ -482,7 +486,10 @@ describe('居民群体：收入、消费与储蓄入账', () => {
         .filter((payment) => payment.tick === sim.state.time.tick)
         .reduce((total, payment) => total + payment.principalPaid + payment.interestPaid, 0),
     );
-    expect(netCashChange + loanDrawn - repaidThisTick).toBeCloseTo(cashChange, 2);
+    expect(netCashChange + loanDrawn - repaidThisTick + withdrawnThisTick).toBeCloseTo(
+      cashChange,
+      2,
+    );
   });
 });
 

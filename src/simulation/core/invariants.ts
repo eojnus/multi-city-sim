@@ -1,3 +1,5 @@
+import type { DemoConfig } from '../../data/config';
+import { DEMO_CONFIG } from '../../data/config';
 import type { GoodId, WorldState } from '../contracts/types';
 import { GOOD_IDS, roleTotal } from '../companies/company';
 import { sumCityStock } from '../markets/markets';
@@ -16,7 +18,11 @@ export interface GoodsAudit {  goodId: GoodId;
   expectedEndStock: number;
 }
 
-export function checkInvariants(world: WorldState, audits: GoodsAudit[] = []): string[] {
+export function checkInvariants(
+  world: WorldState,
+  audits: GoodsAudit[] = [],
+  config: DemoConfig = DEMO_CONFIG,
+): string[] {
   const problems: string[] = [];
   if (!world || !Array.isArray(world.cities) || !Array.isArray(world.companies)) {
     return ['世界结构无效：cities/companies 不是数组'];
@@ -146,7 +152,7 @@ export function checkInvariants(world: WorldState, audits: GoodsAudit[] = []): s
   problems.push(...checkHouseholds(world));
   problems.push(...checkManagement(world));
   problems.push(...checkBanking(world));
-  problems.push(...checkEquipment(world));
+  problems.push(...checkEquipment(world, config));
   // ---- v0.7 政府债务、债券、居民消费金融与 GDP 判定窗口 ----
   checkGovernmentDebtInvariants(world, problems);
 
@@ -1020,7 +1026,7 @@ export function checkGovernmentDebtInvariants(world: WorldState, problems: strin
 }
 
 /** v0.9 设备与产能一致性：设备台数整数非负、设备产能与缓存一致、计划字段合法、设备市场记账合法。 */
-function checkEquipment(world: WorldState): string[] {
+function checkEquipment(world: WorldState, config: DemoConfig): string[] {
   const problems: string[] = [];
   if (!world.equipmentMarket || !world.equipmentMarket.initialStock) {
     return ['世界缺少设备市场数据'];
@@ -1064,9 +1070,54 @@ function checkEquipment(world: WorldState): string[] {
     if (!Number.isFinite(company.equipmentCapacity) || company.equipmentCapacity < 0) {
       problems.push(`${company.name}: 设备产能非法 (${company.equipmentCapacity})`);
     }
+    // 独立推导：按“整数台数 × 每台产能 × 城市技术系数 + 显式迁移余量”重算产能，
+    // 与 equipmentCapacity / capacity 对比；避免两个缓存同时过期时互相“证明”正确。
+    const companyCity = world.cities.find((entry) => entry.id === company.cityId);
+    const tech = companyCity?.technology.productivityMultiplier ?? 1;
+    let derived = 0;
+    for (const kind of kinds) {
+      derived +=
+        Math.max(0, Math.floor(company.equipment[kind] ?? 0)) *
+        config.equipment.catalog[kind].capacityPerUnit;
+    }
+    derived = round2(derived * tech);
+    const remainder =
+      Number.isFinite(company.equipmentCapacityRemainder) && company.equipmentCapacityRemainder > 0
+        ? round2(company.equipmentCapacityRemainder)
+        : 0;
+    if (!Number.isFinite(company.equipmentCapacityRemainder) || company.equipmentCapacityRemainder < 0) {
+      problems.push(
+        `${company.name}: 设备产能迁移余量非法 (${company.equipmentCapacityRemainder})`,
+      );
+    }
+    const maxRemainder = round2(
+      Math.max(
+        config.equipment.catalog.farm.capacityPerUnit,
+        config.equipment.catalog.industry.capacityPerUnit,
+        config.equipment.catalog.energy.capacityPerUnit,
+      ) * Math.max(1, tech),
+    );
+    if (remainder > maxRemainder + 0.01) {
+      problems.push(`${company.name}: 设备产能迁移余量 ${remainder} 超过单台设备产能 ${maxRemainder}`);
+    }
+    const derivedCapacity = round2(derived + remainder);
+    if (Math.abs(company.equipmentCapacity - derivedCapacity) > 0.01) {
+      problems.push(
+        `${company.name}: 设备产能 ${company.equipmentCapacity} 与按设备推导产能 ${derivedCapacity} 不一致`,
+      );
+    }
     if (Math.abs(company.capacity - company.equipmentCapacity) > 0.01) {
       problems.push(
         `${company.name}: 产能 ${company.capacity} 与设备产能 ${company.equipmentCapacity} 不一致`,
+      );
+    }
+    if (
+      !Number.isFinite(company.baseCapacity) ||
+      company.baseCapacity < 0 ||
+      company.baseCapacity > company.capacity + 0.01
+    ) {
+      problems.push(
+        `${company.name}: 基础产能 ${company.baseCapacity} 非法（应 0 ≤ baseCapacity ≤ capacity=${company.capacity}）`,
       );
     }
     if (!Array.isArray(company.salesHistory) || company.salesHistory.length > 3) {

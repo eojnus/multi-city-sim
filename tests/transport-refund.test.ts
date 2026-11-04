@@ -63,9 +63,7 @@ function contractSetup() {
   buyer.debt = 0;
   setCompanyEmployees(buyer, 0);
   buyer.jobDemand = 0;
-  buyer.capacity = 5_000;
-  // v0.9：设备产能是缓存权威值，不变量要求与 capacity 一致（容量夹具同步缓存）。
-  buyer.equipmentCapacity = 5_000;
+  // v0.9：设备产能由设备台数独立推导，夹具不再手工改写 capacity/equipmentCapacity 缓存。
   for (const city of world.cities) syncCityPopulationFromAllocations(city, world);
   buyer.utilization = 1;
   setCapacity(world, 0);

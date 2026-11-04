@@ -2485,9 +2485,8 @@ export class GameStore {
       this.emit();
       return false;
     }
-    const result = cancelUsedEquipmentOffer(this.world, company.id, offerId);
-    if (result.ok) recomputeCompanyCapacity(this.world, company, DEMO_CONFIG);
-    return this.finishAction(result, '已撤销设备出售委托，设备已返还企业。');
+    const result = cancelUsedEquipmentOffer(this.world, company.id, offerId, DEMO_CONFIG);
+    return this.finishAction(result, '已撤销设备出售委托，设备已返还企业，产能已重算。');
   }
 
   /** 统一处理命令结果：成功 toast + 自动存档 + 重绘；失败只提示与重绘。 */

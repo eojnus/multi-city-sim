@@ -11,6 +11,7 @@ import type {
   LiquidationHolding,
   LiquidationRecord,
   LogEntry,
+  PolicyId,
   SectorId,
   WorldState,
 } from '../../contracts/types';
@@ -38,7 +39,8 @@ import {
   disposeCompanyEquipment,
   emptyEquipmentAssets,
   equipmentKindForSector,
-  equipmentUnitPrice,
+  executeNewEquipmentPlan,
+  planNewEquipmentPurchase,
 } from '../../equipment/equipment';
 import {
   FOUNDING_MIN_SCORE,
@@ -283,6 +285,7 @@ export function foundCompany(
     previousMonth: blankStats(),
     equipment: emptyEquipmentAssets(),
     equipmentCapacity: 0,
+    equipmentCapacityRemainder: 0,
     salesHistory: [],
     productionPlan: null,
     recentProfits: [],
@@ -438,7 +441,17 @@ function blankStats(): Company['lastMonth'] {
   };
 }
 
-/** 扩产投资：企业自有资金 + 设备补助政策，真实购买设备（产能由设备决定）。 */
+/**
+ * 扩产投资：企业自有资金 + 设备补助政策，真实购买设备（产能由设备决定）。
+ *
+ * 原子性口径（v0.9 验收修复）：
+ * 1) 先按真实供给规划成交（planNewEquipmentPurchase），此时不产生任何资金/库存/设备变化；
+ * 2) 按“实际成交额 × 补贴率”申请补贴，且不超过政策剩余预算与财政可用余额；
+ * 3) 再原子提交成交（executeNewEquipmentPlan）。任一步失败都不留下补贴、库存或设备副作用。
+ *
+ * 预算上限保证：企业自有现金 + 可到账补贴 ≥ 成交额，且补贴 ≤ 成交额 × 补贴率。
+ * 补贴只按实际成交额结算；部分成交时按实际成交部分计算，不按计划量预支。
+ */
 export function expandCompanyCapacity(
   world: WorldState,
   company: Company,
@@ -450,37 +463,120 @@ export function expandCompanyCapacity(
   if (!city) return { ok: false, error: '企业城市不存在' };
   const kind = equipmentKindForSector(company.sector, config);
   const perUnit = Math.max(1, config.equipment.catalog[kind].capacityPerUnit);
-  const units = Math.max(
+  const plannedUnits = Math.max(
     1,
     Math.round(
       Math.min(requestedUnits ?? company.capacity * config.companyAi.maxExpansionShare, company.capacity * config.companyAi.maxExpansionShare) / perUnit,
     ),
   );
   const catalog = config.equipment.catalog[kind];
-  const estimatedCost = round2(units * equipmentUnitPrice(world, city.id, kind, config));
   const policy = activePolicy(world, city.id, 'equipmentSubsidy');
-  const maxSubsidy = policy ? Math.min(remainingBudget(policy), estimatedCost * config.policies.equipment.subsidyRate) : 0;
-  const budget = round2(company.cash + maxSubsidy);
-  if (budget + 1e-6 < estimatedCost) {
-    return { ok: false, error: `扩产资金不足：需要 ${estimatedCost.toFixed(0)}，可动用 ${budget.toFixed(0)}` };
+  const subsidyRate = Math.max(0, config.policies.equipment.subsidyRate);
+  const subsidyCapacity = policy
+    ? round2(Math.max(0, Math.min(remainingBudget(policy), city.treasury)))
+    : 0;
+
+  // 可动用预算：自有现金 + 最多可到账补贴，并保证“补贴 ≤ 成交额 × 补贴率”与“现金 + 补贴 ≥ 成交额”。
+  // 补贴按实际成交额与政策剩余预算孰低结算，因此预算上限只需“现金 + 可到账补贴”，
+  // 再叠加“现金 / (1 − 补贴率)”保证企业自有资金足以承担补贴后的差额。
+  let budget = round2(Math.max(0, company.cash));
+  if (policy && subsidyRate > 0 && subsidyCapacity > 0) {
+    budget = round2(
+      Math.min(
+        budget + subsidyCapacity,
+        // 留 0.01 余量，避免补贴按分取整后比成交额少 0.01 导致提交失败。
+        Math.max(0, company.cash / (1 - subsidyRate) - 0.01),
+      ),
+    );
   }
-  const subsidy = maxSubsidy > 0 ? equipmentSubsidyPayment(world, city, estimatedCost, config, company.id) : 0;
+
+  const plan = planNewEquipmentPurchase(world, company, kind, plannedUnits, config, {
+    allowGovernmentStock: true,
+    // 本城不足时允许通过既有跨城运输模型向其他城市设备企业采购（同城优先）。
+    allowIntercity: true,
+    budget,
+  });
+  if (!plan.ok || plan.units <= 0) {
+    return { ok: false, error: plan.error ?? '设备购买失败' };
+  }
+
+  // 补贴只按实际成交额结算，且不超过政策剩余预算与财政可用余额。
+  const subsidy = policy
+    ? equipmentSubsidyPayment(world, city, plan.cost, config, company.id)
+    : 0;
   if (subsidy > 0) company.cash = round2(company.cash + subsidy);
-  const purchase = buyNewEquipment(world, company, kind, units, config, world.time.tick, {
+
+  // 防御：若补贴按分取整后仍差一点，先按自有现金缩减计划，避免出现“补贴已付但买不起”。
+  let finalPlan = plan;
+  if (company.cash + 1e-6 < plan.cost) {
+    finalPlan = planNewEquipmentPurchase(world, company, kind, plan.units, config, {
+      allowGovernmentStock: true,
+      allowIntercity: true,
+      budget: round2(company.cash),
+    });
+    if (!finalPlan.ok || finalPlan.units <= 0) {
+      if (subsidy > 0) refundEquipmentSubsidy(world, city, policy!, company, subsidy, config);
+      return { ok: false, error: '扩产资金不足：补贴结算后仍无法完成成交' };
+    }
+    const allowedSubsidy = round2(Math.min(subsidy, finalPlan.cost * subsidyRate));
+    const excess = round2(subsidy - allowedSubsidy);
+    if (excess > 0) {
+      company.cash = round2(company.cash - excess);
+      refundEquipmentSubsidy(world, city, policy!, company, excess, config);
+    }
+  }
+
+  const purchase = executeNewEquipmentPlan(world, company, kind, finalPlan, config, world.time.tick, {
     reason: '扩产投资',
     log,
-    // 设备产业尚未建立时，企业可先按目录价购买政府初始设备库存（有限库存，用尽后只能等设备企业供货）。
-    allowGovernmentStock: true,
   });
-  if (!purchase.ok) return { ok: false, error: purchase.error ?? '设备购买失败' };
-  const netCost = round2(purchase.cost - subsidy);
-  company.lastMonth.capacityChange = round2(company.lastMonth.capacityChange + purchase.units * catalog.capacityPerUnit);
+  if (!purchase.ok) {
+    // 成交提交失败：退还已到账补贴，保持资金/政策预算/库存/设备全部无副作用。
+    if (subsidy > 0) refundEquipmentSubsidy(world, city, policy!, company, subsidy, config);
+    return { ok: false, error: purchase.error ?? '设备购买失败' };
+  }
+
+  const actualSubsidy = round2(Math.min(subsidy, purchase.cost * subsidyRate));
+  const excessSubsidy = round2(subsidy - actualSubsidy);
+  if (excessSubsidy > 0) {
+    company.cash = round2(company.cash - excessSubsidy);
+    refundEquipmentSubsidy(world, city, policy!, company, excessSubsidy, config);
+  }
+  const netCost = round2(purchase.cost - actualSubsidy);
+  company.lastMonth.capacityChange = round2(
+    company.lastMonth.capacityChange + purchase.units * catalog.capacityPerUnit,
+  );
   log.push({
     tick: world.time.tick,
     kind: 'production',
-    message: `${company.name} 购买${catalog.name} ${purchase.units} 台扩产，实际支出 ${netCost.toFixed(0)}${subsidy > 0 ? `（设备补助 ${subsidy.toFixed(0)} 来自财政）` : ''}；产能 ${company.capacity.toFixed(0)} 单位/月。`,
+    message: `${company.name} 购买${catalog.name} ${purchase.units} 台扩产${purchase.fromIntercity > 0 ? `（含跨城 ${purchase.fromIntercity} 台）` : ''}，实际支出 ${netCost.toFixed(0)}${actualSubsidy > 0 ? `（设备补助 ${actualSubsidy.toFixed(0)} 来自财政）` : ''}；产能 ${company.capacity.toFixed(0)} 单位/月。`,
   });
-  return { ok: true, note: `产能增加 ${units.toFixed(0)} 单位/月。`, amount: netCost };
+  const capacityGain = round2(purchase.units * catalog.capacityPerUnit);
+  return { ok: true, note: `产能增加 ${capacityGain.toFixed(0)} 单位/月。`, amount: netCost };
+}
+
+/**
+ * 退还扩产补贴（仅用于成交失败/缩减时的回滚）：资金退回财政、政策预算与本月支出同步冲回。
+ *
+ * 使用财政流水的反向记账（负 policySpending），保证“财政现金守恒 + 政策 spent 可追溯”。
+ */
+function refundEquipmentSubsidy(
+  world: WorldState,
+  city: City,
+  policy: { policyId: PolicyId; spent: number },
+  company: Company,
+  amount: number,
+  config: DemoConfig,
+): void {
+  const refund = round2(Math.min(amount, Math.max(0, company.cash)));
+  if (refund <= 0) return;
+  company.cash = round2(company.cash - refund);
+  receiveTreasury(world, city, refund, 'policySpending', '设备与扩产补助（未成交回滚）', {
+    policyId: policy.policyId,
+    companyId: company.id,
+  });
+  policy.spent = round2(Math.max(0, policy.spent - refund));
+  city.lastMonth.policySpending = round2(Math.max(0, city.lastMonth.policySpending - refund));
 }
 
 /**

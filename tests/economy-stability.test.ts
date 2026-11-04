@@ -5,16 +5,6 @@ import { serializeSave } from '../src/simulation/core/save';
 import { GOOD_IDS } from '../src/simulation/companies/company';
 import { sumCityStock } from '../src/simulation/markets/markets';
 
-function run(months: number): ReturnType<typeof Simulation.create> {
-  const sim = Simulation.create();
-  for (let index = 0; index < months; index++) {
-    const result = sim.tick();
-    expect(result.ok, result.error).toBe(true);
-    expect(result.invariants).toEqual([]);
-  }
-  return sim;
-}
-
 describe('固定种子与长期稳定性', () => {
   it('相同种子与相同操作序列产生完全一致的世界状态', () => {
     const runOnce = () => {
@@ -98,11 +88,24 @@ describe('固定种子与长期稳定性', () => {
   });
 
   it('政策、交通与企业生命周期在长期世界中有实际事件（不是纯展示）', () => {
-    const sim = run(40);
+    // v0.9 验收修复后，三城在 40 月内均经历破产，破产清算会清空当月末的城际走廊，
+    // 因此“第 40 月末 capacity>0”不再是稳定信号；改为在窗口内记录交通峰值，
+    // 证明交通网络真实承载过运量并支付过维护费，而不是只存在于字段里。
+    const sim = Simulation.create();
+    let maxTransportCapacity = 0;
+    let maxMaintenancePaid = 0;
+    for (let index = 0; index < 40; index++) {
+      const result = sim.tick();
+      expect(result.ok, `第 ${index + 1} 月：${result.error}`).toBe(true);
+      expect(result.invariants).toEqual([]);
+      maxTransportCapacity = Math.max(maxTransportCapacity, sim.state.transport.lastMonth.capacity);
+      maxMaintenancePaid = Math.max(maxMaintenancePaid, sim.state.transport.lastMonth.maintenancePaid);
+    }
     const world = sim.state;
     expect(world.policies.history.length + world.policies.active.length).toBeGreaterThan(0);
     expect(world.fiscal.ledger.length).toBeGreaterThan(0);
-    expect(world.transport.lastMonth.capacity).toBeGreaterThan(0);
+    expect(maxTransportCapacity).toBeGreaterThan(0);
+    expect(maxMaintenancePaid).toBeGreaterThan(0);
     expect(
       world.lifecycle.foundings.length + world.lifecycle.liquidations.length,
     ).toBeGreaterThan(0);
