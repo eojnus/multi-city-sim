@@ -9,7 +9,7 @@
 
 import { Simulation } from '../src/simulation/core/simulation';
 import { DEMO_CONFIG } from '../src/data/config';
-import type { City, Company, WorldState } from '../src/simulation/contracts/types';
+import type { City, Company, GoodId, WorldState } from '../src/simulation/contracts/types';
 import {
   assessCityFiscalRisk,
   cityDebt,
@@ -17,6 +17,7 @@ import {
   recent12MonthGdp,
 } from '../src/simulation/government/metrics';
 import { equipmentUnits } from '../src/simulation/equipment/equipment';
+import { GOODS } from '../src/data/demo-data';
 
 function argNumber(flag: string, fallback: number): number {
   const raw = process.argv.find((arg) => arg.startsWith(`${flag}=`));
@@ -98,6 +99,99 @@ function cityCumulative(world: WorldState, cityId: string): Cumulative {
   return total;
 }
 
+/**
+ * 财政流水的保留窗口：`recordFiscal` 只保留最近 `policies.ledgerLimit`（800）条，
+ * 因此这里只能给出“窗口内累计”，不能冒充全期累计。账本一旦达到上限，更早月份不可得。
+ */
+function fiscalWindow(world: WorldState, cityId: string) {
+  const entries = world.fiscal.ledger.filter((entry) => entry.cityId === cityId);
+  const startTick = entries.length > 0 ? Math.min(...entries.map((entry) => entry.tick)) : null;
+  return {
+    entries: entries.length,
+    startTick,
+    truncated: world.fiscal.ledger.length >= DEMO_CONFIG.policies.ledgerLimit,
+    ledgerLimit: DEMO_CONFIG.policies.ledgerLimit,
+  };
+}
+
+/**
+ * 政府历史上破产过几次（不是观察时刻的状态）。
+ * 破产记录本身也有保留上限（config.government.maxBankruptcyRecords=8）：
+ * 记录数达到上限时可能已丢弃更早记录，必须显式标注。
+ */
+function bankruptcyHistory(city: City) {
+  const records = [...city.government.records].sort((a, b) => a.tick - b.tick);
+  const maxRecords = DEMO_CONFIG.government.maxBankruptcyRecords;
+  return {
+    count: records.length,
+    ticks: records.map((record) => record.tick),
+    current: city.government.bankruptcy,
+    truncated: records.length >= maxRecords,
+    maxRecords,
+  };
+}
+
+/** 居民消费四层口径（每城）：期望成本 / 成交 / 资金不足缺口 / 预算未形成需求。 */
+function cityConsumption(world: WorldState, cityId: string) {
+  const groups = world.households.groups.filter((group) => group.cityId === cityId);
+  const sum = (pick: (group: (typeof groups)[number]) => number) =>
+    groups.reduce((total, group) => total + Math.max(0, pick(group)), 0);
+  const desiredCost = sum((group) => group.lastMonth.desiredConsumption);
+  const consumption = sum((group) => group.lastMonth.consumption);
+  const unmetFunding = sum((group) => group.lastMonth.unmetFunding ?? 0);
+  const loanFinanced = sum((group) => group.lastMonth.loanFinancedConsumption ?? 0);
+  const loanDrawn = sum((group) => group.lastMonth.loanDrawn ?? 0);
+  const depositWithdrawn = sum((group) => group.lastMonth.depositWithdrawn ?? 0);
+  const budget = sum((group) => group.lastMonth.budget ?? 0);
+  // 期望成本中既没有成交、也没有被记为“资金不足”的部分 = 预算/有效需求没有形成，
+  // 与“有供给但缺钱”分开报告；两者都不是供给不足。
+  const fundingGap = Math.round(Math.max(0, desiredCost - consumption - unmetFunding) * 100) / 100;
+  // “有预算但没有商品供给”：消费购买口径下未成交的消费品数量 × 当月市场价（下限估算）。
+  // consumerDemand/sold 来自城市市场账本；这里只统计 category=consumer 的商品，避免把
+  // 企业投入品采购混进来。价格为当月市场价，不代表成交价。
+  let supplyGapUnits = 0;
+  let supplyGapValue = 0;
+  for (const good of GOODS) {
+    if (good.category !== 'consumer') continue;
+    const market = world.cities.find((city) => city.id === cityId)?.market[good.id];
+    if (!market) continue;
+    const unfilled = Math.max(0, (market.consumerDemand ?? 0) - (market.sold ?? 0));
+    supplyGapUnits += unfilled;
+    supplyGapValue += unfilled * (market.price ?? 0);
+  }
+  return {
+    desiredCost,
+    consumption,
+    unmetFunding,
+    fundingGap,
+    loanFinanced,
+    loanDrawn,
+    depositWithdrawn,
+    budget,
+    supplyGapUnits: Math.round(supplyGapUnits * 100) / 100,
+    supplyGapValue: Math.round(supplyGapValue * 100) / 100,
+  };
+}
+
+/** 商品市场供需（数量口径），用于区分缺货与缺钱。 */
+function marketStats(city: City, goodId: GoodId) {
+  const market = city.market[goodId];
+  return {
+    price: market?.price ?? 0,
+    supply: market?.supply ?? 0,
+    demand: market?.demand ?? 0,
+    consumerDemand: market?.consumerDemand ?? 0,
+    sold: market?.sold ?? 0,
+    unmetDemand: market?.unmetDemand ?? 0,
+    intercityImported: market?.intercityImported ?? 0,
+    closingStock: market?.closingStock ?? 0,
+  };
+}
+
+function describeGood(name: string, stats: ReturnType<typeof marketStats>): string {
+  return `${name}：需求 ${num(stats.demand, 1)} / 成交 ${num(stats.sold, 1)}（缺货 ${num(stats.unmetDemand, 1)}，跨城进口 ${num(stats.intercityImported, 1)}，期末库存 ${num(stats.closingStock, 1)}，价 ${stats.price.toFixed(1)}）`;
+}
+
 function companyStats(world: WorldState, cityId: string) {
   const companies = world.companies.filter((company) => company.cityId === cityId);
   const active = companies.length;
@@ -127,10 +221,14 @@ function householdStats(world: WorldState, cityId: string) {
   const consumption = groups.reduce((sum, group) => sum + group.lastMonth.consumption, 0);
   const income = groups.reduce((sum, group) => sum + group.lastMonth.income, 0);
   const desires = groups.reduce((sum, group) => sum + Math.max(0, group.lastMonth.desiredConsumption ?? 0), 0);
+  // 存款按群体所属城市汇总：同一个居民只有一份存款账户，不能把全世界的存款重复写到每座城市。
+  const groupIds = new Set(groups.map((group) => group.id));
   const deposits = world.banking.deposits
-    .filter((account) => account.owner.kind === 'household')
+    .filter((account) => account.owner.kind === 'household' && groupIds.has(account.owner.id))
     .reduce((sum, account) => sum + account.balance, 0);
-  return { cash, loanOutstanding, defaulted, consumption, income, desires, deposits };
+  // 居民消费贷合同没有保留上限（不做 splice），principal 合计即全期累计发放额。
+  const borrowed = loans.reduce((sum, loan) => sum + loan.principal, 0);
+  return { cash, loanOutstanding, defaulted, consumption, income, desires, deposits, borrowed, loanCount: loans.length };
 }
 
 function bankStats(world: WorldState) {
@@ -144,7 +242,17 @@ function bankStats(world: WorldState) {
   return { outstanding, deposits, active, defaulted, repaid, total: loans.length, lastMonth };
 }
 
-function taxTotal12(world: WorldState, cityId: string): { tax: number; bonus: number; loss: number } {
+/**
+ * 税收历史：`recordTaxMonth` 只保留最近 `config.tax.historyMonths`（12）个月，
+ * 因此这里的合计是“最近 12 月窗口”，不是全期累计；更早月份只能从财政流水窗口里找。
+ */
+function taxWindow(world: WorldState, cityId: string): {
+  tax: number;
+  bonus: number;
+  loss: number;
+  months: number;
+  windowMonths: number;
+} {
   const history = world.taxes.historyByCity[cityId] ?? [];
   let tax = 0;
   let bonus = 0;
@@ -154,7 +262,7 @@ function taxTotal12(world: WorldState, cityId: string): { tax: number; bonus: nu
     bonus += month.transportBonus;
     loss += month.transportLoss;
   }
-  return { tax, bonus, loss };
+  return { tax, bonus, loss, months: history.length, windowMonths: DEMO_CONFIG.tax.historyMonths };
 }
 
 function describeCity(world: WorldState, city: City) {
@@ -164,8 +272,9 @@ function describeCity(world: WorldState, city: City) {
   const debt = cityDebt(world, city.id);
   const gdp12 = recent12MonthGdp(world, city.id);
   const risk = assessCityFiscalRisk(world, city.id, DEMO_CONFIG);
-  const taxes = taxTotal12(world, city.id);
+  const taxes = taxWindow(world, city.id);
   const bankruptcy = city.government.bankruptcy;
+  const history = bankruptcyHistory(city);
   return {
     city,
     rate,
@@ -175,6 +284,7 @@ function describeCity(world: WorldState, city: City) {
     taxes,
     bankrupt: isCityBankrupt(city),
     bankruptcy,
+    history,
   };
 }
 
@@ -187,7 +297,13 @@ function printCheckpoint(world: WorldState) {
     const info = describeCity(world, city);
     const company = companyStats(world, city.id);
     const household = householdStats(world, city.id);
+    const consumption = cityConsumption(world, city.id);
     const cum = cityCumulative(world, city.id);
+    const fiscal = fiscalWindow(world, city.id);
+    const historyText =
+      info.history.count > 0
+        ? `历史破产 ${info.history.count} 次（tick ${info.history.ticks.join('/')}）`
+        : '历史破产 0 次';
     console.log(`\n## ${city.name}（${city.id}）`);
     console.log(
       `人口 ${num(city.population.total)}｜就业 ${num(city.population.employed)}｜失业 ${num(city.population.unemployed)}（${pct(info.rate)}）｜非劳动 ${num(city.population.nonLabor)}`,
@@ -199,7 +315,7 @@ function printCheckpoint(world: WorldState) {
       `负债 ${money(info.debt.totalDebt)}（${pct(info.debt.totalDebt / Math.max(1, info.gdp12))} of 12M GDP）｜银行借款 ${money(info.debt.bankLoanPrincipal)}｜债券 ${money(info.debt.bondPrincipalOutstanding)}｜欠息 ${money(info.debt.loanAccruedInterest + info.debt.bondAccruedInterest)}`,
     );
     console.log(
-      `破产 ${info.bankrupt ? `是（tick ${info.bankruptcy?.tick ?? '?'}）` : '否'}｜累计税收入账 ${money(info.taxes.tax)}｜交通加成 ${money(info.taxes.bonus)}｜交通损耗 ${money(info.taxes.loss)}`,
+      `破产 当前${info.bankrupt ? `是（tick ${info.bankruptcy?.tick ?? '?'}）` : '否'}｜${historyText}${info.history.truncated ? `（破产记录已达上限 ${info.history.maxRecords}，可能已截断更早记录）` : ''}｜税收窗口 ${info.taxes.months}/${info.taxes.windowMonths} 月：收入 ${money(info.taxes.tax)}｜交通加成 ${money(info.taxes.bonus)}｜交通损耗 ${money(info.taxes.loss)}`,
     );
     console.log(
       `企业 ${company.active} 家（成立 ${company.founded} / 倒闭 ${company.liquidated}）｜设备 ${num(company.equipment)} 台｜产能 ${num(company.capacity)}｜计划产量 ${num(company.planned)}（岗位 ${num(company.plannedJobs)}）`,
@@ -208,10 +324,22 @@ function printCheckpoint(world: WorldState) {
       `企业现金 ${money(company.cash)}｜企业债务 ${money(company.debt)}｜欠薪 ${money(company.wageArrears)}｜本月紧急裁员 ${num(company.emergency)}`,
     );
     console.log(
-      `居民消费 ${money(household.consumption)}（期望 ${money(household.desires)}）｜居民现金 ${money(household.cash)}｜存款 ${money(household.deposits)}｜消费贷未偿 ${money(household.loanOutstanding)}（违约 ${household.defaulted} 笔）`,
+      `居民消费 成交 ${money(consumption.consumption)}（期望 ${money(consumption.desiredCost)}）｜有本地供给但资金不足 ${money(consumption.unmetFunding)}｜预算缩量未形成购买 ${money(consumption.fundingGap)}｜有预算但缺货 ${num(consumption.supplyGapUnits, 1)} 件≈${money(consumption.supplyGapValue)}｜消费贷支持 ${money(consumption.loanFinanced)}（本月发放 ${money(consumption.loanDrawn)}）｜存款提取 ${money(consumption.depositWithdrawn)}`,
     );
     console.log(
-      `政府流水（累计，来自财政账本）：收入 ${money(cum.govIncome)}｜支出 ${money(cum.govExpense)}｜清算勾销 ${money(cum.writtenOff)}`,
+      `居民现金 ${money(household.cash)}｜居民存款 ${money(household.deposits)}｜消费贷未偿 ${money(household.loanOutstanding)}（合同 ${household.loanCount} 笔，违约 ${household.defaulted} 笔，累计发放 ${money(household.borrowed)}）`,
+    );
+    console.log(
+      `食品 ${describeGood('食品', marketStats(city, 'food'))}`,
+    );
+    console.log(
+      `原料 ${describeGood('谷物', marketStats(city, 'grain'))}｜${describeGood('金属', marketStats(city, 'metal'))}｜${describeGood('能源', marketStats(city, 'energy'))}`,
+    );
+    console.log(
+      `设备商品 ${describeGood('农机', marketStats(city, 'farmEquipment'))}｜${describeGood('工业设备', marketStats(city, 'industryEquipment'))}｜${describeGood('能源设备', marketStats(city, 'energyEquipment'))}`,
+    );
+    console.log(
+      `政府流水（窗口累计：${fiscal.entries} 条，自 t${fiscal.startTick ?? '?'} 起，账本上限 ${fiscal.ledgerLimit}${fiscal.truncated ? '，已截断，更早流水不可得' : ''}）：收入 ${money(cum.govIncome)}｜支出 ${money(cum.govExpense)}｜清算勾销 ${money(cum.writtenOff)}`,
     );
   }
 
@@ -235,9 +363,9 @@ function printCheckpoint(world: WorldState) {
     console.log(`## 岚港食品厂：已倒闭${liquidation ? `（tick ${liquidation.tick}）` : ''}`);
   }
 
-  const householdLoans = world.householdFinance.loans.length;
+  const householdLoans = world.householdFinance.loans;
   console.log(
-    `## 居民贷款：合同 ${householdLoans} 笔｜消费贷累计发放 ${money(world.householdFinance.totalBorrowed ?? 0)}`,
+    `## 居民贷款：合同 ${householdLoans.length} 笔（全量保留）｜消费贷累计发放 ${money(householdLoans.reduce((sum, loan) => sum + loan.principal, 0))}｜未偿 ${money(householdLoans.reduce((sum, loan) => sum + loan.outstanding, 0))}｜违约 ${householdLoans.filter((loan) => loan.status === 'defaulted').length} 笔`,
   );
 }
 
@@ -247,8 +375,11 @@ function printSummary(world: WorldState) {
   console.log(`${'='.repeat(88)}`);
   for (const city of world.cities) {
     const company = companyStats(world, city.id);
+    const history = bankruptcyHistory(city);
+    const historyText =
+      history.count > 0 ? `${history.count} 次（tick ${history.ticks.join('/')}）` : '0 次';
     console.log(
-      `${city.name}：企业成立 ${company.founded} / 倒闭 ${company.liquidated}｜政府破产 ${(city.government.bankruptcy.status === 'bankrupt' ? '有' : '无')}`,
+      `${city.name}：企业成立 ${company.founded} / 倒闭 ${company.liquidated}｜政府历史破产 ${historyText}｜当前状态 ${history.current.status}${history.truncated ? `｜破产记录已达上限 ${history.maxRecords}，更早记录可能被截断` : ''}`,
     );
   }
   const founded = world.lifecycle.foundings;
@@ -262,6 +393,16 @@ function printSummary(world: WorldState) {
   const liquidations = world.lifecycle.liquidations;
   console.log(
     `倒闭合计 ${liquidations.length} 家｜清算减免 ${money(liquidations.reduce((sum, record) => sum + (record.forgiven ?? 0), 0))}`,
+  );
+  const lifecycleLimit = DEMO_CONFIG.lifecycle.maxHistory;
+  console.log(
+    `## 数据来源与保留窗口` +
+      `\n- 企业创办/倒闭明细：world.lifecycle.foundings/liquidations（上限 ${lifecycleLimit} 条，超出丢弃更早记录；当前 ${founded.length}/${liquidations.length}）` +
+      `\n- 财政流水：world.fiscal.ledger（上限 ${DEMO_CONFIG.policies.ledgerLimit} 条，窗口累计）` +
+      `\n- 税收月度：world.taxes.historyByCity（每城最近 ${DEMO_CONFIG.tax.historyMonths} 个月）` +
+      `\n- 破产历史：city.government.records（上限 ${DEMO_CONFIG.government.maxBankruptcyRecords} 条）` +
+      `\n- 银行/居民贷款合同：全量保留（无 splice），principal 合计即全期累计` +
+      `\n- 居民消费：household.lastMonth + 城市市场账本（成交/期望/缺货/资金缺口分列）`,
   );
   const history = world.history;
   if (history.length > 0) {
