@@ -17,6 +17,7 @@ import { checkInvariants } from '../src/simulation/core/invariants';
 import { DEMO_CONFIG } from '../src/data/config';
 import {
   buyNewEquipment,
+  equipmentCapacityPerUnit,
   equipmentKindForSector,
 } from '../src/simulation/equipment/equipment';
 
@@ -122,7 +123,7 @@ describe('v8 → v9 设备资产与设备市场迁移', () => {
       const city = parsed.cities.find((entry) => entry.id === company.cityId)!;
       const tech = city.technology.productivityMultiplier;
       const kind = equipmentKindForSector(company.sector, DEMO_CONFIG);
-      const perUnit = DEMO_CONFIG.equipment.catalog[kind].capacityPerUnit;
+      const perUnit = equipmentCapacityPerUnit(DEMO_CONFIG, kind, company.recipeOutput);
       const units = Math.max(0, Math.floor(company.capacity / Math.max(1, perUnit * tech)));
       expect(company.equipment[kind]).toBe(units);
       for (const other of ['farm', 'industry', 'energy'] as const) {

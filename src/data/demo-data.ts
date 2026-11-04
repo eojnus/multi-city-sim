@@ -188,7 +188,14 @@ export const RECIPES: Record<GoodId, Recipe> = {
   },
 };
 
-/** 每名员工每月可生产的产出单位数（演示参数）。 */
+/**
+ * 每名员工每月可生产的产出单位数（演示参数）。
+ *
+ * v1.0 单位标定（task-23）：设备商品（资本品）的单位是“台”，人均月产量按设备类别标定，
+ * 必须与 config.equipment.catalog[kind].unitsPerWorkerMonth 保持一致（单一来源为 config，
+ * 本表为运行时生产口径，tests/equipment-economics.test.ts 会校验两者相等）。
+ * 旧值 0.01 台/员工/月会让 60 员工设备厂月产 0.6 台，无法支撑设备产业。
+ */
 export const PRODUCTIVITY: Record<GoodId, number> = {
   grain: 520,
   fiber: 180,
@@ -198,9 +205,9 @@ export const PRODUCTIVITY: Record<GoodId, number> = {
   metal: 100,
   energy: 300,
   household: 140,
-  farmEquipment: 0.01,
-  industryEquipment: 0.01,
-  energyEquipment: 0.01,
+  farmEquipment: 0.15,
+  industryEquipment: 0.08,
+  energyEquipment: 0.09,
 };
 
 export interface CitySeed {
@@ -326,6 +333,8 @@ export interface CompanySeed {
   employees: number;
   wageRate: number;
   priceFactor: number;
+  /** v1.0：【可选】开局流动资金（月工资倍数）；缺省沿用 config.company.initialCashWageMonths。 */
+  initialCashWageMonths?: number;
   note: string;
 }
 
@@ -517,6 +526,76 @@ export const COMPANY_SEEDS: CompanySeed[] = [
     priceFactor: 1.02,
     note: '青原本地成衣供应者，布料主要从岚港输入。',
   },
+];
+
+/**
+ * v1.0：开局扩充企业。
+ *
+ * 每座城市在原有企业之外新增 16 家（食品 3、谷物 3、能源 2、金属 1、
+ * 设备制造 3、纤维/纺织/成衣/日用品 4），使各城形成可互相供应的产业链。
+ * 规模按本地居民与企业需求、原料供应、设备与劳动产能估算；设备台数由
+ * initializer 依员工数与设备单位经济反推，不在此处双写。全部资产在初始化
+ * 阶段一次性创建（属于开局前已有资产），旧存档读取不会追加。
+ */
+interface OpeningCompanyEntry {
+  suffix: string;
+  name: string;
+  sector: Company['sector'];
+  output: GoodId;
+  employees: number;
+  priceFactor: number;
+  /** 设备厂首月要采购金属/能源，流动资金按 4 个月工资预留；其余企业沿用全局默认。 */
+  cashMonths?: number;
+  note: string;
+}
+
+function openingEntries(): OpeningCompanyEntry[] {
+  return [
+    // 食品加工 3 家：承接城市基本食品需求，规模按人口×人均需要与现有产能估算。
+    { suffix: 'food2', name: '食品二厂', sector: 'food', output: 'food', employees: 4_000, priceFactor: 1.01, note: '第二家食品加工企业，面向本地基本食品需求。' },
+    { suffix: 'food3', name: '食品三厂', sector: 'food', output: 'food', employees: 3_600, priceFactor: 1.02, note: '中型食品加工企业，补充本地食品供给。' },
+    { suffix: 'food4', name: '食品四厂', sector: 'food', output: 'food', employees: 3_200, priceFactor: 1.03, note: '小型食品加工企业，服务本地与邻近市场。' },
+    // 谷物/农业 3 家：降低对青原单一谷物来源的依赖。
+    { suffix: 'grain2', name: '谷物二厂', sector: 'agriculture', output: 'grain', employees: 2_000, priceFactor: 0.98, note: '本地谷物种植，供应城市食品与饲料链。' },
+    { suffix: 'grain3', name: '谷物三厂', sector: 'agriculture', output: 'grain', employees: 1_900, priceFactor: 0.99, note: '本地谷物种植合作社，补充区域粮食供给。' },
+    { suffix: 'grain4', name: '谷物四厂', sector: 'agriculture', output: 'grain', employees: 1_800, priceFactor: 1.0, note: '小型谷物农场，面向本地食品企业。' },
+    // 能源 2 家：为新增加的食品/谷物/设备产能供能。
+    { suffix: 'energy2', name: '能源二厂', sector: 'utility', output: 'energy', employees: 800, priceFactor: 0.99, note: '本地第二座能源站，服务新增工业产能。' },
+    { suffix: 'energy3', name: '能源三厂', sector: 'utility', output: 'energy', employees: 700, priceFactor: 1.01, note: '分布式能源站，补充城市能源供给。' },
+    // 金属/基础材料 1 家：为设备与日用品企业供应金属件。
+    { suffix: 'metal2', name: '金属二厂', sector: 'metal', output: 'metal', employees: 1_200, priceFactor: 1.0, note: '金属件加工企业，供应本地设备与日用品生产。' },
+    // 设备制造 3 家：农业、工业、能源设备各一家，形成世界内真实设备来源。
+    { suffix: 'farm-equipment', name: '农机设备厂', sector: 'equipment', output: 'farmEquipment', employees: 60, priceFactor: 1.0, cashMonths: 4, note: '农业设备制造企业，向本地与跨城农场出售农机。' },
+    { suffix: 'industry-equipment', name: '工业设备厂', sector: 'equipment', output: 'industryEquipment', employees: 60, priceFactor: 1.02, cashMonths: 4, note: '工业设备制造企业，供应食品、纺织、成衣与金属企业。' },
+    { suffix: 'energy-equipment', name: '能源设备厂', sector: 'equipment', output: 'energyEquipment', employees: 60, priceFactor: 1.0, cashMonths: 4, note: '能源设备制造企业，服务本地与跨城能源站。' },
+    // 纤维/纺织/成衣/日用品合计 4 家：补齐该城原产业链缺口。
+    { suffix: 'fiber2', name: '纤维农场', sector: 'fiber-farm', output: 'fiber', employees: 1_200, priceFactor: 1.0, note: '本地纤维种植，为纺织企业提供原料。' },
+    { suffix: 'textile3', name: '纺织三厂', sector: 'textile', output: 'fabric', employees: 1_800, priceFactor: 1.0, note: '本地布料生产企业，供应成衣与出口市场。' },
+    { suffix: 'garment3', name: '成衣三厂', sector: 'garment', output: 'clothing', employees: 1_500, priceFactor: 1.02, note: '成衣制造企业，面向本地居民消费。' },
+    { suffix: 'appliance3', name: '日用品三厂', sector: 'appliance', output: 'household', employees: 1_500, priceFactor: 1.0, note: '日用品制造企业，服务本地居民日常消费。' },
+  ];
+}
+
+function openingCompanySeeds(cityId: string, cityName: string, prefix: string): CompanySeed[] {
+  return openingEntries().map((entry) => ({
+    id: `${prefix}-${entry.suffix}`,
+    name: `${cityName}${entry.name}`,
+    cityId,
+    sector: entry.sector,
+    recipeOutput: entry.output,
+    employees: entry.employees,
+    wageRate: 4_600,
+    priceFactor: entry.priceFactor,
+    initialCashWageMonths: entry.cashMonths,
+    note: entry.note,
+  }));
+}
+
+/** 三城各自新增的 16 家开局企业（共 48 家；加上原有 17 家，新开局共 65 家）。 */
+export const OPENING_COMPANIES: CompanySeed[] = [
+  ...openingCompanySeeds('lanport', '岚港', 'lp'),
+  ...openingCompanySeeds('ironvale', '铁谷', 'iv'),
+  ...openingCompanySeeds('greenfield', '青原', 'gf'),
 ];
 
 export const TRADE_ROUTE_SEEDS: TradeRoute[] = [

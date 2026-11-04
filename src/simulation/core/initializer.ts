@@ -16,11 +16,12 @@ import {
   CITY_SEEDS,
   COMPANY_SEEDS,
   GOODS,
+  OPENING_COMPANIES,
   PRODUCTIVITY,
   RECIPES,
   TRADE_ROUTE_SEEDS,
 } from '../../data/demo-data';
-import { emptyEquipmentAssets, equipmentKindForSector } from '../equipment/equipment';
+import { emptyEquipmentAssets, equipmentCapacityPerUnit, equipmentKindForSector } from '../equipment/equipment';
 import { createEmptyInventory, setCompanyEmployees, monthlyWageBill } from '../companies/company';
 import { setCityPopulation, laborForceFor } from '../population/population';
 import { round2, allocateProportionally } from '../core/math';
@@ -177,15 +178,21 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
     };
   });
 
-  const companies: Company[] = COMPANY_SEEDS.map((seed, companyIndex) => {
+  // v1.0：原有 17 家 + 每城新增 16 家（OPENING_COMPANIES，共 65 家）。
+  // 新增企业走同一创建管道，开局资产（设备/库存/现金/股份）在初始化阶段一次性建立；
+  // 旧存档读取不经过这里，因此不会追加企业或再次乘人口。
+  const openingSeeds = [...COMPANY_SEEDS, ...OPENING_COMPANIES];
+  const companies: Company[] = openingSeeds.map((seed, companyIndex) => {
     const city = cities.find((candidate) => candidate.id === seed.cityId);
     if (!city) throw new Error(`公司 ${seed.id} 的城市 ${seed.cityId} 不存在`);
     const productivity = PRODUCTIVITY[seed.recipeOutput];
     const tech = city.technology.productivityMultiplier;
     const equipKind = equipmentKindForSector(seed.sector, config);
+    // 统一单位（task-23）：普通商品企业每台设备贡献 catalog.capacityPerUnit 个产出单位/月；
+    // 资本品企业（设备商品）每台设备贡献 outputCapacityPerUnit[output] 台/月。
     const perUnitCapacity = Math.max(
       1,
-      config.equipment.catalog[equipKind].capacityPerUnit * tech,
+      equipmentCapacityPerUnit(config, equipKind, seed.recipeOutput) * tech,
     );
     const seededCapacity = round2(seed.employees * productivity * tech * 1.08);
     // 设备台数是权威资产：新开局按“种子产能 → 整数台设备”映射后，产能必须等于
@@ -277,7 +284,9 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
     setCompanyEmployees(company, seed.employees);
     const wage = monthlyWageBill(company, config);
     company.baseWageBill = wage;
-    company.cash = round2(wage * config.company.initialCashWageMonths);
+    company.cash = round2(
+      wage * (seed.initialCashWageMonths ?? config.company.initialCashWageMonths),
+    );
     return company;
   });
 
@@ -379,6 +388,7 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
       offers: [],
       lastMonthSold: emptyEquipmentAssets(),
       pendingLedger: [],
+      capitalizedThisTick: {},
     },
     history: [],
     log: [],

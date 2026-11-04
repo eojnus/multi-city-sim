@@ -214,6 +214,10 @@ describe('选任候选人：同城 available、在任不可用、限制新增', 
     const companyId = 'gf-food';
     const releasedId = controlOf(world, companyId).operatorId!;
     makeVacancy(world, companyId);
+    // v1.0 开局 65 家企业后同城人才市场更大；抬高该落选者声望，确保其进入前 3 名候选，
+    // 验证的仍是“落选档案被复用、不新建新人”。
+    const released = world.management!.operators.find((operator) => operator.id === releasedId)!;
+    released.reputation = 999;
     const operatorCount = world.management!.operators.length;
     const { motion } = openElectionFor(world, companyId);
     expect(

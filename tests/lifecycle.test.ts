@@ -12,6 +12,7 @@ import { companyCreditLimit } from '../src/simulation/companies/credit';
 import { migrateLegacyCompanyDebt } from '../src/simulation/banking/banking';
 import { syncCityPopulationFromAllocations } from '../src/simulation/population/population';
 import { startPolicy } from '../src/simulation/policies/policies';
+import { equipmentKindForSector } from '../src/simulation/equipment/equipment';
 
 function worldWithMoney(): WorldState {
   const world = Simulation.create().state;
@@ -114,6 +115,7 @@ describe('企业成立：居民投资群体 / 现有企业 / 城市政府', () =
     const world = worldWithMoney();
     const city = world.cities.find((entry) => entry.id === 'ironvale')!;
     const treasuryBefore = city.treasury;
+    const equipmentStockBefore = { ...world.equipmentMarket.initialStock };
     const first = foundCompany(
       world,
       { cityId: city.id, founderType: 'government', capital: 400_000 },
@@ -121,10 +123,14 @@ describe('企业成立：居民投资群体 / 现有企业 / 城市政府', () =
     );
     expect(first.ok, first.error).toBe(true);
     const company = world.companies.find((entry) => entry.id === first.companyId)!;
-    // 初创出资 40 万进入企业；企业再用其中一部分向政府库存购买启动设备，资金回到财政。
+    // 初创出资 40 万进入企业；企业用其中一部分采购启动设备。
+    // v1.0 起开局有真实设备生产企业：采购优先付给企业卖方，只有政府储备成交部分回到本城财政。
     const equipmentCost = company.lastMonth.equipmentPurchased ?? 0;
     expect(equipmentCost).toBeGreaterThan(0);
-    expect(city.treasury).toBeCloseTo(treasuryBefore - 400_000 + equipmentCost, 2);
+    const kind = equipmentKindForSector(company.sector, DEMO_CONFIG);
+    const governmentUnits = equipmentStockBefore[kind] - world.equipmentMarket.initialStock[kind];
+    const governmentRefund = governmentUnits * DEMO_CONFIG.equipment.catalog[kind].price;
+    expect(city.treasury).toBeCloseTo(treasuryBefore - 400_000 + governmentRefund, 2);
     const cityShares = world.securities.holdings
       .filter(
         (holding) =>

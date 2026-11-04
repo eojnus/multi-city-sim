@@ -68,6 +68,9 @@ describe('v0.9 企业设备/产能/计划面板', () => {
     makePlayerOperator(store, 'lp-food');
     const company = store.world.companies.find((entry) => entry.id === 'lp-food')!;
     const city = store.world.cities.find((entry) => entry.id === company.cityId)!;
+    // v1.0 开局有真实设备生产企业：清空所有企业设备库存，锁定“政府储备卖方”场景。
+    for (const candidate of store.world.companies) candidate.inventory.industryEquipment = 0;
+    for (const marketCity of store.world.cities) marketCity.market.industryEquipment!.closingStock = 0;
     const beforeCash = company.cash;
     const beforeUnits = company.equipment.industry;
     const beforeTreasury = city.treasury;

@@ -30,6 +30,7 @@ import {
   buyUsedEquipment,
   cancelUsedEquipmentOffer,
   companyEquipmentKind,
+  equipmentCapacityPerUnit,
   equipmentCatalog,
   equipmentUnitPrice,
   listUsedEquipment,
@@ -2263,12 +2264,14 @@ export class GameStore {
     const equipmentRows = EQUIPMENT_KINDS.map((kind) => {
       const catalog = equipmentCatalog(kind, config);
       const units = Math.floor(company.equipment[kind] ?? 0);
+      // 统一单位（task-23）：资本品企业按 outputCapacityPerUnit（台/月），普通商品按 catalog 产能。
+      const perUnit = equipmentCapacityPerUnit(config, kind, company.recipeOutput);
       return {
         kind,
         name: catalog.name,
         units,
-        unitCapacity: catalog.capacityPerUnit * tech,
-        capacity: units * catalog.capacityPerUnit * tech,
+        unitCapacity: perUnit * tech,
+        capacity: units * perUnit * tech,
         catalogPrice: catalog.price,
         marketPrice: equipmentUnitPrice(this.world, company.cityId, kind, config),
         supply: localNewEquipmentSupply(this.world, company.cityId, kind, config),

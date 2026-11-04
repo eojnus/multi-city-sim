@@ -86,7 +86,7 @@ export function planCompanyDecision(
     config.company.minUtilization,
     config.company.maxUtilization,
   );
-  reasons.push(...productionPlan.reasons.slice(0, 3));
+  reasons.push(...productionPlan.reasons.slice(0, 6));
 
   const unmet = city.market[output]?.unmetDemand ?? 0;
   if (unmet > 0 && !productionPlan.emergency) {
@@ -138,7 +138,9 @@ export function planCompanyDecision(
   }
   targetJobs = clamp(targetJobs, 0, maxJobs);
 
-  // ---- 投资计划：现金充足时扩产；设备补助会改善投资条件 ----
+  // ---- 投资计划：现金充足时形成扩产意向；是否执行还要过 v1.0 扩产条件
+  //      （连续 2 月设备利用率≥80%、库存≤1 月销量、保留资金充足），由 planning 统一裁决。
+  //      玩家经营企业由玩家授权决定，不受该自动判定约束。 ----
   let investment = 0;
   if (company.previousMonth.profit > 0 && cashMonths > params.investmentMonths) {
     const spare = round2(company.cash - effectiveBill * params.reserveMonths);
@@ -152,9 +154,21 @@ export function planCompanyDecision(
   }
 
   // ---- 定价倾向：风格造成的缓慢偏移，仍在市场允许范围内 ----
-  const priceFactor = round2(
+  // v1.0：成品库存超过 stuckInventoryMonths 个月销量时，计划已减产，这里再小幅降价；
+  // 只是价格倾向，不按账面强制卖出、也不虚构销售。
+  const overstocked =
+    productionPlan.salesReference > 0.01 &&
+    stock > config.production.plan.stuckInventoryMonths * productionPlan.salesReference;
+  let priceFactor = round2(company.priceFactor + params.priceBias * 0.25);
+  if (overstocked && unmet <= 0.01) {
+    priceFactor = round2(priceFactor - 0.01);
+    reasons.push(
+      `成品库存超过 ${config.production.plan.stuckInventoryMonths} 个月销量：计划减产并小幅降价，不虚构销售`,
+    );
+  }
+  priceFactor = round2(
     clamp(
-      company.priceFactor + params.priceBias * 0.25,
+      priceFactor,
       config.companyAi.priceBiasMin * company.priceFactor,
       config.companyAi.priceBiasMax,
     ),

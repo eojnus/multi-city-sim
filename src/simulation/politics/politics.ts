@@ -73,6 +73,7 @@ function profileFor(city: City, index: number): LeaderProfile {
     'metal',
     'utility',
     'appliance',
+    'equipment',
   ];
   const affinity =
     trait.sector ??

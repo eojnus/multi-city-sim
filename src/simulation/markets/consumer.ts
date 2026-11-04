@@ -14,9 +14,11 @@ import { recordGroupConsumption } from '../population/household-economy';
 import {
   borrowForConsumption,
   consumptionLoanEligibility,
+  householdBasicNeedCost,
   householdConsumerBudgetSnapshot,
   householdDepositWithdrawalRemaining,
   householdGroupNeedFactor,
+  isBasicNeedGood,
   withdrawHouseholdDeposit,
 } from '../population/household-finance';
 import { clamp, round2 } from '../core/math';
@@ -28,6 +30,14 @@ export interface ConsumerGroupResult {
   budget: number;
   spend: number;
   desiredCost: number;
+  /** v1.0：想买的量（desired，未按预算缩放；基本需求不因失业削减）。 */
+  desired?: Record<GoodId, number>;
+  /** v1.0：可支付的有效需求量（effective；基本需求=desired，非基本按日常预算与消费意愿缩放）。 */
+  effective?: Record<GoodId, number>;
+  /** v1.0：日常现金预算 = min(手头现金, 0.8×上月可支配收入 + 0.05×现金)。 */
+  dailyBudget?: number;
+  /** v1.0：基本需求月成本（food 全量；基本需求支付上限不得低于此值或实际现金上限）。 */
+  basicNeedCost?: number;
   bought: Record<GoodId, number>;
   /** 因供给/配送不足而未满足（不含资金缺口）。 */
   unmet: Record<GoodId, number>;
@@ -179,23 +189,28 @@ function restoreStagedSales(
 }
 
 /**
- * 居民消费需求（两阶段，四层口径，DECISIONS #39/#40/#26）。
+ * 居民消费需求（两阶段，四层口径，DECISIONS #39/#40/#26；v1.0 任务书第四节）。
  *
- * 阶段 A（本地优先）：所有城市先只在本城成交，不跨城。A 阶段按“现金预算 → 闲置现金/可提存款”
- *   顺序消费本地供给，群体按人均预算升序，让预算更紧的群体优先获得本地有限库存。
+ * 阶段 A（本地优先）：所有城市先只在本城成交，不跨城。A 阶段按“基本需求 → 非基本需求”
+ *   顺序消费本地供给，群体按人均预算升序，让预算更紧的群体优先获得本地有限库存：
+ *   - 基本需求（food）支付上限 = min(手头现金 + 本月剩余可提存款, 基本需求成本)，
+ *     日常预算不能阻挡基本需求支付；
+ *   - 非基本消费只用日常预算内剩余现金（受预算与消费意愿约束，不自动耗尽积蓄）。
  * 阶段 B（跨城补缺口）：A 阶段结束后，再按城市顺序处理各群体的本地缺口：跨城购买按当前
  *   真实 offeredStock 重新报价（quoteIntercityPurchase），不足就部分成交、剩余如实记 unmetDemand；
  *   资金按“手头现金 → 提取存款（单月≤月初存款5%）→ 消费贷”补足，失败原子回滚，
  *   不得破坏 A 阶段已记账的成交，也不得伪造供给或透支。
  *
- * 四层口径：
- * 1) 期望需求：按人口、人均需要、就业系数与价格弹性计算；
- * 2) 资金有效需求：以现金预算（上月可支配收入×0.8 + 现金×0.05，且不超过现金）缩放；
- * 3) 成交：A 阶段本地优先、B 阶段跨城补缺口；有效需求缩放 ≠ 资金上限——现金预算只是需求的
- *    缩放口径，本月尚未使用的现金与可提存款会先用于真实供给缺口，只有二者都不足时才
- *    先确认供给再放款补足；
- * 4) 缺口分账：供给/配送不足记 unmet，资金不足（含可借额度不足）记 unmetFunding。
- *
+ * 四层口径（v1.0）：
+ * 1) desired（想买）：按人口、人均需要、价格弹性计算；基本需求数量不因失业/非劳动身份削减，
+ *    非基本需求乘 householdGroupNeedFactor（消费意愿）；
+ * 2) effective（可支付有效需求）：基本需求不按预算缩放（预算不能阻挡基本需求支付），
+ *    非基本需求按“日常预算 / 非基本期望成本”缩放；
+ * 3) sold（真实成交）：A 阶段本地优先、B 阶段跨城补缺口；有效需求缩放 ≠ 资金上限；
+ * 4) unmet（缺货）：供给/配送不足记 unmet，资金不足（含可借额度不足）记 unmetFunding。
+ * 日常预算公式（v1.0）：min(手头现金, 上月可支配收入×0.8 + 现金×0.05)；基本需求可以突破它，
+ * 但最多到“基本需求成本”或实际可用现金（含单月存款提取）上限。
+ * 支付顺序：手头现金 → 提取存款 → 合规消费贷；仍有足够现金时不会先借贷。
  * 贷款是真实债务，资金从银行支付给卖方，不计入居民收入；不借超过已确认供给的资金。
  * 净账目：现金减少=实际现金支付、存款减少=实际提取、债务增加=贷款，三者之和=成交额。
  */
@@ -243,6 +258,14 @@ interface GroupConsumptionState {
   snapshot: ReturnType<typeof householdConsumerBudgetSnapshot>;
   /** 现金预算：有效需求缩放口径，不是资金硬上限（DECISIONS #26）。 */
   budget: number;
+  /** v1.0：日常现金预算 = min(手头现金, 0.8×上月可支配收入 + 0.05×现金)。 */
+  dailyBudget: number;
+  /** v1.0：基本需求月成本（food 全量，不因失业/非劳动身份削减）。 */
+  basicNeedCost: number;
+  /** v1.0：基本需求数量（按人均需要全额，不含价格弹性）；预算保障以它为上限。 */
+  basicNeedQty: Map<GoodId, number>;
+  /** v1.0：基本需求现金保障上限（手头现金 + 单月可提存款，封顶于基本需求成本）。 */
+  essentialCashCap: number;
   /** 开始消费时的手头现金。 */
   cashAtStart: number;
   desiredQty: Map<GoodId, number>;
@@ -253,12 +276,14 @@ interface GroupConsumptionState {
   recorded: Record<GoodId, number>;
   bought: Record<GoodId, number>;
   unmet: Record<GoodId, number>;
-  /** A 阶段现金预算段成交额。 */
-  cashSpend: number;
-  /** A 阶段闲置现金/存款段成交额。 */
-  nonLoanSpend: number;
-  /** B 阶段跨城非贷款段成交额。 */
-  intercityNonLoanSpend: number;
+  /** A 阶段本地基本需求现金成交额。 */
+  essentialSpend: number;
+  /** A 阶段本地非基本需求现金成交额（受日常预算约束，不动积蓄）。 */
+  nonEssentialSpend: number;
+  /** B 阶段跨城基本需求现金成交额。 */
+  intercityEssentialSpend: number;
+  /** B 阶段跨城非基本需求现金成交额（受日常预算约束）。 */
+  intercityNonEssentialSpend: number;
   withdrawn: number;
   loanFinanced: number;
   unmetFunding: number;
@@ -294,58 +319,101 @@ function createCityConsumptionState(
       if (perCapitaA !== perCapitaB) return perCapitaA < perCapitaB ? -1 : 1;
       return a.group.id.localeCompare(b.group.id);
     })
-    .map(({ group, snapshot }) => ({
-      group,
-      snapshot,
-      budget: snapshot.cashBudget,
-      cashAtStart: round2(Math.max(0, group.cash)),
-      desiredQty: new Map<GoodId, number>(),
-      effectiveQty: new Map<GoodId, number>(),
-      desiredCost: 0,
-      affordability: 1,
-      recorded: emptyGoodsRecord(),
-      bought: emptyGoodsRecord(),
-      unmet: emptyGoodsRecord(),
-      cashSpend: 0,
-      nonLoanSpend: 0,
-      intercityNonLoanSpend: 0,
-      withdrawn: 0,
-      loanFinanced: 0,
-      unmetFunding: 0,
-    }));
+    .map(({ group, snapshot }) => {
+      const cashAtStart = round2(Math.max(0, group.cash));
+      const basicNeedCost = householdBasicNeedCost(world, group, config);
+      // 基本需求保障上限：预算不能阻挡基本需求，但天花板是“真实现金 + 本月可提存款”且不超过基本需求成本。
+      const essentialCashCap = round2(
+        Math.max(
+          0,
+          Math.min(
+            cashAtStart + householdDepositWithdrawalRemaining(world, group),
+            basicNeedCost,
+          ),
+        ),
+      );
+      return {
+        group,
+        snapshot,
+        budget: snapshot.cashBudget,
+        dailyBudget: round2(Math.max(0, Math.min(cashAtStart, snapshot.referenceSpend))),
+        basicNeedCost,
+        basicNeedQty: new Map<GoodId, number>(),
+        essentialCashCap,
+        cashAtStart,
+        desiredQty: new Map<GoodId, number>(),
+        effectiveQty: new Map<GoodId, number>(),
+        desiredCost: 0,
+        affordability: 1,
+        recorded: emptyGoodsRecord(),
+        bought: emptyGoodsRecord(),
+        unmet: emptyGoodsRecord(),
+        essentialSpend: 0,
+        nonEssentialSpend: 0,
+        intercityEssentialSpend: 0,
+        intercityNonEssentialSpend: 0,
+        withdrawn: 0,
+        loanFinanced: 0,
+        unmetFunding: 0,
+      };
+    });
   return { city, ledgers, groups };
 }
 
-/** 2) 资金有效需求：低于 minAffordability 时仍保留最低有效需求，用预算封顶成交。 */
+/**
+ * 2) 需求分四层（v1.0 任务书第四节）：
+ * - desired（想买）：按人口、人均需要、价格弹性计算；基本需求（food）不乘失业/非劳动系数，
+ *   非基本需求乘 householdGroupNeedFactor（消费意愿）。
+ * - effective（可支付）：基本需求不按预算缩放（预算不能阻挡基本需求支付，后续用现金→存款→贷款补足）；
+ *   非基本需求按“日常预算 / 非基本期望成本”缩放（受预算与消费意愿约束，不自动耗尽积蓄）。
+ */
 function computeGroupDemand(
   state: CityConsumptionState,
   group: GroupConsumptionState,
   config: DemoConfig,
 ): void {
   let desiredCost = 0;
+  let nonBasicDesiredCost = 0;
   for (const good of CONSUMER_GOODS) {
     const price = state.city.market[good.id]?.price ?? good.basePrice;
     const elasticity = Math.pow(
       good.basePrice / Math.max(0.01, price),
       config.consumer.priceElasticity,
     );
+    const basic = isBasicNeedGood(good.id);
+    const needFactor = basic ? 1 : householdGroupNeedFactor(group.group.occupation, config);
     const qty = round2(
       group.group.people *
         good.perCapitaMonthlyNeed *
-        householdGroupNeedFactor(group.group.occupation, config) *
+        needFactor *
         clamp(elasticity, 0.55, 1.85),
     );
     group.desiredQty.set(good.id, qty);
+    if (basic) {
+      // 保障口径：基本需求数量 = 人均需要 × 人口，不乘价格弹性、不因失业削减。
+      // 价格低时 desired 可能高于它，超出的部分不再享受“预算不能阻挡”的保障。
+      group.basicNeedQty.set(good.id, round2(group.group.people * good.perCapitaMonthlyNeed));
+    }
     desiredCost += qty * price;
+    if (!basic) nonBasicDesiredCost += qty * price;
   }
   group.desiredCost = round2(desiredCost);
-  group.affordability =
-    group.desiredCost <= 0
+  // 非基本需求只能用日常预算扣掉“基本需求现金保障”之后的剩余部分，避免靠贷款突破预算、耗尽积蓄。
+  const nonBasicBudget = round2(Math.max(0, group.dailyBudget - group.essentialCashCap));
+  const nonBasicAffordability =
+    nonBasicDesiredCost <= 0
       ? 1
-      : clamp(group.budget / group.desiredCost, config.consumer.minAffordability, 1);
+      : nonBasicBudget <= 0
+        ? 0
+        : clamp(nonBasicBudget / nonBasicDesiredCost, config.consumer.minAffordability, 1);
+  group.affordability =
+    group.desiredCost <= 0 ? 1 : clamp(group.dailyBudget / group.desiredCost, 0, 1);
   for (const good of CONSUMER_GOODS) {
-    const qty = round2((group.desiredQty.get(good.id) ?? 0) * group.affordability);
-    group.effectiveQty.set(good.id, qty);
+    const desired = group.desiredQty.get(good.id) ?? 0;
+    const effective = isBasicNeedGood(good.id)
+      ? Math.min(desired, group.basicNeedQty.get(good.id) ?? 0)
+      : round2(desired * nonBasicAffordability);
+    group.effectiveQty.set(good.id, round2(effective));
   }
 }
 
@@ -388,7 +456,11 @@ function recordAttempt(
 
 /**
  * 阶段 A：本地消费。所有城市都先跑完本阶段，然后才进入跨城阶段。
- * A1 现金预算段（只买本地）；A2 闲置现金 + 可提存款段（只买本地）；A3 为本地成交提款。
+ * A1) 基本需求（food）先买本地供给：支付上限 = min(手头现金 + 本月剩余可提存款, 基本需求成本)，
+ *     即日常预算不能阻挡基本需求支付（可动用更多当前现金/存款，直至成本或现金上限）；
+ * A2) 非基本需求再买本地供给：支付上限 = min(日常预算 − 已花基本需求现金, 剩余现金)，
+ *     受预算与消费意愿约束，不动积蓄、不提前透支未来；
+ * A3) 为本地真实成交提款（只有基本需求可能超过手头现金，提取≤月初存款5%）。
  * 贷款只在本阶段之后（B 阶段）统一处理，保证每群体每月最多一笔、且不跨城重复放款。
  */
 function runLocalConsumptionPhase(
@@ -398,59 +470,60 @@ function runLocalConsumptionPhase(
 ): void {
   for (const group of state.groups) {
     computeGroupDemand(state, group, config);
+    const allowance = round2(householdDepositWithdrawalRemaining(world, group.group));
 
-    // A1) 现金预算内的本地成交（预算硬封顶）。
-    let remainingBudget = group.budget;
+    // A1) 基本需求：预算不足时可动用更多手头现金/可提存款，直至基本需求成本或实际现金上限。
+    let essentialCapacity = round2(
+      Math.max(0, Math.min(group.cashAtStart + allowance, group.basicNeedCost)),
+    );
     for (const good of CONSUMER_GOODS) {
+      if (!isBasicNeedGood(good.id)) continue;
       const effectiveQty = group.effectiveQty.get(good.id) ?? 0;
       if (effectiveQty <= 0) continue;
       const price = state.city.market[good.id]?.price ?? good.basePrice;
       const affordableQty =
-        remainingBudget > 0
-          ? Math.floor((remainingBudget / Math.max(0.01, price)) * 100) / 100
+        essentialCapacity > 0
+          ? Math.floor((essentialCapacity / Math.max(0.01, price)) * 100) / 100
           : 0;
       const qty = round2(Math.min(effectiveQty, affordableQty));
       if (qty <= 0) continue;
       const local = applyConsumerDemand(world, state.city, state.ledgers, good.id, qty, config);
       group.recorded[good.id] = round2((group.recorded[good.id] ?? 0) + qty);
       group.bought[good.id] = round2((group.bought[good.id] ?? 0) + local.qty);
-      group.cashSpend = round2(group.cashSpend + local.spend);
-      remainingBudget = round2(Math.max(0, remainingBudget - local.spend));
+      group.essentialSpend = round2(group.essentialSpend + local.spend);
+      essentialCapacity = round2(Math.max(0, essentialCapacity - local.spend));
     }
 
-    // A2) 支付顺序：手头现金 → 提取存款（单月≤月初存款5%）。非贷款资金只用于本地缺口。
-    const allowance = round2(householdDepositWithdrawalRemaining(world, group.group));
-    let nonLoanCapacity = round2(
-      Math.max(0, group.cashAtStart + allowance - group.cashSpend),
+    // A2) 非基本需求：只用日常预算内剩余现金（并受实际剩余现金约束），不自动耗尽积蓄。
+    let nonEssentialCapacity = round2(
+      Math.max(
+        0,
+        Math.min(
+          group.dailyBudget - group.essentialSpend,
+          group.cashAtStart - group.essentialSpend,
+        ),
+      ),
     );
-    for (const entry of gapGoodsOf(group)) {
-      if (nonLoanCapacity <= 0) break;
-      const quote = quoteLocalPurchase(
-        world,
-        state.city,
-        entry.goodId,
-        entry.gapQty,
-        nonLoanCapacity,
-      );
-      if (quote.qty <= 0 || quote.cost <= 0) continue;
-      const bought = executePurchase(
-        world,
-        state.city,
-        state.ledgers,
-        entry.goodId,
-        quote.qty,
-        quote.cost,
-        { consumer: true },
-        config,
-      );
-      group.bought[entry.goodId] = round2((group.bought[entry.goodId] ?? 0) + bought.qty);
-      group.nonLoanSpend = round2(group.nonLoanSpend + bought.spend);
-      nonLoanCapacity = round2(Math.max(0, nonLoanCapacity - bought.spend));
-      recordAttempt(state.ledgers, group, entry.goodId, quote.qty, bought.qty);
+    for (const good of CONSUMER_GOODS) {
+      if (isBasicNeedGood(good.id)) continue;
+      const effectiveQty = group.effectiveQty.get(good.id) ?? 0;
+      if (effectiveQty <= 0) continue;
+      const price = state.city.market[good.id]?.price ?? good.basePrice;
+      const affordableQty =
+        nonEssentialCapacity > 0
+          ? Math.floor((nonEssentialCapacity / Math.max(0.01, price)) * 100) / 100
+          : 0;
+      const qty = round2(Math.min(effectiveQty, affordableQty));
+      if (qty <= 0) continue;
+      const local = applyConsumerDemand(world, state.city, state.ledgers, good.id, qty, config);
+      group.recorded[good.id] = round2((group.recorded[good.id] ?? 0) + qty);
+      group.bought[good.id] = round2((group.bought[good.id] ?? 0) + local.qty);
+      group.nonEssentialSpend = round2(group.nonEssentialSpend + local.spend);
+      nonEssentialCapacity = round2(Math.max(0, nonEssentialCapacity - local.spend));
     }
 
-    // A3) 现金不够的本地真实成交缺口，才从存款提取（helper 内部再封顶 5%/余额）。
-    const localPayments = round2(group.cashSpend + group.nonLoanSpend);
+    // A3) 只有基本需求可能超过手头现金，按真实资金缺口提款。
+    const localPayments = round2(group.essentialSpend + group.nonEssentialSpend);
     const neededWithdrawal = round2(Math.max(0, localPayments - group.cashAtStart));
     if (neededWithdrawal > 0) {
       group.withdrawn = round2(
@@ -471,26 +544,32 @@ function runIntercityConsumptionPhase(
   config: DemoConfig,
 ): void {
   for (const group of state.groups) {
-    // B1) 跨城非贷款段：手头剩余现金 + 剩余可提存款额度。
+    // B1) 跨城补缺口：先基本需求（手头现金 + 已提存款 + 剩余可提额度），
+    //     再非基本需求（仅日常预算内剩余现金，不消耗积蓄）。
     const allowance = round2(householdDepositWithdrawalRemaining(world, group.group));
-    let capacity = round2(
+    const localSpend = round2(group.essentialSpend + group.nonEssentialSpend);
+    // 基本需求现金支付上限：先受“基本需求成本”约束（保障只到基本需求为止，不因价格弹性多买），
+    // 再受实际可用现金（含本月可提存款）约束。
+    const essentialBudgetLeft = round2(
+      Math.max(0, group.basicNeedCost - group.essentialSpend - group.intercityEssentialSpend),
+    );
+    let essentialCapacity = round2(
       Math.max(
         0,
-        group.cashAtStart +
-          group.withdrawn +
-          allowance -
-          group.cashSpend -
-          group.nonLoanSpend,
+        Math.min(
+          group.cashAtStart + group.withdrawn + allowance - localSpend,
+          essentialBudgetLeft,
+        ),
       ),
     );
     for (const entry of gapGoodsOf(group)) {
-      if (capacity <= 0) break;
+      if (!isBasicNeedGood(entry.goodId) || essentialCapacity <= 0) continue;
       const quote = quoteIntercityPurchase(
         world,
         state.city,
         entry.goodId,
         entry.gapQty,
-        capacity,
+        essentialCapacity,
         config,
       );
       if (quote.qty <= 0 || quote.cost <= 0) continue;
@@ -505,14 +584,60 @@ function runIntercityConsumptionPhase(
         config,
       );
       group.bought[entry.goodId] = round2((group.bought[entry.goodId] ?? 0) + imported.qty);
-      group.intercityNonLoanSpend = round2(group.intercityNonLoanSpend + imported.spend);
-      capacity = round2(Math.max(0, capacity - imported.spend));
+      group.intercityEssentialSpend = round2(group.intercityEssentialSpend + imported.spend);
+      essentialCapacity = round2(Math.max(0, essentialCapacity - imported.spend));
       recordAttempt(state.ledgers, group, entry.goodId, quote.qty, imported.qty);
     }
 
-    // B2) 跨城成交后仍缺的现金，按真实缺口补提存款。
+    const essentialTotal = round2(group.essentialSpend + group.intercityEssentialSpend);
+    const nonEssentialSpent = round2(group.nonEssentialSpend);
+    const remainingCashForNonEssential = round2(
+      Math.max(0, group.cashAtStart - essentialTotal - nonEssentialSpent),
+    );
+    let nonEssentialCapacity = round2(
+      Math.max(
+        0,
+        Math.min(
+          group.dailyBudget - essentialTotal - nonEssentialSpent,
+          remainingCashForNonEssential,
+        ),
+      ),
+    );
+    for (const entry of gapGoodsOf(group)) {
+      if (isBasicNeedGood(entry.goodId) || nonEssentialCapacity <= 0) continue;
+      const quote = quoteIntercityPurchase(
+        world,
+        state.city,
+        entry.goodId,
+        entry.gapQty,
+        nonEssentialCapacity,
+        config,
+      );
+      if (quote.qty <= 0 || quote.cost <= 0) continue;
+      const imported = executeIntercityPurchase(
+        world,
+        state.city,
+        state.ledgers,
+        entry.goodId,
+        quote.qty,
+        quote.cost,
+        { consumer: true, householdGroupId: group.group.id },
+        config,
+      );
+      group.bought[entry.goodId] = round2((group.bought[entry.goodId] ?? 0) + imported.qty);
+      group.intercityNonEssentialSpend = round2(
+        group.intercityNonEssentialSpend + imported.spend,
+      );
+      nonEssentialCapacity = round2(Math.max(0, nonEssentialCapacity - imported.spend));
+      recordAttempt(state.ledgers, group, entry.goodId, quote.qty, imported.qty);
+    }
+
+    // B2) 跨城成交后仍缺的现金（只可能来自基本需求），按真实缺口补提存款。
     const cashPayments = round2(
-      group.cashSpend + group.nonLoanSpend + group.intercityNonLoanSpend,
+      group.essentialSpend +
+        group.nonEssentialSpend +
+        group.intercityEssentialSpend +
+        group.intercityNonEssentialSpend,
     );
     const neededWithdrawal = round2(
       Math.max(0, cashPayments - group.cashAtStart - group.withdrawn),
@@ -545,7 +670,10 @@ function runIntercityConsumptionPhase(
 
     // B5) 逐群体扣款并记录“想要购买”的成本（贷款已入账，扣款不超出现金）。
     const finalCashPayments = round2(
-      group.cashSpend + group.nonLoanSpend + group.intercityNonLoanSpend,
+      group.essentialSpend +
+        group.nonEssentialSpend +
+        group.intercityEssentialSpend +
+        group.intercityNonEssentialSpend,
     );
     const groupSpend = round2(finalCashPayments + group.loanFinanced);
     const paid = recordGroupConsumption(
@@ -561,10 +689,22 @@ function runIntercityConsumptionPhase(
     group.group.lastMonth.unmetFunding = round2(
       (group.group.lastMonth.unmetFunding ?? 0) + unmetFunding,
     );
+    // v1.0：把四层口径中的 desired / effective 也写进结果，便于审计与测试区分
+    // “想买多少”“能支付多少”“真实成交多少”“缺货多少”。
+    const desiredRecord = emptyGoodsRecord();
+    const effectiveRecord = emptyGoodsRecord();
+    for (const good of CONSUMER_GOODS) {
+      desiredRecord[good.id] = round2(group.desiredQty.get(good.id) ?? 0);
+      effectiveRecord[good.id] = round2(group.effectiveQty.get(good.id) ?? 0);
+    }
     group.entry = {
       budget: round2(group.budget),
       spend: round2(paid),
       desiredCost: round2(group.desiredCost),
+      desired: desiredRecord,
+      effective: effectiveRecord,
+      dailyBudget: round2(group.dailyBudget),
+      basicNeedCost: round2(group.basicNeedCost),
       bought: group.bought,
       unmet: group.unmet,
       loanAvailable: round2(group.snapshot.loanAvailable),
@@ -644,13 +784,16 @@ function runLoanFinancedPurchases(
   const plannedCost = round2(plans.reduce((total, plan) => total + plan.cost, 0));
   if (plans.length === 0 || plannedCost < credit.minLoanAmount) return;
 
-  // B3.2 预检：单笔最低额、授信资格/冻结、当月笔数、真实可用额度（放款前不再变化）。
+  // B3.2 预检：单笔最低额、授信资格/冻结、当月笔数；额度以消费阶段开始时的快照为准
+  // （成交本身会改变企业估值/投资实体权益，不能拿变动后的额度否决已按快照排好的计划）。
+  if (plannedCost > loanAvailable + 0.01) return;
   const eligibility = consumptionLoanEligibility(
     world,
     group.group,
     config,
     plannedCost,
     world.time.tick,
+    { skipCreditLimit: true },
   );
   if (!eligibility.ok) return;
 
@@ -690,12 +833,13 @@ function runLoanFinancedPurchases(
   }
 
   // B3.3 放款金额 = 最终实际成交额（不多借一分钱）；低于单笔最低额则不得成交。
-  const finalEligibility =
-    actualSpend >= credit.minLoanAmount
-      ? consumptionLoanEligibility(world, group.group, config, actualSpend, world.time.tick)
-      : ({ ok: false as const, error: '' } as const);
-  if (finalEligibility.ok) {
-    const loan = borrowForConsumption(world, group.group, config, actualSpend, world.time.tick);
+  // 授信已在预检时按“计划成交额”批准；成交本身会经由企业现金/库存/股价影响投资实体权益，
+  // 因而不能用成交后的额度二次否决已批准的交易（否则贷款恰好用满额度时会被自身成交回滚）。
+  const approved = actualSpend >= credit.minLoanAmount && actualSpend <= round2(loanAvailable) + 0.01;
+  if (approved) {
+    const loan = borrowForConsumption(world, group.group, config, actualSpend, world.time.tick, {
+      prechecked: true,
+    });
     if (loan.ok) {
       group.loanFinanced = actualSpend;
       for (const entry of executed) {
@@ -718,7 +862,7 @@ function runLoanFinancedPurchases(
   world.log.push({
     tick: world.time.tick,
     kind: 'warning',
-    message: `${group.group.name} 的消费贷成交额 ${actualSpend.toFixed(2)} 低于最低贷款额 ${credit.minLoanAmount.toFixed(0)}，本笔信贷消费已回滚。`,
+    message: `${group.group.name} 的消费贷成交额 ${actualSpend.toFixed(2)} 低于单笔最低贷款额 ${credit.minLoanAmount.toFixed(0)} 或超出已批准额度，本笔信贷消费已回滚。`,
   });
 }
 

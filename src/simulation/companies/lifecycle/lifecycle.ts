@@ -29,7 +29,7 @@ import {
 import { groupsOfCity, groupHolder } from '../../investors/investors';
 import { availableCredit } from '../../banking/credit';
 import { companyHolders } from '../../securities/securities';
-import { settleCompanyLiquidation } from '../../banking/banking';
+import { settleCompanyLiquidation, openLoan, refreshBankingTotals } from '../../banking/banking';
 import { syncCityPopulationFromAllocations } from '../../population/population';
 import { workforceSkillMultiplier } from '../../labor/workforce';
 import { cityMarketPrices } from '../../markets/markets';
@@ -38,17 +38,29 @@ import {
   buyNewEquipment,
   disposeCompanyEquipment,
   emptyEquipmentAssets,
+  equipmentCapacityPerUnit,
   equipmentKindForSector,
   executeNewEquipmentPlan,
   planNewEquipmentPurchase,
 } from '../../equipment/equipment';
 import {
   FOUNDING_MIN_SCORE,
+  assessFounding,
+  assessFoundingOpportunities,
+  founderCapacityFor,
   foundingCandidateForOutput,
   pickFoundingCandidate,
+  pickFoundingOpportunity,
   plannedEquipmentUnits,
+  recordFoundingAttempt,
+  retuneTierForAssessment,
   scoreFoundingCandidates,
   sectorForOutput,
+  selectFoundingTier,
+  type FounderType,
+  type FoundingAssessment,
+  type FoundingObstacle,
+  type FoundingScaleTier,
 } from '../founding';
 import { equipmentSubsidyPayment, startupGrantPayment } from '../../policies/policies';
 import { activePolicy, remainingBudget, startupSupportActive } from '../../policies/query';
@@ -91,11 +103,20 @@ export function freshAiState(companyId: string, sector: SectorId, index: number)
 
 export interface FoundingRequest {
   cityId: string;
-  founderType: 'investorGroup' | 'company' | 'government';
+  /** 省略时由评估自动选择出资主体（居民投资群体 → 企业 → 政府）。 */
+  founderType?: 'investorGroup' | 'company' | 'government';
   founderId?: string;
   recipeOutput?: string;
+  /** 显式资本预算：给出时沿用 v0.9 兼容路径（测试/旧调用方）；省略时走 v1.0 档位评估路径。 */
   capital?: number;
   log?: LogEntry[];
+}
+
+export interface FoundCompanyOptions {
+  /** 强制使用某个已评估的规模档位（供 UI 预览与测试）。 */
+  plan?: FoundingScaleTier;
+  /** 是否允许创业贷款（默认允许；测试可关闭）。 */
+  allowLoan?: boolean;
 }
 
 function foundingCount(world: WorldState, predicate: (record: FoundingRecord) => boolean): number {
@@ -133,6 +154,7 @@ export function foundCompany(
   world: WorldState,
   request: FoundingRequest,
   config: DemoConfig,
+  options?: FoundCompanyOptions,
 ): ActionResult & { companyId?: string } {
   const log = request.log ?? [];
   const city = world.cities.find((entry) => entry.id === request.cityId);
@@ -140,6 +162,13 @@ export function foundCompany(
   if (cityCompanyCount(world, city.id) >= config.lifecycle.maxCompaniesPerCity) {
     return { ok: false, error: `该城市企业数量已达上限（${config.lifecycle.maxCompaniesPerCity} 家）` };
   }
+
+  // v1.0：未显式给资本预算（玩家/AI 新路径）时，先评估最小可行规模，再按真实出资 + 授信贷款创办。
+  // 显式 capital 的旧调用方继续走 v0.9 兼容路径，保证既有测试与存档行为不变。
+  if (request.capital === undefined && !options?.plan) {
+    return foundCompanyV1(world, request, city, config, log, options);
+  }
+  const founderType = request.founderType ?? 'investorGroup';
 
   const startupPolicy = startupSupportActive(world, city.id);
   const capitalRelief = startupPolicy ? config.policies.startup.capitalRelief : 0;
@@ -188,111 +217,24 @@ export function foundCompany(
     };
   }
 
-  const investors: FoundingInvestor[] = [];
-  if (request.founderType === 'investorGroup') {
-    if (
-      foundingCount(
-        world,
-        (record) =>
-          record.founderType === 'investorGroup' &&
-          record.investors.some((investor) => investor.id === request.founderId),
-      ) >= config.lifecycle.maxCompaniesPerInvestorGroup
-    ) {
-      return { ok: false, error: '该居民投资群体已达到可创办企业数量上限' };
-    }
-    const eligible = groupsOfCity(world, city.id)
-      .filter((group) => {
-        const people = Math.round(city.population.total * group.populationShare);
-        return (
-          people >= config.lifecycle.populationPerInvestorGroup / config.lifecycle.maxInvestorsPerSyndicate &&
-          group.cash > 0
-        );
-      })
-      .sort((a, b) => b.cash - a.cash || a.id.localeCompare(b.id));
-    if (eligible.length === 0) return { ok: false, error: '没有具备投资能力的居民投资群体' };
-    const syndicate = eligible.slice(0, config.lifecycle.maxInvestorsPerSyndicate);
-    // 等额出资；买不起份额的群体退出，直到所有参与者都能承担。
-    let sharesCount = syndicate.length;
-    while (sharesCount > 0) {
-      const share = round2(capital / sharesCount);
-      const affordable = syndicate.slice(0, sharesCount).filter((group) => group.cash + 1e-6 >= share);
-      if (affordable.length === sharesCount) break;
-      sharesCount = affordable.length;
-    }
-    if (sharesCount === 0) return { ok: false, error: '居民投资群体资金不足，无法创办企业' };
-    const share = round2(capital / sharesCount);
-    let remaining = capital;
-    for (let index = 0; index < sharesCount; index++) {
-      const group = syndicate[index]!;
-      const amount = index === sharesCount - 1 ? round2(remaining) : share;
-      investors.push({ type: 'investorGroup', id: group.id, cash: amount, shares: 0 });
-      remaining = round2(remaining - amount);
-    }
-    if (remaining < -0.01) return { ok: false, error: '出资分配失败' };
-  } else if (request.founderType === 'company') {
-    const founder = world.companies.find((company) => company.id === request.founderId);
-    if (!founder) return { ok: false, error: '创办企业不存在' };
-    if (founder.cityId !== city.id) return { ok: false, error: '现有企业只能在本城创办新企业（暂定规则）' };
-    if (
-      foundingCount(
-        world,
-        (record) => record.founderType === 'company' && record.investors.some((investor) => investor.id === founder.id),
-      ) >= config.lifecycle.maxCompaniesPerCompany
-    ) {
-      return { ok: false, error: '该企业已达到可创办企业数量上限' };
-    }
-    if (founder.cash + 1e-6 < capital) return { ok: false, error: '创办企业自有资金不足' };
-    investors.push({ type: 'company', id: founder.id, cash: capital, shares: 0 });
-  } else {
-    if (
-      foundingCount(
-        world,
-        (record) => record.founderType === 'government' && record.cityId === city.id,
-      ) >= config.lifecycle.maxGovernmentCompaniesPerCity
-    ) {
-      return { ok: false, error: '该城市政府已达到可创办企业数量上限' };
-    }
-    if (city.treasury + 1e-6 < capital) return { ok: false, error: '市政府财政资金不足' };
-    investors.push({ type: 'government', id: city.id, cash: capital, shares: 0 });
-  }
+  const founderResult = collectFoundingInvestors(world, request, city, config, capital, founderType);
+  if (!founderResult.ok) return { ok: false, error: founderResult.error };
+  const investors = founderResult.investors;
 
   const companyId = nextCompanyId(world, city.id);
   const totalShares = 1_000_000;
   const votingShares = Math.round(totalShares * 0.8);
   const nonVotingShares = totalShares - votingShares;
-  const outputName = GOODS.find((good) => good.id === pick.output)?.name ?? pick.output;
-  const company: Company = {
-    id: companyId,
-    name: `${city.name}${outputName}${COMPANY_NAME_SUFFIX[world.companies.length % COMPANY_NAME_SUFFIX.length]}`,
-    cityId: city.id,
-    sector: pick.sector,
-    recipeOutput: pick.output as Company['recipeOutput'],
-    cash: capital,
-    debt: 0,
-    capacity: 0,
-    baseCapacity: 0,
-    maxCapacity: 0,
-    utilization: config.company.initialUtilization,
-    employees: 0,
-    baseWageBill: 0,
-    roles: { management: 0, production: 0, sales: 0, research: 0 },
-    jobDemand: 0,
-    wageRate: config.labor.privateWageRate,
-    priceFactor: 1,
-    inventory: createEmptyInventory(),
-    totalShares,
-    lastMonth: blankStats(),
-    previousMonth: blankStats(),
-    equipment: emptyEquipmentAssets(),
-    equipmentCapacity: 0,
-    equipmentCapacityRemainder: 0,
-    salesHistory: [],
-    productionPlan: null,
-    recentProfits: [],
-    dividendPayoutRatio: config.governance.defaultDividendPayoutRatio,
-    note: `创办于第 ${world.time.tick} 期；资本 ${capital.toFixed(0)}。${startupPolicy ? '获得初创扶持（演示）。' : ''}`,
-    ai: freshAiState(companyId, pick.sector, world.lifecycle.foundings.length),
-  };
+  const company = buildFoundingCompany(
+    world,
+    city,
+    companyId,
+    pick.output as GoodId,
+    pick.sector,
+    capital,
+    config,
+    startupPolicy,
+  );
   // v0.9 T3：用创办资本真实采购启动设备（同城设备企业优先，政府开局库存补足）。
   // 在扣除出资人资金之前执行；购买失败直接返回，不产生任何资金 / 股份副作用。
   const purchase = buyNewEquipment(world, company, candidate.equipmentKind, equipUnits, config, world.time.tick, {
@@ -389,15 +331,15 @@ export function foundCompany(
     companyName: company.name,
     sector: company.sector,
     recipeOutput: company.recipeOutput,
-    founderType: request.founderType,
+    founderType,
     capital,
     investorCount: investors.length,
     investors,
     governmentGrant: grant,
     note: `${
-      request.founderType === 'investorGroup'
+      founderType === 'investorGroup'
         ? `${investors.length} 个居民投资群体联合出资（按人口与投资能力筛选，演示规则）。`
-        : request.founderType === 'company'
+        : founderType === 'company'
           ? '由现有企业出资创办，股份由出资企业持有。'
           : '由市政府财政出资创办，股份由城市持有。'
     } 行业评分 ${candidate.score.toFixed(1)} 分（${candidate.reasons.slice(0, 3).join('；')}）；启动采购${
@@ -416,6 +358,450 @@ export function foundCompany(
     message: `${city.name} 新企业「${company.name}」成立：${record.note}资本 ${capital.toFixed(0)}${grant > 0 ? `，财政扶持 ${grant.toFixed(0)}` : ''}。`,
   });
   return { ok: true, note: `${company.name} 已成立。`, amount: capital, companyId: company.id };
+}
+
+function buildFoundingCompany(
+  world: WorldState,
+  city: City,
+  companyId: string,
+  output: GoodId,
+  sector: SectorId,
+  capital: number,
+  config: DemoConfig,
+  startupPolicy: unknown,
+): Company {
+  const outputName = GOODS.find((good) => good.id === output)?.name ?? output;
+  return {
+    id: companyId,
+    name: `${city.name}${outputName}${COMPANY_NAME_SUFFIX[world.companies.length % COMPANY_NAME_SUFFIX.length]}`,
+    cityId: city.id,
+    sector,
+    recipeOutput: output as Company['recipeOutput'],
+    cash: capital,
+    debt: 0,
+    capacity: 0,
+    baseCapacity: 0,
+    maxCapacity: 0,
+    utilization: config.company.initialUtilization,
+    employees: 0,
+    baseWageBill: 0,
+    roles: { management: 0, production: 0, sales: 0, research: 0 },
+    jobDemand: 0,
+    wageRate: config.labor.privateWageRate,
+    priceFactor: 1,
+    inventory: createEmptyInventory(),
+    totalShares: 1_000_000,
+    lastMonth: blankStats(),
+    previousMonth: blankStats(),
+    equipment: emptyEquipmentAssets(),
+    equipmentCapacity: 0,
+    equipmentCapacityRemainder: 0,
+    salesHistory: [],
+    productionPlan: null,
+    recentProfits: [],
+    dividendPayoutRatio: config.governance.defaultDividendPayoutRatio,
+    note: `创办于第 ${world.time.tick} 期；资本 ${capital.toFixed(0)}。${startupPolicy ? '获得初创扶持（演示）。' : ''}`,
+    ai: freshAiState(companyId, sector, world.lifecycle.foundings.length),
+  };
+}
+
+type FoundingInvestorResult =
+  | { ok: true; investors: FoundingInvestor[] }
+  | { ok: false; error: string };
+
+/** 校验出资主体上限与资金能力，按等额出资生成出资人列表（新旧创办路径共用）。 */
+function collectFoundingInvestors(
+  world: WorldState,
+  request: FoundingRequest,
+  city: City,
+  config: DemoConfig,
+  capital: number,
+  founderType: FounderType,
+): FoundingInvestorResult {
+  const investors: FoundingInvestor[] = [];
+  if (founderType === 'investorGroup') {
+    if (
+      foundingCount(
+        world,
+        (record) =>
+          record.founderType === 'investorGroup' &&
+          record.investors.some((investor) => investor.id === request.founderId),
+      ) >= config.lifecycle.maxCompaniesPerInvestorGroup
+    ) {
+      return { ok: false, error: '该居民投资群体已达到可创办企业数量上限' };
+    }
+    const eligible = groupsOfCity(world, city.id)
+      .filter((group) => {
+        const people = Math.round(city.population.total * group.populationShare);
+        return (
+          people >= config.lifecycle.populationPerInvestorGroup / config.lifecycle.maxInvestorsPerSyndicate &&
+          group.cash > 0
+        );
+      })
+      .sort((a, b) => b.cash - a.cash || a.id.localeCompare(b.id));
+    if (eligible.length === 0) return { ok: false, error: '没有具备投资能力的居民投资群体' };
+    const syndicate = eligible.slice(0, config.lifecycle.maxInvestorsPerSyndicate);
+    // 等额出资；买不起份额的群体退出，直到所有参与者都能承担。
+    let sharesCount = syndicate.length;
+    while (sharesCount > 0) {
+      const share = round2(capital / sharesCount);
+      const affordable = syndicate.slice(0, sharesCount).filter((group) => group.cash + 1e-6 >= share);
+      if (affordable.length === sharesCount) break;
+      sharesCount = affordable.length;
+    }
+    if (sharesCount === 0) return { ok: false, error: '居民投资群体资金不足，无法创办企业' };
+    const share = round2(capital / sharesCount);
+    let remaining = capital;
+    for (let index = 0; index < sharesCount; index++) {
+      const group = syndicate[index]!;
+      const amount = index === sharesCount - 1 ? round2(remaining) : share;
+      investors.push({ type: 'investorGroup', id: group.id, cash: amount, shares: 0 });
+      remaining = round2(remaining - amount);
+    }
+    if (remaining < -0.01) return { ok: false, error: '出资分配失败' };
+    return { ok: true, investors };
+  }
+  if (founderType === 'company') {
+    const founder = world.companies.find((company) => company.id === request.founderId);
+    if (!founder) return { ok: false, error: '创办企业不存在' };
+    if (founder.cityId !== city.id) return { ok: false, error: '现有企业只能在本城创办新企业（暂定规则）' };
+    if (
+      foundingCount(
+        world,
+        (record) => record.founderType === 'company' && record.investors.some((investor) => investor.id === founder.id),
+      ) >= config.lifecycle.maxCompaniesPerCompany
+    ) {
+      return { ok: false, error: '该企业已达到可创办企业数量上限' };
+    }
+    if (founder.cash + 1e-6 < capital) return { ok: false, error: '创办企业自有资金不足' };
+    investors.push({ type: 'company', id: founder.id, cash: capital, shares: 0 });
+    return { ok: true, investors };
+  }
+  if (
+    foundingCount(
+      world,
+      (record) => record.founderType === 'government' && record.cityId === city.id,
+    ) >= config.lifecycle.maxGovernmentCompaniesPerCity
+  ) {
+    return { ok: false, error: '该城市政府已达到可创办企业数量上限' };
+  }
+  if (city.treasury + 1e-6 < capital) return { ok: false, error: '市政府财政资金不足' };
+  investors.push({ type: 'government', id: city.id, cash: capital, shares: 0 });
+  return { ok: true, investors };
+}
+
+/** 失败尝试统一记账并返回错误；错误文案带具体障碍，UI/日志可直接展示。 */
+function rejectFounding(
+  world: WorldState,
+  request: FoundingRequest,
+  assessment: FoundingAssessment,
+  tier: FoundingScaleTier | null,
+  obstacles: FoundingObstacle[],
+  founderType: FounderType | 'auto',
+): ActionResult {
+  const detail = obstacles.map((obstacle) => obstacle.detail).join('；') || '没有可行规模档位';
+  recordFoundingAttempt(world, {
+    tick: world.time.tick,
+    cityId: request.cityId,
+    output: assessment.output,
+    sector: assessment.sector,
+    score: assessment.score,
+    tierUnits: tier?.units ?? null,
+    founderType,
+    outcome: 'rejected',
+    obstacles,
+    capital: tier?.founderEquity ?? 0,
+    loan: tier?.loanPrincipal ?? 0,
+    note: `行业评分 ${assessment.score.toFixed(1)}，创办被拒绝：${detail}`,
+  });
+  return { ok: false, error: `创业失败：${detail}` };
+}
+
+/**
+ * v1.0 创办路径：先做 1/2/4 台档位评估，再用真实出资 + 受授信约束的贷款购买设备，
+ * 并预留首批原料与周转金；失败写结构化 attempt，任何失败都不留下企业/股份/贷款副作用。
+ */
+function foundCompanyV1(
+  world: WorldState,
+  request: FoundingRequest,
+  city: City,
+  config: DemoConfig,
+  log: LogEntry[],
+  options?: FoundCompanyOptions,
+): ActionResult & { companyId?: string } {
+  if (request.recipeOutput && !GOODS.some((good) => good.id === request.recipeOutput)) {
+    return { ok: false, error: `未知商品 ${request.recipeOutput}` };
+  }
+  const fallback = pickFoundingOpportunity(world, config, city.id) ?? null;
+  const output = (request.recipeOutput ?? fallback?.output ?? pickOutput(world, city.id).output) as GoodId;
+  const assessment = assessFounding(world, config, city.id, output);
+  const allowLoan = options?.allowLoan !== false;
+  const founderOrder: FounderType[] = request.founderType
+    ? [request.founderType]
+    : ['investorGroup', 'company', 'government'];
+  const tiers = options?.plan ? [options.plan] : assessment.scaleTiers;
+  let chosen: { founderType: FounderType; tier: FoundingScaleTier } | null = null;
+  for (const tier of tiers) {
+    for (const founderType of founderOrder) {
+      const capacity = founderCapacityFor(world, config, city.id, founderType, request.founderId);
+      const retuned = retuneTierForAssessment(assessment, tier, capacity, config, allowLoan);
+      if (retuned.feasible) {
+        chosen = { founderType, tier: retuned };
+        break;
+      }
+    }
+    if (chosen) break;
+  }
+  if (!chosen) {
+    return rejectFounding(
+      world,
+      request,
+      assessment,
+      assessment.scaleTiers[0] ?? null,
+      assessment.obstacles,
+      request.founderType ?? 'auto',
+    );
+  }
+
+  const founderResult = collectFoundingInvestors(
+    world,
+    request,
+    city,
+    config,
+    chosen.tier.founderEquity,
+    chosen.founderType,
+  );
+  if (!founderResult.ok) {
+    return rejectFounding(
+      world,
+      request,
+      assessment,
+      chosen.tier,
+      [{ kind: 'policy', detail: founderResult.error }],
+      chosen.founderType,
+    );
+  }
+  const investors = founderResult.investors;
+  const startupPolicy = startupSupportActive(world, city.id);
+  const companyId = nextCompanyId(world, city.id);
+  const company = buildFoundingCompany(
+    world,
+    city,
+    companyId,
+    output,
+    assessment.sector,
+    chosen.tier.founderEquity,
+    config,
+    startupPolicy,
+  );
+  // 企业壳先入世界，贷款审批（ownerExists）与设备采购都以真实企业身份进行；
+  // 任一步失败都会回滚企业、贷款与现金，外部资金/股份不变。
+  world.companies.push(company);
+
+  let loanId: string | undefined;
+  let loanAmount = 0;
+  if (allowLoan && chosen.tier.loanPrincipal > 0.01) {
+    const loanResult = openLoan(
+      world,
+      {
+        owner: { kind: 'company', id: company.id },
+        purpose: 'workingCapital',
+        amount: chosen.tier.loanPrincipal,
+      },
+      config,
+      world.time.tick,
+    );
+    if (!loanResult.ok || !loanResult.loan) {
+      rollbackFoundingShell(world, company.id);
+      return rejectFounding(
+        world,
+        request,
+        assessment,
+        chosen.tier,
+        [{ kind: 'credit', detail: loanResult.error ?? '创业贷款申请失败' }],
+        chosen.founderType,
+      );
+    }
+    loanId = loanResult.loan.id;
+    loanAmount = loanResult.loan.principal;
+  }
+
+  const purchase = buyNewEquipment(world, company, assessment.equipmentKind, chosen.tier.units, config, world.time.tick, {
+    allowGovernmentStock: true,
+    reason: '创办设备采购',
+    log,
+  });
+  if (!purchase.ok || purchase.units !== chosen.tier.units) {
+    rollbackFoundingShell(world, company.id, loanId);
+    return rejectFounding(
+      world,
+      request,
+      assessment,
+      chosen.tier,
+      [{ kind: 'equipment', detail: purchase.error ?? `启动设备未按计划购足（${purchase.units}/${chosen.tier.units} 台）` }],
+      chosen.founderType,
+    );
+  }
+  if (company.equipmentCapacity <= 0) {
+    rollbackFoundingShell(world, company.id, loanId);
+    return rejectFounding(
+      world,
+      request,
+      assessment,
+      chosen.tier,
+      [{ kind: 'equipment', detail: '启动设备未形成产能，无法创办企业' }],
+      chosen.founderType,
+    );
+  }
+  const equipmentCost = purchase.cost;
+  // 政府开局库存是市场之外的一次性供给；设备购买会把成交计入市场账本，
+  // 这里同步补充 supply，避免 invariants 误报“成交超过供应”。
+  if (purchase.fromGovernment > 0) {
+    const equipmentGoodId = config.equipment.catalog[assessment.equipmentKind].goodId;
+    const ledger = city.market[equipmentGoodId];
+    if (ledger) ledger.supply = round2(ledger.supply + purchase.fromGovernment);
+  }
+  const perEmployee = Math.max(
+    1e-6,
+    (PRODUCTIVITY[output] ?? 1) *
+      city.technology.productivityMultiplier *
+      workforceSkillMultiplier(city) *
+      config.production.laborCapacityFactor,
+  );
+  company.maxCapacity = round2(company.equipmentCapacity * config.company.maxCapacityMultiple);
+  company.jobDemand = Math.ceil(company.equipmentCapacity / perEmployee);
+
+  // 出资人扣款（全部校验通过后提交）。
+  for (const investor of investors) {
+    if (investor.type === 'investorGroup') {
+      const group = world.investors.find((entry) => entry.id === investor.id)!;
+      group.cash = round2(group.cash - investor.cash);
+    } else if (investor.type === 'company') {
+      const founder = world.companies.find((entry) => entry.id === investor.id)!;
+      founder.cash = round2(founder.cash - investor.cash);
+    } else {
+      spendTreasury(
+        world,
+        city,
+        investor.cash,
+        'policyTransfer',
+        `市政府出资创办 ${company.name}`,
+        { companyId },
+        config,
+      );
+    }
+  }
+
+  const totalShares = 1_000_000;
+  const votingShares = Math.round(totalShares * 0.8);
+  const nonVotingShares = totalShares - votingShares;
+  const totalInvested = investors.reduce((sum, investor) => sum + investor.cash, 0);
+  const weightBase = totalInvested > 0 ? totalInvested : chosen.tier.founderEquity;
+  const votingHolders: { holder: HolderRef; shares: number }[] = [];
+  const nonVotingHolders: { holder: HolderRef; shares: number }[] = [];
+  for (const investor of investors) {
+    const weight = investor.cash / weightBase;
+    const voting = Math.round(votingShares * weight);
+    const nonVoting = Math.round(nonVotingShares * weight);
+    const holder: HolderRef =
+      investor.type === 'investorGroup'
+        ? groupHolder(world.investors.find((group) => group.id === investor.id)!)
+        : investor.type === 'company'
+          ? { type: 'company', id: investor.id }
+          : { type: 'city', id: city.id };
+    investor.shares = voting + nonVoting;
+    votingHolders.push({ holder, shares: voting });
+    nonVotingHolders.push({ holder, shares: nonVoting });
+  }
+  const votingSum = votingHolders.reduce((sum, entry) => sum + entry.shares, 0);
+  const nonVotingSum = nonVotingHolders.reduce((sum, entry) => sum + entry.shares, 0);
+  votingHolders[0]!.shares = round2(votingHolders[0]!.shares + (votingShares - votingSum));
+  nonVotingHolders[0]!.shares = round2(nonVotingHolders[0]!.shares + (nonVotingShares - nonVotingSum));
+
+  createShareStructure(world, company, {
+    votingShares,
+    nonVotingShares,
+    votingHolders,
+    nonVotingHolders,
+    tick: world.time.tick,
+    acquiredVia: 'primary',
+  });
+
+  let grant = 0;
+  if (startupPolicy) {
+    grant = startupGrantPayment(world, city, chosen.tier.founderEquity, config, company.id);
+    if (grant > 0) company.cash = round2(company.cash + grant);
+  }
+
+  const tier = chosen.tier;
+  const founderLabel =
+    chosen.founderType === 'investorGroup'
+      ? `${investors.length} 个居民投资群体联合出资`
+      : chosen.founderType === 'company'
+        ? '由现有企业出资创办'
+        : '由市政府财政出资创办';
+  const record: FoundingRecord = {
+    id: `founding-${world.lifecycle.nextFoundingNumber}`,
+    tick: world.time.tick,
+    cityId: city.id,
+    companyId,
+    companyName: company.name,
+    sector: company.sector,
+    recipeOutput: company.recipeOutput,
+    founderType: chosen.founderType,
+    capital: tier.founderEquity,
+    investorCount: investors.length,
+    investors,
+    governmentGrant: grant,
+    note: `${founderLabel}。行业评分 ${assessment.score.toFixed(1)} 分（${assessment.reasons.slice(0, 3).join('；')}）；最小可行档 ${tier.units} 台设备、员工 ${tier.jobs} 人，设备支出 ${equipmentCost.toFixed(0)}，首批原料 ${tier.firstBatchInputCost.toFixed(0)}，周转金 ${tier.workingCapital.toFixed(0)}；创业贷款 ${loanAmount.toFixed(0)}（利息约 ${tier.interestCost.toFixed(0)}）。`,
+  };
+  world.lifecycle.foundings.push(record);
+  world.lifecycle.nextFoundingNumber += 1;
+  if (world.lifecycle.foundings.length > config.lifecycle.maxHistory) {
+    world.lifecycle.foundings.splice(0, world.lifecycle.foundings.length - config.lifecycle.maxHistory);
+  }
+  recordFoundingAttempt(world, {
+    tick: world.time.tick,
+    cityId: city.id,
+    output,
+    sector: assessment.sector,
+    score: assessment.score,
+    tierUnits: tier.units,
+    founderType: chosen.founderType,
+    outcome: 'founded',
+    companyId,
+    obstacles: [],
+    capital: tier.founderEquity,
+    loan: loanAmount,
+    note: record.note,
+  });
+  log.push({
+    tick: world.time.tick,
+    kind: 'market',
+    message: `${city.name} 新企业「${company.name}」成立：${record.note}创办人出资 ${tier.founderEquity.toFixed(0)}${
+      loanAmount > 0 ? `，贷款 ${loanAmount.toFixed(0)}` : ''
+    }${grant > 0 ? `，财政扶持 ${grant.toFixed(0)}` : ''}。`,
+  });
+  return { ok: true, note: `${company.name} 已成立。`, amount: tier.founderEquity, companyId: company.id };
+}
+
+/** 回滚创办失败的企业壳（以及刚放款的贷款），保证不留下资金/股份/贷款副作用。 */
+function rollbackFoundingShell(world: WorldState, companyId: string, loanId?: string): void {
+  const company = world.companies.find((entry) => entry.id === companyId);
+  if (loanId) {
+    const banking = world.banking;
+    const index = banking.loans.findIndex((entry) => entry.id === loanId);
+    if (index >= 0) {
+      const loan = banking.loans[index]!;
+      if (company) company.cash = round2(company.cash - loan.principal);
+      banking.loans.splice(index, 1);
+      banking.lastMonth.principalIssued = round2(banking.lastMonth.principalIssued - loan.principal);
+      if (company) company.debt = round2(Math.max(0, company.debt - loan.principal));
+    }
+  }
+  const companyIndex = world.companies.findIndex((entry) => entry.id === companyId);
+  if (companyIndex >= 0) world.companies.splice(companyIndex, 1);
+  refreshBankingTotals(world);
 }
 
 function blankStats(): Company['lastMonth'] {
@@ -462,7 +848,8 @@ export function expandCompanyCapacity(
   const city = world.cities.find((entry) => entry.id === company.cityId);
   if (!city) return { ok: false, error: '企业城市不存在' };
   const kind = equipmentKindForSector(company.sector, config);
-  const perUnit = Math.max(1, config.equipment.catalog[kind].capacityPerUnit);
+  // 统一单位（task-23）：扩产按“本企业产出”的每台产能折算设备台数。
+  const perUnit = Math.max(1, equipmentCapacityPerUnit(config, kind, company.recipeOutput));
   const plannedUnits = Math.max(
     1,
     Math.round(
@@ -543,15 +930,16 @@ export function expandCompanyCapacity(
     refundEquipmentSubsidy(world, city, policy!, company, excessSubsidy, config);
   }
   const netCost = round2(purchase.cost - actualSubsidy);
+  const capacityPerNewUnit = equipmentCapacityPerUnit(config, kind, company.recipeOutput);
   company.lastMonth.capacityChange = round2(
-    company.lastMonth.capacityChange + purchase.units * catalog.capacityPerUnit,
+    company.lastMonth.capacityChange + purchase.units * capacityPerNewUnit,
   );
   log.push({
     tick: world.time.tick,
     kind: 'production',
     message: `${company.name} 购买${catalog.name} ${purchase.units} 台扩产${purchase.fromIntercity > 0 ? `（含跨城 ${purchase.fromIntercity} 台）` : ''}，实际支出 ${netCost.toFixed(0)}${actualSubsidy > 0 ? `（设备补助 ${actualSubsidy.toFixed(0)} 来自财政）` : ''}；产能 ${company.capacity.toFixed(0)} 单位/月。`,
   });
-  const capacityGain = round2(purchase.units * catalog.capacityPerUnit);
+  const capacityGain = round2(purchase.units * capacityPerNewUnit);
   return { ok: true, note: `产能增加 ${capacityGain.toFixed(0)} 单位/月。`, amount: netCost };
 }
 
@@ -1109,34 +1497,17 @@ export function maybeFoundCompanies(
       ).length;
       if (foundThisTick >= monthlyLimit) break;
 
-      const candidates = scoreFoundingCandidates(world, config, city.id).filter(
-        (candidate) =>
-          candidate.breakdown.total >= FOUNDING_MIN_SCORE &&
-          candidate.expectedMonthlyProfit > 0 &&
-          candidate.reachableSales > 0 &&
-          candidate.availableEquipmentUnits > 0,
+      // v1.0：按行业评分与最小可行规模档位筛选机会；真正的出资/贷款/设备校验在 foundCompany 内完成，
+      // 失败会写结构化 attempt（失败原因不进 companies/foundings）。
+      const opportunities = assessFoundingOpportunities(world, config, city.id).filter(
+        (assessment) => assessment.feasibleTier !== null,
       );
 
       let founded = false;
-      for (const candidate of candidates) {
-        const startupPolicy = startupSupportActive(world, city.id);
-        const requiredCapital = round2(
-          config.lifecycle.minCapital *
-            (1 - (startupPolicy ? config.policies.startup.capitalRelief : 0)),
-        );
-        const capital = round2(Math.max(requiredCapital, candidate.suggestedCapital));
-        const founder = chooseFoundingFounder(world, city, capital, config);
-        if (!founder) continue;
+      for (const assessment of opportunities) {
         const result = foundCompany(
           world,
-          {
-            cityId: city.id,
-            founderType: founder.type,
-            founderId: founder.id,
-            recipeOutput: candidate.output,
-            capital,
-            log,
-          },
+          { cityId: city.id, recipeOutput: assessment.output, log },
           config,
         );
         if (result.ok && result.companyId) {
@@ -1149,36 +1520,6 @@ export function maybeFoundCompanies(
     }
   }
   return created;
-}
-
-/** 按出资能力选择创办人：居民投资群体 → 现金充裕的现有企业 → 市政府（遵守各自上限）。 */
-function chooseFoundingFounder(
-  world: WorldState,
-  city: City,
-  capital: number,
-  config: DemoConfig,
-): { type: 'investorGroup' | 'company' | 'government'; id?: string } | null {
-  const groups = groupsOfCity(world, city.id)
-    .filter((group) => group.cash + 1e-6 >= capital / config.lifecycle.maxInvestorsPerSyndicate)
-    .sort((a, b) => b.cash - a.cash || a.id.localeCompare(b.id));
-  if (groups.length > 0) return { type: 'investorGroup', id: groups[0]!.id };
-
-  const rich = world.companies
-    .filter((company) => company.cityId === city.id && company.cash > capital * 2)
-    .sort((a, b) => b.cash - a.cash || a.id.localeCompare(b.id))[0];
-  if (rich) return { type: 'company', id: rich.id };
-
-  const governmentCount = foundingCount(
-    world,
-    (record) => record.founderType === 'government' && record.cityId === city.id,
-  );
-  if (
-    governmentCount < config.lifecycle.maxGovernmentCompaniesPerCity &&
-    city.treasury > city.lastMonth.publicWageBill * 3 + capital
-  ) {
-    return { type: 'government' };
-  }
-  return null;
 }
 
 /** 供界面：企业最近一次经营/生命周期说明。 */

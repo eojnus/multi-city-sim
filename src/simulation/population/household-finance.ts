@@ -8,6 +8,10 @@
  * - v0.9 T1：常规预算之外，若基本需求（food）存在资金缺口，允许在单月“月初存款×5%”上限内
  *   原子提取存款补足（存款→手头现金，depositWithdrawn 可审计），提取额不超过真实资金缺口与可用存款；
  *   支付顺序 = 手头现金 → 提取存款 → 消费贷。存款只是提现来源，不偷偷复制到手头。
+ * - v1.0 任务书第四节：基本需求（food）的“数量”不因失业/非劳动身份削减，预算不足时允许动用更多
+ *   手头现金直至基本需求成本（预算不能阻挡基本需求支付）；非基本消费仍受日常预算与消费意愿约束，
+ *   不自动耗尽积蓄。有效需求分四层：desired（想买）→ effective（可支付）→ sold（真实成交）→ unmet（缺货），
+ *   由 consumer.ts 的逐群体市场撮合与 recordGroupConsumption 记账落实。
  * - 消费贷款：额度 = max(0, 群体财产基准 × creditLimitRate − 未偿消费贷本金)，
  *   财产基准 = 手头现金 + 银行存款 + 按人口折算的居民投资实体权益（与 householdPerCapitaWealth 同口径）。
  *   贷款是真实债务，资金从银行支付，**不计入居民收入**；禁止无限信用。
@@ -19,6 +23,7 @@
  */
 import type {
   ConsumerBudgetSnapshot,
+  GoodId,
   HouseholdGroup,
   HouseholdLoanContract,
   LoanPayment,
@@ -57,13 +62,31 @@ export function householdGroupNeedFactor(
   }
 }
 
-/** 群体“基本需求”月成本（food 的按人月需求，不含价格弹性；用于判断积蓄提取缺口）。 */
-function basicNeedCost(world: WorldState, group: HouseholdGroup, config: DemoConfig): number {
+/**
+ * v1.0：基本需求商品（当前只有 food）。
+ * 基本需求的数量不随失业/非劳动身份削减；预算不足时允许动用更多手头现金与
+ * 单月存款提取额度来支付（见 consumer.ts 顶部两阶段与四层口径说明）。
+ */
+export function isBasicNeedGood(goodId: GoodId): boolean {
+  return goodId === 'food';
+}
+
+/**
+ * 群体“基本需求”月成本（food 的按人月需求，不含价格弹性和职业需要系数；
+ * 用于判断积蓄提取缺口，以及消费者市场的“基本需求现金支付上限”）。
+ * v1.0：失业群体的基本需求数量不因失业削减——这里故意不乘 householdGroupNeedFactor。
+ */
+export function householdBasicNeedCost(
+  world: WorldState,
+  group: HouseholdGroup,
+  config: DemoConfig,
+): number {
+  void config;
   const city = world.cities.find((entry) => entry.id === group.cityId);
   const food = GOODS.find((good) => good.id === 'food');
   if (!food) return 0;
   const price = city?.market?.food?.price ?? food.basePrice;
-  const qty = group.people * food.perCapitaMonthlyNeed * householdGroupNeedFactor(group.occupation, config);
+  const qty = group.people * food.perCapitaMonthlyNeed;
   return round2(qty * Math.max(0.01, price));
 }
 
@@ -300,7 +323,7 @@ function buildSnapshot(
   const baseCashBudget = round2(Math.min(cash, Math.max(0, referenceSpend)));
   // v0.9 T1：常规预算 = min(现金, 0.8×上月收入 + 0.05×现金)；当它不足以覆盖基本需求（food）时，
   // 允许在“月初存款×5%”上限内提取存款补足，且提取额不超过真实资金缺口（基本需求成本 − 手头现金）。
-  const basicCost = basicNeedCost(world, group, config);
+  const basicCost = householdBasicNeedCost(world, group, config);
   const fundingGap = round2(Math.max(0, basicCost - cash));
   const withdrawalAllowance = round2(
     Math.min(fundingGap, householdDepositWithdrawalRemaining(world, group), groupDepositBalance(world, group.id)),
@@ -372,6 +395,9 @@ export function consumptionLoanEligibility(
   config: DemoConfig,
   amount: number,
   tick: number,
+  // 原子消费阶段：额度以“消费阶段开始时的授信快照”为准（见 buildSnapshot.loanAvailable），
+  // 因此可跳过这里按当前财产基准的二次额度复核；冻结/欠付/笔数等资格校验仍保留。
+  options: { skipCreditLimit?: boolean } = {},
 ): { ok: true } | { ok: false; error: string } {
   const finance = world.householdFinance;
   if (!finance) return { ok: false, error: '世界缺少居民消费金融账本' };
@@ -392,12 +418,14 @@ export function consumptionLoanEligibility(
   if (createdThisTick >= Math.max(1, credit.maxLoansPerGroupPerMonth)) {
     return { ok: false, error: '该群体本月新增消费贷款笔数已达上限' };
   }
-  const limit = householdCreditLimit(world, group, config);
-  if (requested > limit + 0.005) {
-    return {
-      ok: false,
-      error: `超出消费贷额度：可借 ${limit.toFixed(2)}，申请 ${requested.toFixed(2)}`,
-    };
+  if (!options.skipCreditLimit) {
+    const limit = householdCreditLimit(world, group, config);
+    if (requested > limit + 0.005) {
+      return {
+        ok: false,
+        error: `超出消费贷额度：可借 ${limit.toFixed(2)}，申请 ${requested.toFixed(2)}`,
+      };
+    }
   }
   return { ok: true };
 }
@@ -412,12 +440,19 @@ export function borrowForConsumption(
   config: DemoConfig,
   amount: number,
   tick: number,
+  // 原子消费阶段专用：调用方已对“计划成交额”做过完整授信预检，此处按实际成交额放款，
+  // 不再用成交后的财产基准重算额度（成交会改变企业现金/库存估值，可能反过来否决已批准授信）。
+  options: { prechecked?: boolean } = {},
 ): { ok: boolean; loan: HouseholdLoanContract | null; error?: string } {
   const finance = world.householdFinance;
   if (!finance) return { ok: false, loan: null, error: '世界缺少居民消费金融账本' };
   const credit = config.households.householdCredit;
   const requested = round2(amount);
-  const eligibility = consumptionLoanEligibility(world, group, config, requested, tick);
+  const eligibility = options.prechecked
+    ? requested > 0
+      ? ({ ok: true } as const)
+      : ({ ok: false, error: '贷款金额必须为正' } as const)
+    : consumptionLoanEligibility(world, group, config, requested, tick);
   if (!eligibility.ok) {
     return { ok: false, loan: null, error: eligibility.error };
   }

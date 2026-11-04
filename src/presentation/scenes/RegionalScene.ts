@@ -241,6 +241,7 @@ export class RegionalScene extends Phaser.Scene {
     const labels: Record<string, string> = {
       agriculture: '谷物', 'fiber-farm': '纤维', textile: '纺织', food: '食品',
       garment: '成衣', metal: '金属', utility: '能源', appliance: '日用品',
+      equipment: '设备',
     };
     return labels[top] ?? '综合';
   }

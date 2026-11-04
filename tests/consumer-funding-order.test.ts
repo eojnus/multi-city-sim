@@ -175,7 +175,9 @@ describe('v0.9 验收一：居民消费资金支付顺序（现金→存款→�
 
   it('现金不足但有存款：先提存款补足，不在有可提存款时借款', () => {
     const fixture = buildFixture();
-    fixture.setCash(300);
+    // v1.0：基本需求（food 2600 单位 × 55 = 143,000）超过手头现金，但现金 + 单月可提存款足够，
+    // 因此仍应“先提存款、不借款”；若现金低于 93,000 则确实需要消费贷补足真实缺口。
+    fixture.setCash(100_000);
     fixture.setDeposit(1_000_000);
     fixture.setSupply(1_000_000);
     const cashBefore = round2(fixture.group.cash);

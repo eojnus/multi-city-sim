@@ -12,6 +12,7 @@ import { checkInvariants } from '../src/simulation/core/invariants';
 import {
   buyNewEquipment,
   newEquipmentSupply,
+  recomputeCompanyCapacity,
 } from '../src/simulation/equipment/equipment';
 import {
   foundingCandidateForOutput,
@@ -48,6 +49,8 @@ function setEquipmentSeller(
   const seller = world.companies.find((entry) => entry.id === companyId)!;
   seller.recipeOutput = 'industryEquipment';
   seller.inventory.industryEquipment = units;
+  // v1.0 每台设备产能取决于产出商品（资本品 vs 普通商品），改产出后必须同步重算产能缓存。
+  recomputeCompanyCapacity(world, seller, DEMO_CONFIG);
   const city = world.cities.find((entry) => entry.id === seller.cityId)!;
   city.market.industryEquipment!.closingStock = units;
   return seller;

@@ -31,6 +31,8 @@ describe('v0.9 真实设备链', () => {
     for (const candidate of world.companies) {
       if (candidate.cityId === company.cityId) candidate.inventory[catalog.goodId] = 0;
     }
+    // 清空同城设备企业库存后同步本城市场期末库存（v1.0 开局面板不再默认零库存）。
+    world.cities.find((entry) => entry.id === company.cityId)!.market[catalog.goodId]!.closingStock = 0;
     const stockBefore = Math.floor(world.equipmentMarket.initialStock[kind]);
     const unitsBefore = Math.floor(company.equipment[kind]);
     expect(stockBefore).toBeGreaterThan(0);

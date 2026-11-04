@@ -32,6 +32,8 @@ function setupWorld(): { world: WorldState; seller: Company; buyer: Company } {
   const world = Simulation.create().state;
   for (const company of world.companies) {
     company.cash = 200_000;
+    // v1.0 开局新增多家食品厂，会把产能转成 grain 需求；先清零产能，仅保留 lp-food 参与撮合。
+    company.capacity = 0;
     for (const goodId of GOOD_IDS) company.inventory[goodId] = 0;
     company.lastMonth.revenue = 0;
     company.lastMonth.inputCost = 0;

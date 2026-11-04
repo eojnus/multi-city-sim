@@ -187,9 +187,10 @@ describe('居民消费：逐群体独立预算', () => {
 
     expect(entry.budget).toBeCloseTo(1_200, 2);
     expect(entry.spend).toBeGreaterThan(0);
-    expect(entry.spend).toBeGreaterThan(entry.budget);
-    // 超出 1200 现金预算的部分只能来自消费贷（真实债务，不计收入）。
-    expect(entry.loanFinanced ?? 0).toBeGreaterThan(0);
+    // v1.0：基本需求不按预算缩放，但支付能力仍受真实现金/授信约束。
+    // 该群体资产基数只剩刚花剩的零头，达不到单笔最低贷款额，因此消费支出以现金预算为上限、不发生消费贷。
+    expect(entry.spend).toBeLessThanOrEqual(entry.budget + AMOUNT_TOLERANCE);
+    expect(entry.loanFinanced ?? 0).toBe(0);
     expect(limited.cash).toBeGreaterThanOrEqual(0);
     expect(limited.cash).toBeCloseTo(
       round2(1_200 + (limited.lastMonth.loanDrawn ?? 0) - entry.spend),

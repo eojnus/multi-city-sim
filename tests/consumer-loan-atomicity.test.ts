@@ -169,7 +169,8 @@ describe('居民消费贷与商品成交原子一致（验收问题 3）', () =>
     const revenueAfter = after.companies.reduce((sum, company) => sum + company.revenue, 0);
     // 消费税额按每笔成交分别取整，汇总后与“成交额×(1−税率)”允许 ≤0.05 的舍入误差。
     const expectedRevenue = round2(entry!.spend * (1 - CONFIG.tax.consumptionTaxRate));
-    expect(Math.abs(revenueAfter - revenueBefore - expectedRevenue)).toBeLessThanOrEqual(0.05);
+    // v1.0：基本需求不再按预算缩放后，单月消费贷会拆成更多笔成交，逐笔 0.01 舍入累积误差相应变大。
+    expect(Math.abs(revenueAfter - revenueBefore - expectedRevenue)).toBeLessThanOrEqual(1);
   });
 
   it('授信不足时只按真实可用额度放款，成交额与放款额一致，其余记资金缺口', () => {
@@ -227,7 +228,8 @@ describe('居民消费贷与商品成交原子一致（验收问题 3）', () =>
     // v0.8：居民消费含税标价，卖方按 95% 净额入账（税 5% 归消费城市财政）。
     // 消费税额按每笔成交分别取整，汇总后与“成交额×(1−税率)”允许 ≤0.05 的舍入误差。
     const expectedRevenue = round2(entry!.spend * (1 - CONFIG.tax.consumptionTaxRate));
-    expect(Math.abs(revenueAfter - revenueBefore - expectedRevenue)).toBeLessThanOrEqual(0.05);
+    // v1.0：基本需求不再按预算缩放后，单月消费贷会拆成更多笔成交，逐笔 0.01 舍入累积误差相应变大。
+    expect(Math.abs(revenueAfter - revenueBefore - expectedRevenue)).toBeLessThanOrEqual(1);
   });
 
   it('实际成交额低于单笔最低贷款额时不得放款、不得成交', () => {
@@ -310,6 +312,12 @@ describe('居民消费贷与商品成交原子一致（验收问题 3）', () =>
     group.lastMonth.loanFinancedConsumption = 0;
     // 把存款压到 2000（5% 提取上限 100），使基本需求缺口需要消费贷补足。
     setGroupDeposits(world, group, 2_000);
+    // v1.0：基本需求不再按预算缩放，同城其他群体会先用现金/存款买光本地食品；
+    // 本用例验证“贷款只对应真实成交”，因此给本地食品足够供给，避免贷款阶段无货可买。
+    for (const company of world.companies) {
+      if (company.cityId !== city.id) continue;
+      company.inventory.food = 50_000_000;
+    }
     const ledgers = createWorldLedgers(world)[city.id]!;
 
     const result = runConsumerMarket(world, city, ledgers, CONFIG);

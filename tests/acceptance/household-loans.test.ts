@@ -156,8 +156,6 @@ describe('AC-E04 不借超过实际成交额的钱', () => {
     alignCashflow(group);
     const account = depositAccountFor(world, { kind: 'household', id: group.id });
     if (account) account.balance = 40_000;
-    const limit = householdCreditLimit(world, group, DEMO_CONFIG);
-    expect(limit).toBeGreaterThan(0);
 
     const city = cityById(world, 'lanport');
     const ledgers = createWorldLedgers(world);
@@ -170,6 +168,10 @@ describe('AC-E04 不借超过实际成交额的钱', () => {
     // v0.9 验收问题六：两阶段调度下，阶段 A 会先用所有群体的现金预算消耗本地库存，
     // 因此“供给充足”需要足够覆盖 A 阶段消费，B 阶段才还有货可融资购买。
     for (const good of CONSUMER_GOODS) stockInventory(world, 'lanport', good, 20_000_000);
+    // 授信额度依赖投资实体权益（含持股按公司股价的估值），而股价会随企业库存/现金变化；
+    // 因此必须在补货之后、本轮消费开始之前取“本轮可用额度”，不能用补货前的额度做上限断言。
+    const limit = householdCreditLimit(world, group, DEMO_CONFIG);
+    expect(limit).toBeGreaterThan(0);
     const ledgers2 = createWorldLedgers(world);
     const enough = runConsumerMarket(world, city, ledgers2.lanport!, NO_INTERCITY);
     const detail = enough.byGroup![group.id]!;

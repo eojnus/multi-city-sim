@@ -27,7 +27,8 @@ import { keyIndustryFocus } from '../policies/query';
  *
  * v0.9：优先读取企业生产计划的 plannedOutput（由设备产能、劳动产能、原料资金与
  * “近 3 月销量 + 目标库存”共同决定）；旧档/新企业没有计划时回退旧口径
- * “产能 × 利用率”。实际产量仍由 runProduction 再按劳动与原料收紧，不会超计划。
+ * “产能 × 利用率”。v1.0 保持“计划/实际/设备/劳动”分离：实际产量仍由 runProduction
+ * 再按 min(计划, 设备产能, 劳动产能, 原料库存) 收紧，不会超计划/超设备/超劳动/超原料。
  */
 export function productionTarget(company: Company): number {
   const planned = company.productionPlan?.plannedOutput;
@@ -440,7 +441,16 @@ export function runProduction(
     if (!city || !cityLedgers) continue;
     const recipe = RECIPES[company.recipeOutput];
     if (!recipe) continue;
-    let output = Math.min(productionTarget(company), laborCapacity(company, city, config, world));
+    // v1.0：实际产量 = min(计划, 设备产能, 劳动产能)，再在下面按原料库存收紧。
+    // 计划本身已 ≤ min(设备, 劳动, 原料资金)，这里再显式夹一次，防止旧档/手动改计划越界。
+    const equipmentCap = company.productionPlan
+      ? Math.max(0, company.productionPlan.equipmentLimit)
+      : Math.max(0, company.capacity);
+    let output = Math.min(
+      productionTarget(company),
+      equipmentCap,
+      laborCapacity(company, city, config, world),
+    );
     if (output <= 0) continue;
 
     for (const input of recipe.inputs) {

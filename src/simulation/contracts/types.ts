@@ -3,7 +3,7 @@
 // v0.2 新增证券/治理/居民投资/协议/通知数据；旧 v1 存档由 core/save.ts 迁移。
 
 export const SAVE_FORMAT_VERSION = 9;
-export const GAME_VERSION = '0.9.0';
+export const GAME_VERSION = '1.0.0';
 
 export type GoodId =
   | 'grain'
@@ -54,7 +54,9 @@ export type SectorId =
   | 'garment'
   | 'metal'
   | 'utility'
-  | 'appliance';
+  | 'appliance'
+  /** v1.0：设备制造企业（生产农业/工业/能源设备，自身使用工业设备）。 */
+  | 'equipment';
 
 /** v0.3：企业经营风格。不同风格使用同一套经济规则，但取舍不同。 */
 export type CompanyStyle = 'growth' | 'steady' | 'return';
@@ -234,6 +236,14 @@ export interface EquipmentMarketState {
    * createWorldLedgers 合并进对应城市账本后清空。
    */
   pendingLedger?: EquipmentLedgerIncrement[];
+  /**
+   * 本月从企业库存转为设备资产（资本化）的设备台数，按商品累计（旧存档可缺省）。
+   *
+   * 设备成交时卖方企业库存减少、买方只增加固定资产，世界口径的“商品库存”会减少；
+   * 结算审计必须显式扣减这部分资本化流出，否则会出现“库存不守恒”的误报。
+   * tick 开始时清零（tick 之间的玩家操作在 startStock 快照前已生效，不需要重复扣减）。
+   */
+  capitalizedThisTick?: Partial<Record<GoodId, number>>;
 }
 
 /** 设备成交对市场账本的增量（sold 同时计入 supply，保证 sold ≤ supply）。 */

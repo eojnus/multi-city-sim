@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Simulation } from '../src/simulation/core/simulation';
 import { DEMO_CONFIG } from '../src/data/config';
-import { GOODS } from '../src/data/demo-data';
+import { COMPANY_SEEDS, GOODS, OPENING_COMPANIES } from '../src/data/demo-data';
 import type { EquipmentKind, GoodId, LogEntry, WorldState } from '../src/simulation/contracts/types';
 import {
   FOUNDING_MIN_SCORE,
@@ -118,6 +118,13 @@ describe('设备化创办', () => {
     const world = richWorld();
     const city = cityOf(world, 'lanport');
     for (const kind of KINDS) world.equipmentMarket.initialStock[kind] = 0;
+    // v1.0 开局新增 16 家/城企业，其中包含设备生产商；这里同时清空企业设备库存，
+    // 才能构造“同城、政府、跨城都没有设备可买”的原始场景。
+    for (const company of world.companies) {
+      for (const kind of KINDS) {
+        company.inventory[DEMO_CONFIG.equipment.catalog[kind].goodId] = 0;
+      }
+    }
     const groupsBefore = world.investors.reduce((sum, group) => sum + group.cash, 0);
     const companiesBefore = world.companies.length;
     const cashBefore = totalOwnedCash(world);
@@ -288,7 +295,7 @@ describe('每月创办数量与城市上限', () => {
     );
     expect(blocked.ok).toBe(false);
     expect(blocked.error).toContain('上限');
-    expect(world.companies).toHaveLength(17);
+    expect(world.companies).toHaveLength(COMPANY_SEEDS.length + OPENING_COMPANIES.length);
 
     // 让一家企业真实倒闭，释放名额后再创办。
     const victim = world.companies.find((company) => company.cityId === city.id)!;
@@ -304,31 +311,14 @@ describe('每月创办数量与城市上限', () => {
     expect(retried.ok, retried.error).toBe(true);
   });
 
-  it('初始 17 家种子企业保持不变，开局没有创办记录', () => {
+  it('初始 65 家开局企业保持不变（17 家种子 + 48 家新增），开局没有创办记录', () => {
     const world = Simulation.create().state;
-    expect(world.companies).toHaveLength(17);
+    expect(world.companies).toHaveLength(COMPANY_SEEDS.length + OPENING_COMPANIES.length);
+    expect(world.companies.length).toBe(65);
     expect(world.lifecycle.foundings).toHaveLength(0);
     expect(
       world.companies.map((company) => company.id).sort(),
-    ).toEqual([
-      'gf-energy',
-      'gf-fiber',
-      'gf-food',
-      'gf-garment',
-      'gf-grain',
-      'gf-household',
-      'iv-appliance',
-      'iv-energy',
-      'iv-food',
-      'iv-garment',
-      'iv-metal',
-      'iv-textile',
-      'lp-appliance',
-      'lp-energy',
-      'lp-food',
-      'lp-garment',
-      'lp-textile',
-    ]);
+    ).toEqual([...COMPANY_SEEDS, ...OPENING_COMPANIES].map((seed) => seed.id).sort());
   });
 });
 

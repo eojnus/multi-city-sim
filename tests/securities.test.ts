@@ -18,6 +18,7 @@ import {
 } from '../src/simulation/securities/securities';
 import { parseSave, serializeSave } from '../src/simulation/core/save';
 import { groupHolder, groupsOfCity, maybeCreateCompanyFinancing, planInvestorOrders } from '../src/simulation/investors/investors';
+import type { DemoConfig } from '../src/data/config';
 import type { WorldState } from '../src/simulation/contracts/types';
 
 function newWorld(): WorldState {
@@ -440,7 +441,16 @@ describe('证券与股权', () => {
     });
     company.cash = round2(company.cash * 0.8);
     const expected = round2(bookPrice(world, company) * 1.02);
-    planInvestorOrders(world, DEMO_CONFIG, world.time.tick);
+    // v1.0 开局 65 家企业后，默认每群组 4 笔卖单配额覆盖不到 lp-food；调高配额，
+    // 验证的仍是“旧限价卖单会按最新账面价重挂”。
+    const config = {
+      ...DEMO_CONFIG,
+      securities: {
+        ...DEMO_CONFIG.securities,
+        ai: { ...DEMO_CONFIG.securities.ai, maxSellOrdersPerGroup: 500 },
+      },
+    } as unknown as DemoConfig;
+    planInvestorOrders(world, config, world.time.tick);
     const refreshed = world.securities.orders.find(
       (order) =>
         order.side === 'sell' &&

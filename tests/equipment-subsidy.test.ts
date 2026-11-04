@@ -38,6 +38,10 @@ function setup(options: SetupOptions = {}) {
   for (const candidate of world.companies) {
     candidate.inventory.industryEquipment = 0;
   }
+  // v1.0 开局设备生产商分布在各城，清库存后必须同步各城市场期末库存，避免不变量误报。
+  for (const marketCity of world.cities) {
+    marketCity.market.industryEquipment!.closingStock = 0;
+  }
   const ledger = city.market.industryEquipment!;
   ledger.closingStock = 0;
   world.equipmentMarket.initialStock.industry = options.governmentStock ?? 0;
@@ -178,6 +182,9 @@ describe('设备补贴只按实际成交结算', () => {
     const seller = world.companies.find((entry) => entry.id === 'lp-garment')!;
     seller.recipeOutput = 'industryEquipment';
     seller.inventory.industryEquipment = 2;
+    // v1.0 每台设备产能取决于产出商品（资本品 3 台/月 vs 普通商品 300,000 单位/月），
+    // 指认产出后必须重算产能缓存，否则不变量会报“缓存与设备推导不一致”。
+    recomputeCompanyCapacity(world, seller, DEMO_CONFIG);
     ledger.supply = 2;
     ledger.closingStock = 2;
     const sellerCashBefore = seller.cash;

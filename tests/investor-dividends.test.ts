@@ -3,10 +3,17 @@ import { Simulation } from '../src/simulation/core/simulation';
 import { DEMO_CONFIG } from '../src/data/config';
 import { settleCompanyFinance } from '../src/simulation/finance/finance';
 import { settleGovernment } from '../src/simulation/government/fiscal';
-import { collectInvestableFunds, groupsOfCity, groupHolder } from '../src/simulation/investors/investors';
+import {
+  IDLE_CASH_MONTHLY_INVEST_SHARE,
+  collectInvestableFunds,
+  groupsOfCity,
+  groupHolder,
+  householdIdleCash,
+} from '../src/simulation/investors/investors';
 import { createShareStructure, distributeDividend } from '../src/simulation/securities/securities';
 import { checkInvariants } from '../src/simulation/core/invariants';
 import { round2 } from '../src/simulation/core/math';
+import { householdGroupsOfCity } from '../src/simulation/population/household-groups';
 import { syncCityPopulationFromAllocations } from '../src/simulation/population/population';
 import type { Company, CompanyMonthlyStats, WorldState } from '../src/simulation/contracts/types';
 
@@ -145,8 +152,18 @@ describe('居民股息资金流（不得重复计入）', () => {
 
     const budgetBeforeSavings = city.householdIncomeLastMonth;
     expect(budgetBeforeSavings).toBeGreaterThan(0);
+    // v1.0 闲钱投资规则：先保留 3 个月基本生活需求，只把超出的闲置现金每月最多转 0.5%；
+    // 收入意愿额（收入 × savingsRate）与闲钱上限取小，二者相同时才按旧口径全额转出。
+    const idleCap = round2(
+      householdGroupsOfCity(world, city.id).reduce(
+        (total, group) => total + householdIdleCash(world, group, DEMO_CONFIG),
+        0,
+      ) * IDLE_CASH_MONTHLY_INVEST_SHARE,
+    );
     collectInvestableFunds(world, DEMO_CONFIG, []);
-    const contribution = round2(budgetBeforeSavings * DEMO_CONFIG.investors.savingsRate);
+    const contribution = round2(
+      Math.min(budgetBeforeSavings * DEMO_CONFIG.investors.savingsRate, idleCap),
+    );
     expect(city.lastMonth.investableContribution).toBeCloseTo(contribution, 2);
     expect(city.householdIncomeLastMonth).toBeCloseTo(budgetBeforeSavings - contribution, 2);
 

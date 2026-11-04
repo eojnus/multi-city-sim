@@ -226,6 +226,9 @@ export class Simulation {
 
       const startStock: Record<GoodId, number> = {} as Record<GoodId, number>;
       for (const goodId of GOOD_IDS) startStock[goodId] = totalStock(this.state, goodId);
+      // 设备资本化流出按“本月”统计：tick 之间的玩家购买已在 startStock 快照前生效，
+      // 这里清零后只累计本次 tick 内发生的“企业库存 → 设备资产”转移。
+      this.state.equipmentMarket.capitalizedThisTick = {};
 
       // 1. 经营者与选任：补齐经营者/玩家经营状态，任期到期、空缺或严重经营问题触发选任。
       ensureOperators(this.state, this.config, this.state.time.tick);
@@ -417,6 +420,8 @@ export class Simulation {
         const tradeNet = 0;
         // 跨城市贸易是全球库存的内部转移，世界口径净额为 0。
         const endStock = totalStock(this.state, goodId);
+        // 设备商品被企业买走并转为固定资产后不再计入商品库存：显式作为资本化流出。
+        const capitalized = round2(this.state.equipmentMarket.capitalizedThisTick?.[goodId] ?? 0);
         audits.push({
           goodId,
           startStock: startStock[goodId] ?? 0,
@@ -425,6 +430,7 @@ export class Simulation {
           householdConsumed: round2(householdConsumed[goodId] ?? 0),
           externalExported: round2(externalExported),
           writtenOff: round2(writtenOff),
+          capitalized,
           endStock,
           tradeNet: round2(tradeNet),
           expectedEndStock: round2(
@@ -433,7 +439,8 @@ export class Simulation {
               intermediateConsumed -
               (householdConsumed[goodId] ?? 0) -
               externalExported -
-              writtenOff +
+              writtenOff -
+              capitalized +
               tradeNet,
           ),
         });

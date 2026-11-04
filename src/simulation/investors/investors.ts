@@ -2,19 +2,30 @@
 // 普通居民不逐个建模；群体不是额外人口，populationShare 只用于分配居民收入。
 //
 // 暂定演示规则（待用户决定）：
-// - 每月从城市居民可支配收入中按 savingsRate 转入投资实体，剩余才用于下月消费。
+// - 每月按“居民闲钱”规则从居民群体手头现金转入投资实体（v1.0 第五节）：每个群体先保留
+//   3 个月基本生活需求资金，仅对保留额以上的闲置现金每月最多转入 0.5%；不提取存款、
+//   不借消费贷，群体现金不足（或无闲置）时不转，转入后现金不会为负。
 // - 实体收到的股息按 dividendDistributionRate 返还居民收入，其余留存投资。
 // - 自动投资规则可替换：投票权与仅分红两类股份都参与买卖打分；投票权接近持股上限时
 //   只排除投票权买入，仅分红类别按股息收益率、折价、趋势与风险偏好独立评估；
 //   两类股份每月都按真实持仓提供极小比例的流动性卖单（仅分红另有现金需求/股息惜售规则）。
 // - 跨城买股、阈值、风险偏好均为演示参数。
 
-import type { Company, HolderRef, InvestorGroup, LogEntry, ShareClass, WorldState } from '../contracts/types';
+import type {
+  Company,
+  HolderRef,
+  HouseholdGroup,
+  InvestorGroup,
+  LogEntry,
+  ShareClass,
+  WorldState,
+} from '../contracts/types';
 import type { DemoConfig } from '../../data/config';
 import { allocateProportionally, clamp, round2 } from '../core/math';
-import { debitHouseholdSavings } from '../population/household-economy';
-import { companyBookValue, monthlyWageBill } from '../companies/company';
+import { companyBookValue, companySharePrice, monthlyWageBill } from '../companies/company';
 import { cityMarketPrices } from '../markets/markets';
+import { householdBasicNeedCost } from '../population/household-finance';
+import { householdGroupsOfCity } from '../population/household-groups';
 import { PRODUCTIVITY } from '../../data/demo-data';
 import {
   acceptFinancingOffer,
@@ -29,6 +40,74 @@ import {
 import { latestStockPrice, stockHistoryFor } from '../securities/history';
 
 const GROUP_NAME_SUFFIX = ['储蓄互助会', '工薪投资者联盟', '城市养老基金'];
+
+/**
+ * v1.0 第五节“居民闲钱投资实体”首版口径（config 未设键，先以模块常量固定）：
+ * 群体先保留 3 个月基本生活需求资金；超出部分为闲置现金，每月最多转入 0.5%。
+ * 后续若要调参，应迁移到 config.investors，而不是散落魔法数。
+ */
+export const BASIC_NEED_RESERVE_MONTHS = 3;
+export const IDLE_CASH_MONTHLY_INVEST_SHARE = 0.005;
+
+/** 群体预计 3 个月基本生活需求保留额（基本需求 food 口径，见 household-finance）。 */
+export function householdBasicNeedReserve(
+  world: WorldState,
+  group: HouseholdGroup,
+  config: DemoConfig,
+): number {
+  return round2(
+    Math.max(0, householdBasicNeedCost(world, group, config)) * BASIC_NEED_RESERVE_MONTHS,
+  );
+}
+
+/**
+ * 群体闲置现金 = max(0, 手头现金 − 3 个月基本需求保留额)。
+ * 只算手头现金：银行存款、消费贷额度都不算闲钱（不得提取存款/借消费贷去投资）。
+ */
+export function householdIdleCash(
+  world: WorldState,
+  group: HouseholdGroup,
+  config: DemoConfig,
+): number {
+  return round2(Math.max(0, group.cash - householdBasicNeedReserve(world, group, config)));
+}
+
+/**
+ * 把可投总额按各群体闲置现金比例分摊，且每组不超过自身闲置现金的 0.5%。
+ * 尾差（分币级）按剩余容量从大到小补足，保证合计严格等于 target；确定性、无随机。
+ */
+function allocateIdleSavings(idles: number[], target: number): number[] {
+  const takes = idles.map(() => 0);
+  if (target <= 0) return takes;
+  const caps = idles.map((idle) => round2(Math.max(0, idle) * IDLE_CASH_MONTHLY_INVEST_SHARE));
+  const capTotal = round2(caps.reduce((sum, value) => sum + value, 0));
+  if (capTotal <= 0) return takes;
+  const planned = allocateMoney(target, caps);
+  let assigned = 0;
+  planned.forEach((value, index) => {
+    const take = round2(Math.max(0, Math.min(value, caps[index] ?? 0)));
+    takes[index] = take;
+    assigned = round2(assigned + take);
+  });
+  let remaining = round2(target - assigned);
+  if (remaining <= 0) return takes;
+  const order = caps
+    .map((_, index) => index)
+    .sort(
+      (left, right) =>
+        round2((caps[right] ?? 0) - (takes[right] ?? 0)) -
+          round2((caps[left] ?? 0) - (takes[left] ?? 0)) || left - right,
+    );
+  for (const index of order) {
+    if (remaining <= 0) break;
+    const room = round2((caps[index] ?? 0) - (takes[index] ?? 0));
+    const add = round2(Math.min(room, remaining));
+    if (add <= 0) continue;
+    takes[index] = round2((takes[index] ?? 0) + add);
+    remaining = round2(remaining - add);
+  }
+  return takes;
+}
 
 export const PLAYER_HOLDER: HolderRef = { type: 'player', id: 'player' };
 
@@ -101,18 +180,43 @@ export function totalInvestorDividendsByCity(world: WorldState): Record<string, 
 }
 
 /**
- * 从居民可支配收入中转出可投资资金。
- * 这是资金在不同居民用途之间的划分，不增加货币总量：转入额从下月消费预算中扣除。
+ * 从居民闲钱转入投资实体。
+ *
+ * v1.0 第五节口径（config 暂未设键，首版以模块常量固定）：
+ * 1. 每个居民群体先保留 3 个月基本生活需求资金（householdBasicNeedCost 的 food 口径，
+ *    人口 × 人均月需求 × 市场价），超出部分才是“闲置现金”；
+ * 2. 每月最多把每群体闲置现金的 0.5% 转入投资实体（城市合计即闲置现金总额的 0.5%）；
+ * 3. 只动 group.cash，不提取银行存款、不借消费贷，转入后现金不会为负；
+ * 4. 转入额只是资金用途划分，不增加货币总量，也不计入居民收入（income/dividendIncome 不变）。
+ *
+ * 旧的“按收入 savingsRate 转账”意愿额保留为上限之一：实际转入 = min(收入意愿额, 闲钱上限)，
+ * 这样既有规则被闲钱规则封顶，不会叠加成过度抽走消费资金；小额收入场景仍按 savingsRate 执行，
+ * 与既有测试口径兼容。同一月重复调用时跳过（防重复扣款）。
  */
 export function collectInvestableFunds(world: WorldState, config: DemoConfig, log: LogEntry[]): void {
   for (const city of [...world.cities].sort((a, b) => a.id.localeCompare(b.id))) {
     const groups = groupsOfCity(world, city.id);
     if (groups.length === 0) continue;
+    // 同月幂等：本月已执行过（investableContribution>0）就不再扣第二次。
+    if (city.lastMonth.investableContribution > 0) continue;
     const income = Math.max(0, city.householdIncomeLastMonth);
-    const desiredContribution = round2(income * config.investors.savingsRate);
-    // v0.4：储蓄是真实转账——先从居民群体现金扣出，再进入投资实体；
-    // 群体现金不足时按实际可转出额缩小，不凭空创造资金。
-    const contribution = debitHouseholdSavings(world, city, desiredContribution);
+    const incomeDesired = round2(income * config.investors.savingsRate);
+    const householdGroups = householdGroupsOfCity(world, city.id);
+    const idles = householdGroups.map((group) => householdIdleCash(world, group, config));
+    const idleTotal = round2(idles.reduce((sum, value) => sum + value, 0));
+    const idleCap = round2(idleTotal * IDLE_CASH_MONTHLY_INVEST_SHARE);
+    const target = round2(Math.max(0, Math.min(incomeDesired, idleCap)));
+    const takes = allocateIdleSavings(idles, target);
+    let contribution = 0;
+    householdGroups.forEach((group, index) => {
+      const take = takes[index] ?? 0;
+      if (take <= 0) return;
+      // 真实转账：现金减少、投资实体同额增加；现金不足的群体 idle=0，不会转出。
+      group.cash = round2(group.cash - take);
+      group.lastMonth.savingsContribution = round2(group.lastMonth.savingsContribution + take);
+      group.lastMonth.netCashChange = round2(group.lastMonth.netCashChange - take);
+      contribution = round2(contribution + take);
+    });
     if (contribution > 0) {
       const amounts = allocateMoney(contribution, groups.map((group) => group.populationShare));
       groups.forEach((group, index) => {
@@ -128,10 +232,77 @@ export function collectInvestableFunds(world: WorldState, config: DemoConfig, lo
       log.push({
         tick: world.time.tick,
         kind: 'government',
-        message: `${city.name} 居民本月转入投资实体 ${contribution.toFixed(0)} 信用点（占可支配收入 ${(config.investors.savingsRate * 100).toFixed(0)}%）。`,
+        message: `${city.name} 居民闲钱投资：本月转入投资实体 ${contribution.toFixed(0)} 信用点（先保留 3 个月基本生活需求，闲置现金最多转 ${(IDLE_CASH_MONTHLY_INVEST_SHARE * 100).toFixed(1)}%）。`,
       });
     }
   }
+}
+
+/**
+ * 每月居民投资实体报告（任务书第五节第 5 条：来源、投资、持股、分红、可用现金）。
+ * 只读聚合，不修改世界；金额与 household-groups 的权益口径一致（市值法）。
+ */
+export interface InvestorGroupFundingReport {
+  groupId: string;
+  cityId: string;
+  name: string;
+  /** 可用现金（投资实体自己的账户） */
+  cash: number;
+  /** 持股按当前城市市价的估值 */
+  holdingsValue: number;
+  /** 本月收到的股息（分红回流前，实体侧记账） */
+  dividendIncomeLastMonth: number;
+  /** 累计收到的股息（含已返还居民部分） */
+  dividendsReceived: number;
+}
+
+export interface CityInvestorFundingReport {
+  cityId: string;
+  cityName: string;
+  /** 本月居民闲钱转入的投资实体资金（真实转账） */
+  householdContribution: number;
+  investorCash: number;
+  groups: InvestorGroupFundingReport[];
+  note: string;
+}
+
+export function investorFundingReport(world: WorldState): CityInvestorFundingReport[] {
+  const companyById = new Map(world.companies.map((company) => [company.id, company]));
+  return [...world.cities]
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .map((city) => {
+      const prices = cityMarketPrices(city);
+      const groups = groupsOfCity(world, city.id).map((group) => {
+        const holdingsValue = round2(
+          world.securities.holdings
+            .filter(
+              (holding) =>
+                holding.holder.type === 'investorGroup' && holding.holder.id === group.id,
+            )
+            .reduce((sum, holding) => {
+              const company = companyById.get(holding.companyId);
+              return company ? sum + holding.shares * companySharePrice(company, prices) : sum;
+            }, 0),
+        );
+        return {
+          groupId: group.id,
+          cityId: group.cityId,
+          name: group.name,
+          cash: round2(group.cash),
+          holdingsValue,
+          dividendIncomeLastMonth: round2(group.lastDividend),
+          dividendsReceived: round2(group.dividendsReceived),
+        };
+      });
+      return {
+        cityId: city.id,
+        cityName: city.name,
+        householdContribution: round2(city.lastMonth.investableContribution),
+        investorCash: round2(groups.reduce((sum, group) => sum + group.cash, 0)),
+        groups,
+        note: '居民闲钱投资：先保留 3 个月基本生活需求，闲置现金每月最多转入 0.5%；不提取存款、不借消费贷。',
+      };
+    });
 }
 
 /**

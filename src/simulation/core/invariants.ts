@@ -3,6 +3,7 @@ import { DEMO_CONFIG } from '../../data/config';
 import type { GoodId, WorldState } from '../contracts/types';
 import { GOOD_IDS, roleTotal } from '../companies/company';
 import { sumCityStock } from '../markets/markets';
+import { equipmentCapacityPerUnit } from '../equipment/equipment';
 import { round2 } from './math';
 
 export interface GoodsAudit {  goodId: GoodId;
@@ -13,6 +14,8 @@ export interface GoodsAudit {  goodId: GoodId;
   externalExported: number;
   /** v0.3：倒闭企业库存注销数量（显式去向，不是消费）。 */
   writtenOff: number;
+  /** v1.0：设备商品从企业库存转为设备资产（资本化）的台数。 */
+  capitalized: number;
   endStock: number;
   tradeNet: number;
   expectedEndStock: number;
@@ -105,7 +108,9 @@ export function checkInvariants(
       if (market.sold + market.intercityImported > market.demand + 0.05) {
         problems.push(`${city.name}/${goodId}: 本地成交 + 进口超过需求`);
       }
-      if (market.sold > market.supply + 0.05) {
+      // v1.0：跨城进口的单位在本地账本上可以继续成交，但 intercityImported 不计入本地 supply
+      // （supply 只统计本城企业当月可供库存），因此可用供给 = 本地供应 + 跨城进口。
+      if (market.sold > market.supply + market.intercityImported + 0.05) {
         problems.push(
           `${city.name}/${goodId}: 成交 ${market.sold} 超过供应 ${market.supply}`,
         );
@@ -159,7 +164,7 @@ export function checkInvariants(
   for (const audit of audits) {
     if (Math.abs(audit.endStock - audit.expectedEndStock) > 0.2) {
       problems.push(
-        `${audit.goodId}: 库存不守恒 期初 ${audit.startStock} + 产出 ${audit.produced} - 中间投入 ${audit.intermediateConsumed} - 居民消费 ${audit.householdConsumed} - 区域外出口 ${audit.externalExported} + 贸易净额 ${audit.tradeNet} = ${audit.expectedEndStock}，实际 ${audit.endStock}`,
+        `${audit.goodId}: 库存不守恒 期初 ${audit.startStock} + 产出 ${audit.produced} - 中间投入 ${audit.intermediateConsumed} - 居民消费 ${audit.householdConsumed} - 区域外出口 ${audit.externalExported} - 注销 ${audit.writtenOff} - 资本化 ${audit.capitalized ?? 0} + 贸易净额 ${audit.tradeNet} = ${audit.expectedEndStock}，实际 ${audit.endStock}`,
       );
     }
   }
@@ -451,6 +456,7 @@ const SECTOR_ID_SET = new Set<string>([
   'metal',
   'utility',
   'appliance',
+  'equipment',
 ]);
 
 const STYLE_SET = new Set<string>(['growth', 'steady', 'return']);
@@ -1072,13 +1078,15 @@ function checkEquipment(world: WorldState, config: DemoConfig): string[] {
     }
     // 独立推导：按“整数台数 × 每台产能 × 城市技术系数 + 显式迁移余量”重算产能，
     // 与 equipmentCapacity / capacity 对比；避免两个缓存同时过期时互相“证明”正确。
+    // 每台产能按企业产出口径选择：资本品企业用 outputCapacityPerUnit（台/月），普通商品用
+    // catalog[kind].capacityPerUnit（产出单位/月），见 equipment.ts 的 equipmentCapacityPerUnit。
     const companyCity = world.cities.find((entry) => entry.id === company.cityId);
     const tech = companyCity?.technology.productivityMultiplier ?? 1;
     let derived = 0;
     for (const kind of kinds) {
       derived +=
         Math.max(0, Math.floor(company.equipment[kind] ?? 0)) *
-        config.equipment.catalog[kind].capacityPerUnit;
+        equipmentCapacityPerUnit(config, kind, company.recipeOutput);
     }
     derived = round2(derived * tech);
     const remainder =
@@ -1092,9 +1100,9 @@ function checkEquipment(world: WorldState, config: DemoConfig): string[] {
     }
     const maxRemainder = round2(
       Math.max(
-        config.equipment.catalog.farm.capacityPerUnit,
-        config.equipment.catalog.industry.capacityPerUnit,
-        config.equipment.catalog.energy.capacityPerUnit,
+        ...kinds.map((kind) =>
+          equipmentCapacityPerUnit(config, kind, company.recipeOutput),
+        ),
       ) * Math.max(1, tech),
     );
     if (remainder > maxRemainder + 0.01) {

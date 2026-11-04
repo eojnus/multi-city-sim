@@ -59,6 +59,34 @@ export function equipmentUnits(company: Company, kind: EquipmentKind): number {
   return Math.max(0, Math.floor(company.equipment[kind] ?? 0));
 }
 
+/** 该产出是否为资本品（设备商品）：资本品企业的产能单位是“台/月”，不是普通产出单位。 */
+export function isCapitalGood(config: DemoConfig, output: GoodId): boolean {
+  const value = (config.equipment.outputCapacityPerUnit as Partial<Record<GoodId, number>>)[output];
+  return typeof value === 'number' && Number.isFinite(value) && value > 0;
+}
+
+/**
+ * 每台设备对企业产能的贡献（不含城市技术系数与迁移余量），单位 = 该企业产出单位/台/月。
+ *
+ * v1.0 统一单位（task-23）：
+ * - 普通商品企业：每台设备贡献 catalog[kind].capacityPerUnit 个产出单位/月（首版 300,000）；
+ * - 资本品企业（产出为设备商品）：每台设备贡献 outputCapacityPerUnit[资本品] 台/月（5/3/3），
+ *   不能沿用 300,000，否则设备厂 1 台设备 = 30 万台/月，创业资本会被高估到数百亿。
+ */
+export function equipmentCapacityPerUnit(
+  config: DemoConfig,
+  kind: EquipmentKind,
+  output: GoodId,
+): number {
+  const capitalValue = (config.equipment.outputCapacityPerUnit as Partial<Record<GoodId, number>>)[
+    output
+  ];
+  if (typeof capitalValue === 'number' && Number.isFinite(capitalValue) && capitalValue > 0) {
+    return capitalValue;
+  }
+  return config.equipment.catalog[kind].capacityPerUnit;
+}
+
 /** 由设备台数推导的产能：设备数量 × 每台产能 × 城市技术系数（不含迁移余量）。 */
 export function derivedEquipmentCapacity(
   world: WorldState,
@@ -69,7 +97,9 @@ export function derivedEquipmentCapacity(
   const tech = city?.technology.productivityMultiplier ?? 1;
   let capacity = 0;
   for (const kind of KINDS) {
-    capacity += equipmentUnits(company, kind) * config.equipment.catalog[kind].capacityPerUnit;
+    capacity +=
+      equipmentUnits(company, kind) *
+      equipmentCapacityPerUnit(config, kind, company.recipeOutput);
   }
   return round2(capacity * tech);
 }
@@ -231,6 +261,23 @@ export function recordEquipmentLedgerIncrement(
   entry.intercityImported = round2(
     entry.intercityImported + (increment.intercityImported ?? 0),
   );
+}
+
+/**
+ * tick 之间（玩家创办/扩产、存读档前）设备成交不经过 finalizeMarkets：
+ * 设备从卖家企业库存转为买方资产后立即同步卖方城市的市场期末库存，
+ * 否则 checkInvariants 的“市场期末库存 == 企业库存合计”会在两次 tick 之间误报。
+ * 下一期 finalizeMarkets 会按真实企业库存重算期末库存，无需额外回滚。
+ */
+export function syncMarketClosingStock(
+  world: WorldState,
+  cityId: string,
+  goodId: GoodId,
+  delta: number,
+): void {
+  const market = world.cities.find((entry) => entry.id === cityId)?.market[goodId];
+  if (!market) return;
+  market.closingStock = Math.max(0, round2((market.closingStock ?? 0) + delta));
 }
 
 export interface NewEquipmentPurchaseLine {
@@ -440,6 +487,10 @@ export function executeNewEquipmentPlan(
       );
       seller.lastMonth.sold = round2(seller.lastMonth.sold + line.units);
       seller.lastMonth.revenue = round2(seller.lastMonth.revenue + line.cost);
+      // 设备作为资本品出售的收入：计入卖方 equipmentSold（与二手设备口径一致），
+      // 供 72 月报告区分“设备产业售出收入”与普通商品销售。
+      seller.lastMonth.equipmentSold = round2((seller.lastMonth.equipmentSold ?? 0) + line.cost);
+      syncMarketClosingStock(world, seller.cityId, goodId, -line.units);
       recordEquipmentLedgerIncrement(world, city.id, goodId, {
         demand: line.units,
         sold: line.units,
@@ -462,6 +513,7 @@ export function executeNewEquipmentPlan(
         0,
         round2((seller.inventory[goodId] ?? 0) - line.units),
       );
+      syncMarketClosingStock(world, seller.cityId, goodId, -line.units);
       // 跨城：买方全额付款，卖方所得按既有运输容量结算（期末统一扣减并退回差额）。
       recordIntercityEquipmentPurchase(world, company, seller, kind, line.units, line.cost, config);
       // 进口台数计入买方城市需求与跨城进口，不计本地 sold（口径与跨城商品一致）。
@@ -470,6 +522,12 @@ export function executeNewEquipmentPlan(
         sold: 0,
         intercityImported: line.units,
       });
+    }
+    if (line.source !== 'government') {
+      // 企业/跨城卖方库存转为买方设备资产：世界口径的商品库存减少，
+      // 结算审计把它作为“资本化流出”显式扣减，避免误报库存不守恒。
+      const capitalized = (world.equipmentMarket.capitalizedThisTick ??= {});
+      capitalized[goodId] = round2((capitalized[goodId] ?? 0) + line.units);
     }
   }
 
@@ -693,11 +751,13 @@ export function equipmentFromCapacity(
   capacityByKind: Partial<Record<EquipmentKind, number>>,
   techMultiplier: number,
   config: DemoConfig,
+  output: GoodId = 'food',
 ): EquipmentAssets {
   const assets = emptyEquipmentAssets();
   for (const kind of KINDS) {
     const capacity = capacityByKind[kind] ?? 0;
-    const perUnit = config.equipment.catalog[kind].capacityPerUnit * techMultiplier;
+    const perUnit =
+      equipmentCapacityPerUnit(config, kind, output) * (techMultiplier > 0 ? techMultiplier : 1);
     assets[kind] = Math.max(0, Math.round(capacity / Math.max(1, perUnit)));
   }
   return assets;
@@ -717,11 +777,13 @@ export function equipmentFromLegacyCapacity(
   techMultiplier: number,
   config: DemoConfig,
   kind: EquipmentKind,
+  output: GoodId,
 ): { equipment: EquipmentAssets; remainder: number } {
   const assets = emptyEquipmentAssets();
   const perUnit = Math.max(
     1,
-    config.equipment.catalog[kind].capacityPerUnit * (techMultiplier > 0 ? techMultiplier : 1),
+    equipmentCapacityPerUnit(config, kind, output) *
+      (techMultiplier > 0 ? techMultiplier : 1),
   );
   const safeCapacity = Number.isFinite(capacity) && capacity > 0 ? capacity : 0;
   const units = Math.max(0, Math.floor(safeCapacity / perUnit));

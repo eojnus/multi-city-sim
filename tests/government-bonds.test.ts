@@ -175,23 +175,25 @@ describe('政府债券：发行与整数份认购', () => {
     if (!company) throw new Error('缺少测试企业');
     const issuance = issueGovernmentBond(world, city, CONFIG, 10, 0).issuance!;
 
-    company.cash = 3_000;
+    const reserve = CONFIG.government.companyPurchaseReserve;
+    company.cash = 3_000 + 1_000 * reserve.wageMonths + 500 * reserve.interestMonths;
     company.previousMonth.wagesPaid = 1_000;
     company.previousMonth.interestPaid = 500;
     company.lastMonth.wageArrears = 0;
     const available = bondHolderAvailableCash(world, CONFIG, { kind: 'company', id: company.id });
-    expect(available).toBe(1_500);
+    expect(available).toBe(3_000);
 
     const bought = subscribeGovernmentBond(
       world,
       CONFIG,
       issuance.id,
       { kind: 'company', id: company.id },
-      5,
+      1,
       0,
     );
     expect(bought.units).toBe(1);
-    expect(company.cash).toBe(2_000); // 保留 1,500 流动性，剩余 500 零钱不动。
+    // 保留 3,000 可支配现金不动，额外买入 1 份 1,000。
+    expect(company.cash).toBe(3_000 + 1_000 * reserve.wageMonths + 500 * reserve.interestMonths - 1_000);
 
     // 欠薪企业禁止认购，且不扣款。
     const cashBefore = company.cash;

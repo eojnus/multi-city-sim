@@ -3,8 +3,8 @@
 import { describe, expect, it } from 'vitest';
 import { Simulation } from '../src/simulation/core/simulation';
 import { DEMO_CONFIG } from '../src/data/config';
-import { CITY_SEEDS, COMPANY_SEEDS } from '../src/data/demo-data';
-import { equipmentKindForSector } from '../src/simulation/equipment/equipment';
+import { CITY_SEEDS, COMPANY_SEEDS, OPENING_COMPANIES } from '../src/data/demo-data';
+import { equipmentCapacityPerUnit, equipmentKindForSector } from '../src/simulation/equipment/equipment';
 import { checkInvariants } from '../src/simulation/core/invariants';
 
 describe('v0.9 开局人口与企业数量', () => {
@@ -31,10 +31,12 @@ describe('v0.9 开局人口与企业数量', () => {
     }
   });
 
-  it('初始企业数量不变（17 家），上限提高到 160', () => {
+  it('初始企业数量 = 原有 17 + 每城新增 16（v1.0）= 65，上限提高到 160', () => {
     const world = Simulation.create(DEMO_CONFIG).state;
-    expect(world.companies.length).toBe(COMPANY_SEEDS.length);
     expect(COMPANY_SEEDS.length).toBe(17);
+    expect(OPENING_COMPANIES.length).toBe(48);
+    expect(world.companies.length).toBe(COMPANY_SEEDS.length + OPENING_COMPANIES.length);
+    expect(world.companies.length).toBe(65);
     expect(DEMO_CONFIG.lifecycle.maxCompaniesPerCity).toBe(160);
     expect(DEMO_CONFIG.lifecycle.maxFoundingsPerCityMonth).toBe(2);
   });
@@ -44,7 +46,8 @@ describe('v0.9 开局人口与企业数量', () => {
     for (const company of world.companies) {
       const kind = equipmentKindForSector(company.sector, DEMO_CONFIG);
       const city = world.cities.find((entry) => entry.id === company.cityId)!;
-      const perUnit = DEMO_CONFIG.equipment.catalog[kind].capacityPerUnit;
+      // v1.0 统一单位：普通商品用 catalog.capacityPerUnit，资本品用 outputCapacityPerUnit。
+      const perUnit = equipmentCapacityPerUnit(DEMO_CONFIG, kind, company.recipeOutput);
       const expectedUnits = Math.max(
         1,
         Math.round(company.capacity / (perUnit * city.technology.productivityMultiplier)),

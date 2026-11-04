@@ -12,6 +12,7 @@ import { GOOD_IDS, createEmptyInventory } from '../companies/company';
 import { GOODS } from '../../data/demo-data';
 import {
   emptyEquipmentAssets,
+  equipmentCapacityPerUnit,
   equipmentFromLegacyCapacity,
   equipmentKindForSector,
 } from '../equipment/equipment';
@@ -55,6 +56,7 @@ const SECTOR_IDS = new Set([
   'metal',
   'utility',
   'appliance',
+  'equipment',
 ]);
 const LOG_KINDS = new Set([
   'system',
@@ -189,6 +191,17 @@ export function parseSave(text: string): ParseResult {
       }
       worldValue = migration.world;
       if (migratedFrom === undefined) migratedFrom = 8;
+    }
+
+    // 旧 v0.9 真实存档：formatVersion 已是 9，但文件生成于 equipmentCapacityRemainder
+    // 与 equipmentMarket.pendingLedger 字段出现之前（例如 f942cc9）。补齐这些字段，
+    // 保持旧产能、人口、现金、债务、股份与时间进度不变，不重新执行新开局逻辑。
+    if (formatVersion === 9) {
+      const compatibility = normalizeLegacyV09World(worldValue);
+      if (!compatibility.ok || !compatibility.world) {
+        return { ok: false, error: compatibility.error ?? 'v0.9 旧存档兼容处理失败' };
+      }
+      worldValue = compatibility.world;
     }
 
     const structureError = validateWorldStructure(worldValue);
@@ -1100,9 +1113,12 @@ function validateCompany(value: unknown, index: number): string | null {
   if (!isFiniteNumber(value.equipmentCapacity) || value.equipmentCapacity < 0) {
     return `企业 ${id}.equipmentCapacity 必须是非负数值`;
   }
+  // 旧 v0.9 真实存档（如 f942cc9 生成）在 formatVersion 仍为 9 时没有该字段；
+  // 读取路径会由 normalizeLegacyV09World 按“整台设备 + 显式余量”补齐，这里只校验已出现的值。
   if (
-    !isFiniteNumber(value.equipmentCapacityRemainder) ||
-    value.equipmentCapacityRemainder < 0
+    value.equipmentCapacityRemainder !== undefined &&
+    (!isFiniteNumber(value.equipmentCapacityRemainder) ||
+      value.equipmentCapacityRemainder < 0)
   ) {
     return `企业 ${id}.equipmentCapacityRemainder 必须是非负数值`;
   }
@@ -2712,6 +2728,94 @@ export function migrateWorldV7ToV8(raw: unknown): MigrationResult {
 }
 
 /**
+ * v0.9 真实旧存档兼容：formatVersion 仍为 9，但文件早于 `equipmentCapacityRemainder` 字段。
+ *
+ * f942cc9 等旧版本按 `round(baseCapacity / 每台产能)` 创建设备，并直接把旧产能写入
+ * `capacity/equipmentCapacity`。读取这类文件时：
+ * - 没有 `equipmentCapacityRemainder`：按“整台设备 + 显式余量”补齐，保持旧产能不变；
+ *   若四舍五入导致设备推导产能略高于旧产能，先减掉多出的整台设备（旧档取整伪影），
+ *   绝不用负余量、也不偷偷抬高/压低旧产能或生成可售设备；
+ * - 没有 `equipmentMarket.pendingLedger`：仅补空数组（不影响现金、库存与进度）。
+ * 该函数幂等：已有合法余量的企业不再改动；不修改现金、债务、股份、人口、时间与随机状态。
+ */
+export function normalizeLegacyV09World(raw: unknown): MigrationResult {
+  if (!isRecord(raw)) return { ok: false, error: '存档 world 不是对象' };
+  const world = deepClone(raw) as unknown as WorldState;
+  if (!Array.isArray(world.companies)) return { ok: false, error: 'v0.9 存档缺少企业数据' };
+  if (!Array.isArray(world.cities)) return { ok: false, error: 'v0.9 存档缺少城市数据' };
+  const config = DEMO_CONFIG;
+  const kinds = ['farm', 'industry', 'energy'] as const;
+  let fixedCompanies = 0;
+  let totalRemainder = 0;
+  let adjustedUnits = 0;
+
+  for (const company of world.companies) {
+    if (!isRecord(company.equipment)) continue;
+    const hasRemainder =
+      Number.isFinite(company.equipmentCapacityRemainder) &&
+      company.equipmentCapacityRemainder >= 0;
+    if (hasRemainder) continue;
+
+    const city = world.cities.find((entry) => entry.id === company.cityId);
+    const tech = city?.technology?.productivityMultiplier ?? 1;
+    const techFactor = tech > 0 ? tech : 1;
+    const perUnit = (kind: (typeof kinds)[number]): number =>
+      equipmentCapacityPerUnit(config, kind, company.recipeOutput) * techFactor;
+    const unitsOf = (kind: (typeof kinds)[number]): number => {
+      const units = company.equipment[kind];
+      return Number.isFinite(units) && units > 0 ? Math.floor(units) : 0;
+    };
+    const derivedCapacity = (): number =>
+      round2(kinds.reduce((sum, kind) => sum + unitsOf(kind) * perUnit(kind), 0));
+
+    const capacity =
+      Number.isFinite(company.capacity) && company.capacity > 0 ? company.capacity : 0;
+    // 旧档按 round 取整，可能出现“设备推导产能 > 旧产能”的取整伪影：
+    // 减掉整台设备直到推导产能不超过旧产能，保证余量非负且总产能不变。
+    let guard = 0;
+    while (derivedCapacity() > capacity + 0.005 && guard < 10_000) {
+      const kind = kinds.find((entry) => unitsOf(entry) > 0);
+      if (!kind) break;
+      company.equipment[kind] = unitsOf(kind) - 1;
+      adjustedUnits += 1;
+      guard += 1;
+    }
+
+    const remainder = round2(Math.max(0, capacity - derivedCapacity()));
+    company.equipmentCapacityRemainder = remainder;
+    company.equipmentCapacity = round2(capacity);
+    totalRemainder = round2(totalRemainder + remainder);
+    fixedCompanies += 1;
+  }
+
+  if (isRecord(world.equipmentMarket)) {
+    if (!Array.isArray(world.equipmentMarket.pendingLedger)) {
+      world.equipmentMarket.pendingLedger = [];
+    }
+  } else {
+    world.equipmentMarket = {
+      initialStock: emptyEquipmentAssets(),
+      offers: [],
+      lastMonthSold: emptyEquipmentAssets(),
+      pendingLedger: [],
+    };
+  }
+
+  if (fixedCompanies > 0) {
+    if (!Array.isArray(world.log)) world.log = [];
+    world.log.push({
+      tick: world.time.tick,
+      kind: 'system',
+      message:
+        `读取 v0.9 旧档：补齐 ${fixedCompanies} 家企业的设备产能余量（合计 ${round2(totalRemainder)}，` +
+        `调整设备 ${adjustedUnits} 台以消除旧档取整伪影）；总产能、现金、债务与进度均未改变。`,
+      visibility: { scope: 'public', cityId: null },
+    });
+  }
+  return { ok: true, world };
+}
+
+/**
  * v8 → v9 迁移：设备资产、设备市场与 3 种设备商品。
  *
  * 约束（任务书 §11）：
@@ -2764,7 +2868,13 @@ export function migrateWorldV8ToV9(raw: unknown): MigrationResult {
       const kind = equipmentKindForSector(company.sector, config);
       // 旧档只有总产能：按整台设备向下取整映射，余量显式记入 equipmentCapacityRemainder，
       // 保证迁移后 capacity = 设备推导产能 + 余量（不四舍五入导致后续重算跳变）。
-      const mapped = equipmentFromLegacyCapacity(company.capacity, tech, config, kind);
+      const mapped = equipmentFromLegacyCapacity(
+        company.capacity,
+        tech,
+        config,
+        kind,
+        company.recipeOutput,
+      );
       company.equipment = mapped.equipment;
       company.equipmentCapacity = round2(company.capacity);
       company.equipmentCapacityRemainder = mapped.remainder;
@@ -2834,6 +2944,20 @@ function validateEquipmentMarket(value: unknown): string | null {
         if (!isFiniteNumber(entry[field]) || (entry[field] as number) < 0) {
           return `world.equipmentMarket.pendingLedger.${field} 必须是非负数值`;
         }
+      }
+    }
+  }
+  // v1.0：资本化流出字段可缺省（旧存档兼容），存在时必须是“商品 → 非负台数”的对象。
+  if (value.capitalizedThisTick !== undefined) {
+    if (!isRecord(value.capitalizedThisTick)) {
+      return 'world.equipmentMarket.capitalizedThisTick 必须是对象';
+    }
+    for (const [goodId, units] of Object.entries(value.capitalizedThisTick)) {
+      if (!GOOD_IDS.includes(goodId as never)) {
+        return `world.equipmentMarket.capitalizedThisTick 含未知商品 ${goodId}`;
+      }
+      if (!isFiniteNumber(units) || (units as number) < 0) {
+        return `world.equipmentMarket.capitalizedThisTick.${goodId} 必须是非负数值`;
       }
     }
   }

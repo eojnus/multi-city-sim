@@ -7,17 +7,16 @@ import { checkInvariants } from '../../src/simulation/core/invariants';
  * F 组「真实破产样本」：固定条件 36 个月、玩家无操作、默认种子 20261101。
  * 复现命令：npx vitest run tests/acceptance/bankruptcy-real-run.test.ts
  *
- * v0.9 验收修复（设备/存档、居民消费两阶段、生产计划与贸易合同顺序）落盘后，36 月确定性
- * 序列再次漂移。本文件按当前代码实测值重新锁定：
- *   - 岚港 t17 / t29，铁谷 t15 / t27，青原 t15 / t34，共 6 次破产；
+ * v1.0 最终代码（消费贷授信快照修复冻结后）的实测序列：
+ *   - 岚港未破产；铁谷 t17 / t31，青原 t16 / t31，共 4 次破产；
  *   - 每次破产均触发同 tick 重选，兑付后勾销债券垫付与政府贷款，次月起恢复融资；
- *   - t36 负债率：岚港 55.9%（watch）、铁谷 94.5%（high）、青原 9.9%（normal）；
- *   - 债券 61 期：计划 2,122,664 = 成交 1,571,501 + 未售 551,163；持债 187 笔
- *     （active 24 / redeemed 163，其中企业 8 笔、清算企业历史持债 5 笔）。
+ *   - t36 负债率：岚港 52.0%（watch）、铁谷 36.8%（normal）、青原 26.5%（normal）；
+ *   - 债券 48 期：计划 2,466,911 = 成交 1,941,947 + 未售 524,964；持债 263 笔
+ *     （active 62 / redeemed 201，其中企业 68 笔、清算企业历史持债 16 笔）。
  * 结构/守恒断言全部保留（AC-F-R1~R8：兑付本金+利息==银行垫付、计划=成交+未售、
  * writtenOff 清零、不伪造/不抹账、次月重建、破产同 tick 重选、不变量为空）。
  */
-describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v0.9 税制）', () => {
+describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v1.0 最终税制）', () => {
   let world: WorldState;
   /** 每月月末的负债率快照（tick → cityId → lastDebt）。 */
   const monthEndRatio = new Map<number, Map<string, { ratio: number; riskLevel: string }>>();
@@ -61,12 +60,12 @@ describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v
     return world.companies.find((company) => company.id === holding.holder.id)?.cityId ?? null;
   };
 
-  it('F-R1 触发月份：三城在 36 月内共破产 6 次（岚港 t17/t29、铁谷 t15/t27、青原 t15/t34）', () => {
-    expect(city('lanport').government!.records.map((record) => record.tick)).toEqual([17, 29]);
-    expect(city('ironvale').government!.records.map((record) => record.tick)).toEqual([15, 27]);
-    expect(city('greenfield').government!.records.map((record) => record.tick)).toEqual([15, 34]);
-    // 结构断言：破产事实与重选一一对应，且两轮破产合计 6 次。
-    expect(records()).toHaveLength(6);
+  it('F-R1 触发月份：岚港未破产，铁谷 t17/t31、青原 t16/t31 共 4 次', () => {
+    expect(city('lanport').government!.records.map((record) => record.tick)).toEqual([]);
+    expect(city('ironvale').government!.records.map((record) => record.tick)).toEqual([17, 31]);
+    expect(city('greenfield').government!.records.map((record) => record.tick)).toEqual([16, 31]);
+    // 结构断言：破产事实与重选一一对应，且两轮破产合计 4 次。
+    expect(records()).toHaveLength(4);
     for (const record of records()) {
       expect(record.electionTriggeredTick).toBe(record.tick);
       expect(record.debtRatio).toBeGreaterThanOrEqual(1);
@@ -77,49 +76,47 @@ describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v
     }
   });
 
-  it('F-R2 风险分级：t19 三城 normal、t36 岚港 watch/铁谷 high/青原 normal；判定月比率均 ≥100%', () => {
+  it('F-R2 风险分级：t19 岚港 watch、其余 normal；t36 岚港 watch/铁谷 normal/青原 normal；判定月比率均 ≥100%', () => {
     const lanportPre = monthEndRatio.get(19)?.get('lanport');
-    expect(lanportPre?.ratio).toBeCloseTo(0.103191, 5);
-    expect(lanportPre?.riskLevel).toBe('normal');
+    expect(lanportPre?.ratio).toBeCloseTo(0.566786, 5);
+    expect(lanportPre?.riskLevel).toBe('watch');
     const ironvalePre = monthEndRatio.get(19)?.get('ironvale');
-    expect(ironvalePre?.ratio).toBeCloseTo(0.285289, 5);
+    expect(ironvalePre?.ratio).toBeCloseTo(0.064882, 5);
     expect(ironvalePre?.riskLevel).toBe('normal');
     const greenfieldPre = monthEndRatio.get(19)?.get('greenfield');
-    expect(greenfieldPre?.ratio).toBeCloseTo(0.314935, 5);
+    expect(greenfieldPre?.ratio).toBeCloseTo(0.078608, 5);
     expect(greenfieldPre?.riskLevel).toBe('normal');
 
-    // 铁谷在 t27 破产：当月清算后负债率归零；岚港 t29 才第二次破产，t27/t28 仍按原债务计算。
-    expect(monthEndRatio.get(27)?.get('lanport')?.ratio).toBeCloseTo(0.867172, 5);
-    expect(monthEndRatio.get(27)?.get('lanport')?.riskLevel).toBe('high');
-    expect(monthEndRatio.get(27)?.get('ironvale')?.ratio).toBeCloseTo(0, 5);
-    expect(city('ironvale').government!.records[1]!.tick).toBe(27);
-    expect(monthEndRatio.get(27)?.get('greenfield')?.ratio).toBeCloseTo(0.697275, 5);
+    // 铁谷 t17 破产、青原 t16 破产后均已恢复；t27/t28 负债率按恢复后的新债务计算。
+    expect(monthEndRatio.get(27)?.get('lanport')?.ratio).toBeCloseTo(0.664343, 5);
+    expect(monthEndRatio.get(27)?.get('lanport')?.riskLevel).toBe('watch');
+    expect(monthEndRatio.get(27)?.get('ironvale')?.ratio).toBeCloseTo(0.793457, 5);
+    expect(monthEndRatio.get(27)?.get('ironvale')?.riskLevel).toBe('high');
+    expect(monthEndRatio.get(27)?.get('greenfield')?.ratio).toBeCloseTo(0.741461, 5);
     expect(monthEndRatio.get(27)?.get('greenfield')?.riskLevel).toBe('watch');
-    expect(monthEndRatio.get(28)?.get('lanport')?.ratio).toBeCloseTo(0.892877, 5);
-    expect(monthEndRatio.get(28)?.get('lanport')?.riskLevel).toBe('high');
-    expect(monthEndRatio.get(28)?.get('greenfield')?.ratio).toBeCloseTo(0.676872, 5);
-    expect(monthEndRatio.get(28)?.get('greenfield')?.riskLevel).toBe('watch');
+    expect(monthEndRatio.get(28)?.get('lanport')?.ratio).toBeCloseTo(0.613474, 5);
+    expect(monthEndRatio.get(28)?.get('lanport')?.riskLevel).toBe('watch');
+    expect(monthEndRatio.get(28)?.get('ironvale')?.ratio).toBeCloseTo(0.794299, 5);
+    expect(monthEndRatio.get(28)?.get('ironvale')?.riskLevel).toBe('high');
+    expect(monthEndRatio.get(28)?.get('greenfield')?.ratio).toBeCloseTo(0.831283, 5);
+    expect(monthEndRatio.get(28)?.get('greenfield')?.riskLevel).toBe('high');
 
-    expect(monthEndRatio.get(36)?.get('lanport')?.ratio).toBeCloseTo(0.558868, 5);
+    expect(monthEndRatio.get(36)?.get('lanport')?.ratio).toBeCloseTo(0.520036, 5);
     expect(monthEndRatio.get(36)?.get('lanport')?.riskLevel).toBe('watch');
-    expect(monthEndRatio.get(36)?.get('ironvale')?.ratio).toBeCloseTo(0.944946, 5);
-    expect(monthEndRatio.get(36)?.get('ironvale')?.riskLevel).toBe('high');
-    expect(monthEndRatio.get(36)?.get('greenfield')?.ratio).toBeCloseTo(0.099426, 5);
+    expect(monthEndRatio.get(36)?.get('ironvale')?.ratio).toBeCloseTo(0.367912, 5);
+    expect(monthEndRatio.get(36)?.get('ironvale')?.riskLevel).toBe('normal');
+    expect(monthEndRatio.get(36)?.get('greenfield')?.ratio).toBeCloseTo(0.264736, 5);
     expect(monthEndRatio.get(36)?.get('greenfield')?.riskLevel).toBe('normal');
 
     // 每次判定：record.debtRatio = totalDebtAtJudgement / gdpJudgementValue，且判定月≥100%。
     const expected: Record<string, Array<{ tick: number; ratio: number; debt: number; gdp: number }>> = {
-      lanport: [
-        { tick: 17, ratio: 1.032626, debt: 435_272_745.17, gdp: 421_520_140.52 },
-        { tick: 29, ratio: 1.064415, debt: 269_993_189.06, gdp: 253_654_144.46 },
-      ],
       ironvale: [
-        { tick: 15, ratio: 1.471664, debt: 402_780_925.41, gdp: 273_690_824.85 },
-        { tick: 27, ratio: 1.033925, debt: 220_503_393.6, gdp: 213_268_190.82 },
+        { tick: 17, ratio: 1.23298, debt: 526_444_632.66, gdp: 426_969_314.92 },
+        { tick: 31, ratio: 1.08048, debt: 290_526_625.58, gdp: 268_886_539.79 },
       ],
       greenfield: [
-        { tick: 15, ratio: 1.422295, debt: 305_284_910.61, gdp: 214_642_489.48 },
-        { tick: 34, ratio: 1.023095, debt: 197_036_681.07, gdp: 192_588_837.34 },
+        { tick: 16, ratio: 1.547121, debt: 519_488_069.91, gdp: 335_777_218.52 },
+        { tick: 31, ratio: 1.107504, debt: 254_030_569.88, gdp: 229_372_245.29 },
       ],
     };
     for (const [cityId, list] of Object.entries(expected)) {
@@ -198,18 +195,18 @@ describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v
       expect(issuancePrincipal).toBeCloseTo(record.bondsRedeemedPrincipal, 2);
       expect(issuanceAdvanced).toBeCloseTo(record.bankAdvanceCreated, 2);
     }
-    // 破产兑付后仍在存续期的持债为 active（共 24 笔）。
-    expect(world.bonds!.holdings.filter((holding) => holding.status === 'active')).toHaveLength(24);
-    expect(world.bonds!.holdings).toHaveLength(187);
+    // 破产兑付后仍在存续期的持债为 active（共 62 笔）。
+    expect(world.bonds!.holdings.filter((holding) => holding.status === 'active')).toHaveLength(62);
+    expect(world.bonds!.holdings).toHaveLength(263);
   });
 
-  it('F-R4 债券认购：计划=成交+未售（总量守恒），持有人为居民实体或企业（117 跨城 / 65 同城）', () => {
+  it('F-R4 债券认购：计划=成交+未售（总量守恒），持有人为居民实体或企业（166 跨城 / 81 同城 / 16 历史）', () => {
     const totalPlan = allIssuances().reduce((sum, issuance) => sum + issuance.planUnits, 0);
     const totalSold = allIssuances().reduce((sum, issuance) => sum + issuance.soldUnits, 0);
     const totalUnsold = allIssuances().reduce((sum, issuance) => sum + issuance.unsoldUnits, 0);
-    expect(totalPlan).toBe(2_122_664);
-    expect(totalSold).toBe(1_571_501);
-    expect(totalUnsold).toBe(551_163);
+    expect(totalPlan).toBe(2_466_911);
+    expect(totalSold).toBe(1_941_947);
+    expect(totalUnsold).toBe(524_964);
     expect(totalSold + totalUnsold).toBe(totalPlan);
     for (const issuance of allIssuances()) {
       // 关闭后未售=计划-成交（未售不形成债务，也不重复计入持债）。
@@ -222,7 +219,7 @@ describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v
     }
 
     const holdings = world.bonds!.holdings;
-    expect(holdings).toHaveLength(187);
+    expect(holdings).toHaveLength(263);
     // v0.9 认购顺序为玩家→居民投资实体→企业；持有主体只能是这三类（银行不得认购）。
     expect(holdings.every((holding) => holding.holder.kind !== 'player')).toBe(true);
     expect(
@@ -247,22 +244,20 @@ describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v
       if (holderCity === issuance!.cityId) sameCity += 1;
       else crossCity += 1;
     }
-    expect(crossCity).toBe(117);
-    expect(sameCity).toBe(65);
-    expect(historicalHoldings).toBe(5);
+    expect(crossCity).toBe(166);
+    expect(sameCity).toBe(81);
+    expect(historicalHoldings).toBe(16);
     // 企业持债为 v0.9 新增合法路径（原 v0.8 仅居民投资实体）。
-    expect(holdings.filter((holding) => holding.holder.kind === 'company')).toHaveLength(8);
-    expect(holdings.filter((holding) => holding.holder.kind === 'investorGroup')).toHaveLength(179);
+    expect(holdings.filter((holding) => holding.holder.kind === 'company')).toHaveLength(68);
+    expect(holdings.filter((holding) => holding.holder.kind === 'investorGroup')).toHaveLength(195);
   });
 
   it('F-R5 债务勾销：每次破产的垫付/银行贷款 writtenOff、未偿清零，且与 record 金额一致', () => {
     const locked = [
-      { cityId: 'lanport', tick: 17, advances: 303_366_240.01, bankLoans: 131_906_505.16, interest: 0, count: 22 },
-      { cityId: 'lanport', tick: 29, advances: 185_011_126.66, bankLoans: 84_982_062.4, interest: 0, count: 8 },
-      { cityId: 'ironvale', tick: 15, advances: 307_895_243.32, bankLoans: 94_885_682.09, interest: 0, count: 26 },
-      { cityId: 'ironvale', tick: 27, advances: 151_063_410, bankLoans: 69_439_983.6, interest: 0, count: 9 },
-      { cityId: 'greenfield', tick: 15, advances: 262_191_180.01, bankLoans: 43_093_730.6, interest: 0, count: 69 },
-      { cityId: 'greenfield', tick: 34, advances: 145_805_626.66, bankLoans: 51_231_054.41, interest: 0, count: 29 },
+      { cityId: 'greenfield', tick: 16, advances: 491_655_139.97, bankLoans: 27_712_122.65, interest: 120_807.29, count: 77 },
+      { cityId: 'ironvale', tick: 17, advances: 450_745_346.67, bankLoans: 75_699_285.99, interest: 0, count: 39 },
+      { cityId: 'greenfield', tick: 31, advances: 217_050_826.67, bankLoans: 36_979_743.21, interest: 0, count: 42 },
+      { cityId: 'ironvale', tick: 31, advances: 232_564_850, bankLoans: 57_514_285.76, interest: 447_489.82, count: 43 },
     ];
     for (const item of locked) {
       const record = recordOf(item.cityId, item.tick);
@@ -329,22 +324,41 @@ describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v
     }
   });
 
-  it('F-R7 股份分配：破产政府持股清零，且总量不变量成立', () => {
-    for (const record of records()) {
-      const holdings = world.securities.holdings.filter(
-        (holding) => holding.holder.type === 'city' && holding.holder.id === record.cityId,
+  it('F-R7 股份分配：破产时旧政府持股清零，破产后新创办持股为 primary 且总量不变量成立', () => {
+    // 破产后政府可重新创办企业并持有 primary 股份（v1.0 起的合法路径）；
+    // 因此这里验证的是“旧股权不残留 + 新持股来源真实”，而不是简单地要求最终持股市值为 0。
+    for (const entry of world.cities) {
+      const records = entry.government!.records;
+      if (records.length === 0) continue;
+      const firstBankruptcyTick = records[0]!.tick;
+      const lastBankruptcyTick = records[records.length - 1]!.tick;
+      const cityHoldings = world.securities.holdings.filter(
+        (holding) => holding.holder.type === 'city' && holding.holder.id === entry.id,
       );
-      expect(holdings).toHaveLength(0);
+      for (const holding of cityHoldings) {
+        const founding = world.lifecycle!.foundings.find(
+          (record) => record.companyId === holding.companyId,
+        );
+        expect(founding).toBeDefined();
+        expect(holding.acquiredVia).toBe('primary');
+        // 只能持有最后一次破产之后新创办企业的股份；破产前旧股权不得残留。
+        expect(founding!.tick).toBeGreaterThanOrEqual(lastBankruptcyTick);
+        expect(holding.sinceTick).toBeGreaterThanOrEqual(founding!.tick);
+      }
+      expect(
+        cityHoldings.filter((holding) => holding.sinceTick < firstBankruptcyTick),
+      ).toHaveLength(0);
     }
     expect(checkInvariants(world)).toEqual([]);
   });
 
-  it('F-R8 次月重建：破产后三城均恢复发债/贷款，t36 负债率 55.9%/94.5%/9.9%', () => {
-    for (const entry of world.cities) {
+  it('F-R8 次月重建：铁谷/青原破产后均恢复发债/贷款，t36 负债率 52.0%/36.8%/26.5%', () => {
+    for (const cityId of ['ironvale', 'greenfield']) {
+      const entry = city(cityId);
       const lastRecord = entry.government!.records[entry.government!.records.length - 1]!;
       // 破产/重选后可以恢复发债与政府贷款（旧基线“破产后不再发债”的限制已消除）。
       const newIssuances = allIssuances().filter(
-        (issuance) => issuance.cityId === entry.id && issuance.issuedTick > lastRecord.tick,
+        (issuance) => issuance.cityId === cityId && issuance.issuedTick > lastRecord.tick,
       );
       expect(newIssuances.length).toBeGreaterThanOrEqual(1);
       expect(newIssuances.some((issuance) => issuance.status === 'active')).toBe(true);
@@ -355,16 +369,23 @@ describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v
       // 两次破产之间也能恢复（不是只有最后一次后恢复）。
       const firstRecord = entry.government!.records[0]!;
       const between = allIssuances().filter(
-        (issuance) => issuance.cityId === entry.id && issuance.issuedTick > firstRecord.tick,
+        (issuance) => issuance.cityId === cityId && issuance.issuedTick > firstRecord.tick,
       );
       expect(between.length).toBeGreaterThanOrEqual(1);
     }
+    // 岚港未破产，但同样保持 solvent 且持续有存续的政府贷款。
+    expect(city('lanport').government!.bankruptcy.status).toBe('solvent');
+    expect(
+      city('lanport').government!.loans.filter(
+        (loan) => loan.purpose === 'government' && loan.status !== 'writtenOff',
+      ).length,
+    ).toBeGreaterThanOrEqual(1);
 
-    expect(city('lanport').government!.lastDebt?.debtRatio ?? 0).toBeCloseTo(0.558868, 3);
+    expect(city('lanport').government!.lastDebt?.debtRatio ?? 0).toBeCloseTo(0.520036, 3);
     expect(city('lanport').government!.lastDebt?.riskLevel).toBe('watch');
-    expect(city('ironvale').government!.lastDebt?.debtRatio ?? 0).toBeCloseTo(0.944946, 3);
-    expect(city('ironvale').government!.lastDebt?.riskLevel).toBe('high');
-    expect(city('greenfield').government!.lastDebt?.debtRatio ?? 0).toBeCloseTo(0.099426, 3);
+    expect(city('ironvale').government!.lastDebt?.debtRatio ?? 0).toBeCloseTo(0.367912, 3);
+    expect(city('ironvale').government!.lastDebt?.riskLevel).toBe('normal');
+    expect(city('greenfield').government!.lastDebt?.debtRatio ?? 0).toBeCloseTo(0.264736, 3);
     expect(city('greenfield').government!.lastDebt?.riskLevel).toBe('normal');
     // 破产城市已解除破产状态（恢复为 solvent，才能继续融资）。
     expect(city('lanport').government!.bankruptcy.status).toBe('solvent');

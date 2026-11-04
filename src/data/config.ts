@@ -355,6 +355,7 @@ export const DEMO_CONFIG = {
     /**
      * v0.9【首版暂定】生产计划参数：计划产量围绕“近 3 月实际销量 + 目标库存”调整，
      * 正常月份上下调均不超过 20%；现金不足或严重积压时允许紧急下调（下限 60%）。
+     * v1.0：计划输入再加入“有支付能力但缺货”的未满足需求，并按企业可触达份额吸收。
      */
     plan: {
       salesLookbackMonths: 3,
@@ -367,12 +368,33 @@ export const DEMO_CONFIG = {
       initialSalesFactor: 0.8,
       /** 计划产量下限（相对设备产能），避免完全停产但仍保留最低维护性产出。 */
       minOutputRatio: 0.05,
+      /**
+       * v1.0【首版暂定】缺货信号吸收比例：每月把“本企业合理份额的额外缺货”按该比例
+       * 叠加进计划，再走正常 ±20% 平滑。首版取 20%，避免一次性把多年缺口补进单月计划。
+       */
+      unmetDemandAbsorption: 0.2,
+      /** 扩产判定：连续 expansionUtilizationMonths 个月设备利用率 ≥ 该阈值。 */
+      expansionUtilizationThreshold: 0.8,
+      expansionUtilizationMonths: 2,
+      /** 扩产判定：成品库存 ≤ expansionInventoryMonths 个月的预期销量。 */
+      expansionInventoryMonths: 1,
+      /** 扩产判定：发放投资后仍需保留 expansionReserveWageMonths 个月工资 + 近期偿债。 */
+      expansionReserveWageMonths: 2,
+      /** 近期月偿债估计：剩余债务按该月数均摊，再加上月利息支出。 */
+      expansionDebtMonths: 24,
     },
   },
   /**
-   * v0.9【首版暂定】设备市场。设备是按行业分类的可计数资产：
-   * 企业产能 = Σ(设备数量 × capacityPerUnit × 城市技术系数)；设备商品由设备企业生产。
-   * 单价与产能为演示参数，单位：设备按“台”计，capacityPerUnit 为每台设备每月产出的产出单位。
+   * v1.0【单位标定】设备市场。设备是按行业分类的可计数资产。
+   *
+   * 统一单位（task-23）：
+   * - 普通商品企业：产能 = Σ(设备台数 × capacityPerUnit × 城市技术系数)，capacityPerUnit
+   *   是“每台设备每月为被服务行业提供的产出单位”（首版 300,000，农业/工业/能源设备同值）。
+   * - 资本品企业（recipeOutput 为设备商品）：产能 = Σ(设备台数 × outputCapacityPerUnit[资本品] ×
+   *   城市技术系数)，单位是“台/月”。不能沿用 300,000，否则 1 台设备 = 30 万台/月，
+   *   创业规模与资本计算会误判成数十万台产能。
+   * - unitsPerWorkerMonth：设备制造企业每名员工每月生产的台数（按设备类别标定），
+   *   demo-data 的 PRODUCTIVITY 直接引用该字段，保证生产/创业/库存/利润同一口径。
    */
   equipment: {
     catalog: {
@@ -380,23 +402,42 @@ export const DEMO_CONFIG = {
         name: '农业设备',
         goodId: 'farmEquipment',
         price: 120_000,
+        /** 每台设备为农业/纤维农场提供的产出单位/月（被服务企业口径）。 */
         capacityPerUnit: 300_000,
+        /** 设备制造：每名员工每月生产 0.15 台（60 员工满负荷约 9 台/月）。 */
+        unitsPerWorkerMonth: 0.15,
         sectors: ['agriculture', 'fiber-farm'],
       },
       industry: {
         name: '工业设备',
         goodId: 'industryEquipment',
         price: 200_000,
+        /** 每台设备为食品/纺织/成衣/日用品/金属/设备行业提供的产出单位/月。 */
         capacityPerUnit: 300_000,
-        sectors: ['food', 'textile', 'garment', 'appliance', 'metal'],
+        /** 设备制造：每名员工每月生产 0.08 台（60 员工满负荷约 5.2 台/月）。 */
+        unitsPerWorkerMonth: 0.08,
+        sectors: ['food', 'textile', 'garment', 'appliance', 'metal', 'equipment'],
       },
       energy: {
         name: '能源设备',
         goodId: 'energyEquipment',
         price: 160_000,
+        /** 每台设备为能源行业提供的产出单位/月。 */
         capacityPerUnit: 300_000,
+        /** 设备制造：每名员工每月生产 0.09 台（60 员工满负荷约 5.4 台/月）。 */
+        unitsPerWorkerMonth: 0.09,
         sectors: ['utility'],
       },
+    },
+    /**
+     * 资本品企业（设备厂）自身产能：每台设备资产每月可生产的“台数”（随技术系数缩放）。
+     * 取值使 60 员工设备厂约需 2 台自身设备（满负荷 6–10 台/月）：
+     * farm 2×5=10 台/月、industry 2×3=6 台/月、energy 2×3=6 台/月。
+     */
+    outputCapacityPerUnit: {
+      farmEquipment: 5,
+      industryEquipment: 3,
+      energyEquipment: 3,
     },
     /** 未知行业的兜底设备类别。 */
     fallbackKind: 'industry',
@@ -722,6 +763,9 @@ export const DEMO_CONFIG = {
      * 可用于购债上限 = 企业现金 − 上月实发工资 × wageMonths − 上月应付利息 × interestMonths；低于 0 不可认购。
      */
     companyPurchaseReserve: {
+      // v0.7 既有规则：企业自动认购国债前保留 1 个月实发工资 + 1 个月利息。
+      // v1.0 排查记录：该储备偏薄，企业会把大部分经营现金换成国债（单城单月可达 3347 万），
+      // 是流动性冲击源之一；本轮未擅自调整（属既有规则），已在交付报告中列为待决策事项。
       wageMonths: 1,
       interestMonths: 1,
     },

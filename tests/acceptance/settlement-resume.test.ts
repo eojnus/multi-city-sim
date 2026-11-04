@@ -123,8 +123,13 @@ describe('H09 破产月读档：不重复结算/重复选举', () => {
     const record = bankruptCity.government!.records[0]!;
     expect(record.tick).toBe(bankruptTick);
     expect(record.bankAdvanceCreated).toBeGreaterThan(0);
+    // 首个破产 tick 可能同时有多个城市破产（本序列 t16 为青原、t17 铁谷）：
+    // 这里只针对本城核对，避免把“下月另一个城市合法破产兑付”误判为重复结算。
     const bankPaymentsAtTrigger = sim.state.bonds!.payments.filter(
-      (payment) => payment.kind === 'bankruptcyRedemption' && payment.tick === bankruptTick,
+      (payment) =>
+        payment.kind === 'bankruptcyRedemption' &&
+        payment.tick === bankruptTick &&
+        payment.cityId === bankruptCity.id,
     ).length;
 
     const saveText = text(sim.state);
@@ -137,12 +142,17 @@ describe('H09 破产月读档：不重复结算/重复选举', () => {
     expect(
       sim.state.bonds!.payments.filter(
         (payment) =>
-          payment.kind === 'bankruptcyRedemption' && payment.tick === bankruptTick + 1,
+          payment.kind === 'bankruptcyRedemption' &&
+          payment.tick === bankruptTick + 1 &&
+          payment.cityId === bankruptCity.id,
       ),
     ).toHaveLength(0);
     expect(
       sim.state.bonds!.payments.filter(
-        (payment) => payment.kind === 'bankruptcyRedemption' && payment.tick === bankruptTick,
+        (payment) =>
+          payment.kind === 'bankruptcyRedemption' &&
+          payment.tick === bankruptTick &&
+          payment.cityId === bankruptCity.id,
       ).length,
     ).toBe(bankPaymentsAtTrigger);
     expect(bankruptCity.government!.records).toHaveLength(1);

@@ -37,6 +37,7 @@ const SECTOR_LABELS: Record<Company['sector'], string> = {
   metal: '金属加工',
   utility: '能源',
   appliance: '日用品',
+  equipment: '设备制造',
 };
 
 const DISTRICT_TYPE_LABELS: Record<DistrictType, string> = {
