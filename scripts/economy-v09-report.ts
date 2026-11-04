@@ -197,11 +197,20 @@ function companyStats(world: WorldState, cityId: string) {
   const active = companies.length;
   const founded = world.lifecycle.foundings.filter((record) => record.cityId === cityId).length;
   const liquidated = world.lifecycle.liquidations.filter((record) => record.cityId === cityId).length;
-  const equipment = companies.reduce(
-    (sum, company) =>
-      sum + equipmentUnits(company, 'farm') + equipmentUnits(company, 'industry') + equipmentUnits(company, 'energy'),
-    0,
-  );
+  // 近 12 个月窗口（创办/倒闭明细本身有保留上限，窗口内的记录必然可见）。
+  const windowStart = world.time.tick - 12;
+  const foundedWindow = world.lifecycle.foundings.filter(
+    (record) => record.cityId === cityId && record.tick > windowStart,
+  ).length;
+  const liquidatedWindow = world.lifecycle.liquidations.filter(
+    (record) => record.cityId === cityId && record.tick > windowStart,
+  ).length;
+  const equipmentKinds = {
+    farm: companies.reduce((sum, company) => sum + equipmentUnits(company, 'farm'), 0),
+    industry: companies.reduce((sum, company) => sum + equipmentUnits(company, 'industry'), 0),
+    energy: companies.reduce((sum, company) => sum + equipmentUnits(company, 'energy'), 0),
+  };
+  const equipment = equipmentKinds.farm + equipmentKinds.industry + equipmentKinds.energy;
   const capacity = companies.reduce((sum, company) => sum + company.capacity, 0);
   const planned = companies.reduce((sum, company) => sum + (company.productionPlan?.plannedOutput ?? 0), 0);
   const plannedJobs = companies.reduce((sum, company) => sum + (company.productionPlan?.plannedJobs ?? 0), 0);
@@ -209,7 +218,47 @@ function companyStats(world: WorldState, cityId: string) {
   const cash = companies.reduce((sum, company) => sum + company.cash, 0);
   const debt = companies.reduce((sum, company) => sum + company.debt, 0);
   const emergency = companies.reduce((sum, company) => sum + (company.lastMonth.emergencyLayoffs ?? 0), 0);
-  return { active, founded, liquidated, equipment, capacity, planned, plannedJobs, wageArrears, cash, debt, emergency };
+  const revenue = companies.reduce((sum, company) => sum + company.lastMonth.revenue, 0);
+  const inputCost = companies.reduce((sum, company) => sum + company.lastMonth.inputCost, 0);
+  const wages = companies.reduce(
+    (sum, company) => sum + company.lastMonth.wagesPaid + (company.lastMonth.bonusPaid ?? 0),
+    0,
+  );
+  const interest = companies.reduce((sum, company) => sum + company.lastMonth.interestPaid, 0);
+  const tax = companies.reduce((sum, company) => sum + company.lastMonth.corporateTax, 0);
+  const profit = companies.reduce((sum, company) => sum + company.lastMonth.profit, 0);
+  const equipmentPurchased = companies.reduce(
+    (sum, company) => sum + (company.lastMonth.equipmentPurchased ?? 0),
+    0,
+  );
+  const equipmentSold = companies.reduce((sum, company) => sum + (company.lastMonth.equipmentSold ?? 0), 0);
+  const sectors = new Map<string, number>();
+  for (const company of companies) sectors.set(company.sector, (sectors.get(company.sector) ?? 0) + 1);
+  return {
+    active,
+    founded,
+    liquidated,
+    foundedWindow,
+    liquidatedWindow,
+    equipment,
+    equipmentKinds,
+    capacity,
+    planned,
+    plannedJobs,
+    wageArrears,
+    cash,
+    debt,
+    emergency,
+    revenue,
+    inputCost,
+    wages,
+    interest,
+    tax,
+    profit,
+    equipmentPurchased,
+    equipmentSold,
+    sectors,
+  };
 }
 
 function householdStats(world: WorldState, cityId: string) {
@@ -228,7 +277,28 @@ function householdStats(world: WorldState, cityId: string) {
     .reduce((sum, account) => sum + account.balance, 0);
   // 居民消费贷合同没有保留上限（不做 splice），principal 合计即全期累计发放额。
   const borrowed = loans.reduce((sum, loan) => sum + loan.principal, 0);
-  return { cash, loanOutstanding, defaulted, consumption, income, desires, deposits, borrowed, loanCount: loans.length };
+  const wages = groups.reduce((sum, group) => sum + group.lastMonth.wageIncome, 0);
+  const benefits = groups.reduce((sum, group) => sum + group.lastMonth.benefits, 0);
+  const dividends = groups.reduce((sum, group) => sum + group.lastMonth.dividendIncome, 0);
+  const incomeTax = groups.reduce((sum, group) => sum + group.lastMonth.incomeTax, 0);
+  // 居民→投资实体的真实资金转移（本月从居民现金转出、进入投资实体现金的额度）。
+  const invested = groups.reduce((sum, group) => sum + Math.max(0, group.lastMonth.savingsContribution), 0);
+  return {
+    cash,
+    loanOutstanding,
+    defaulted,
+    consumption,
+    income,
+    desires,
+    deposits,
+    borrowed,
+    loanCount: loans.length,
+    wages,
+    benefits,
+    dividends,
+    incomeTax,
+    invested,
+  };
 }
 
 function bankStats(world: WorldState) {
@@ -317,14 +387,24 @@ function printCheckpoint(world: WorldState) {
     console.log(
       `破产 当前${info.bankrupt ? `是（tick ${info.bankruptcy?.tick ?? '?'}）` : '否'}｜${historyText}${info.history.truncated ? `（破产记录已达上限 ${info.history.maxRecords}，可能已截断更早记录）` : ''}｜税收窗口 ${info.taxes.months}/${info.taxes.windowMonths} 月：收入 ${money(info.taxes.tax)}｜交通加成 ${money(info.taxes.bonus)}｜交通损耗 ${money(info.taxes.loss)}`,
     );
+    const sectorText = [...company.sectors.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([sector, count]) => `${sector}×${count}`)
+      .join('/');
     console.log(
-      `企业 ${company.active} 家（成立 ${company.founded} / 倒闭 ${company.liquidated}）｜设备 ${num(company.equipment)} 台｜产能 ${num(company.capacity)}｜计划产量 ${num(company.planned)}（岗位 ${num(company.plannedJobs)}）`,
+      `企业 ${company.active} 家（累计成立 ${company.founded} / 累计倒闭 ${company.liquidated}；近 12 月新办 ${company.foundedWindow} / 倒闭 ${company.liquidatedWindow}）｜行业 ${sectorText}｜产能 ${num(company.capacity)}｜计划产量 ${num(company.planned)}（岗位 ${num(company.plannedJobs)}）`,
     );
     console.log(
-      `企业现金 ${money(company.cash)}｜企业债务 ${money(company.debt)}｜欠薪 ${money(company.wageArrears)}｜本月紧急裁员 ${num(company.emergency)}`,
+      `企业设备 farm ${num(company.equipmentKinds.farm)} / industry ${num(company.equipmentKinds.industry)} / energy ${num(company.equipmentKinds.energy)} 台｜本月购置 ${money(company.equipmentPurchased)} / 出售 ${money(company.equipmentSold)}`,
+    );
+    console.log(
+      `企业财务 营收 ${money(company.revenue)}｜原料 ${money(company.inputCost)}｜工资(含奖金) ${money(company.wages)}｜利息 ${money(company.interest)}｜企业税 ${money(company.tax)}｜利润 ${money(company.profit)}｜现金 ${money(company.cash)}｜债务 ${money(company.debt)}｜欠薪 ${money(company.wageArrears)}｜本月紧急裁员 ${num(company.emergency)}`,
     );
     console.log(
       `居民消费 成交 ${money(consumption.consumption)}（期望 ${money(consumption.desiredCost)}）｜有本地供给但资金不足 ${money(consumption.unmetFunding)}｜预算缩量未形成购买 ${money(consumption.fundingGap)}｜有预算但缺货 ${num(consumption.supplyGapUnits, 1)} 件≈${money(consumption.supplyGapValue)}｜消费贷支持 ${money(consumption.loanFinanced)}（本月发放 ${money(consumption.loanDrawn)}）｜存款提取 ${money(consumption.depositWithdrawn)}`,
+    );
+    console.log(
+      `居民收入 工资 ${money(household.wages)}｜福利 ${money(household.benefits)}｜分红 ${money(household.dividends)}｜个税 ${money(household.incomeTax)}｜本月转入投资实体 ${money(household.invested)}`,
     );
     console.log(
       `居民现金 ${money(household.cash)}｜居民存款 ${money(household.deposits)}｜消费贷未偿 ${money(household.loanOutstanding)}（合同 ${household.loanCount} 笔，违约 ${household.defaulted} 笔，累计发放 ${money(household.borrowed)}）`,
@@ -382,6 +462,18 @@ function printSummary(world: WorldState) {
       `${city.name}：企业成立 ${company.founded} / 倒闭 ${company.liquidated}｜政府历史破产 ${historyText}｜当前状态 ${history.current.status}${history.truncated ? `｜破产记录已达上限 ${history.maxRecords}，更早记录可能被截断` : ''}`,
     );
   }
+  // v1.0：设备产业真实生产/成交（按 tick 逐月累计，见下方 main 循环）。
+  console.log(
+    `设备产业累计：生产 farm ${num(equipmentFlow.produced.farmEquipment ?? 0)} / industry ${num(equipmentFlow.produced.industryEquipment ?? 0)} / energy ${num(equipmentFlow.produced.energyEquipment ?? 0)} 台｜企业购置支出 ${money(equipmentFlow.purchasedValue)}｜设备出售收入 ${money(equipmentFlow.soldValue)}`,
+  );
+  for (const seller of [...equipmentFlow.sellers.values()].sort((a, b) => b.produced - a.produced)) {
+    console.log(
+      `  - ${seller.name}（${seller.cityId}）：累计生产 ${num(seller.produced)} 台｜累计售出 ${num(seller.sold)} 台`,
+    );
+  }
+  const investorCash = world.investors.reduce((sum, investor) => sum + investor.cash, 0);
+  console.log(`投资实体现金合计 ${money(investorCash)}（${world.investors.length} 家）`);
+
   const founded = world.lifecycle.foundings;
   const bySector = new Map<string, number>();
   for (const record of founded) bySector.set(record.sector, (bySector.get(record.sector) ?? 0) + 1);
@@ -414,9 +506,46 @@ function printSummary(world: WorldState) {
   }
 }
 
+interface EquipmentFlow {
+  produced: Record<string, number>;
+  purchasedValue: number;
+  soldValue: number;
+  sellers: Map<string, { name: string; cityId: string; produced: number; sold: number }>;
+}
+
+const EQUIPMENT_GOOD_IDS = new Set(['farmEquipment', 'industryEquipment', 'energyEquipment']);
+const equipmentFlow: EquipmentFlow = {
+  produced: {},
+  purchasedValue: 0,
+  soldValue: 0,
+  sellers: new Map(),
+};
+
+function accumulateEquipmentFlow(world: WorldState): void {
+  for (const company of world.companies) {
+    equipmentFlow.purchasedValue += company.lastMonth.equipmentPurchased ?? 0;
+    equipmentFlow.soldValue += company.lastMonth.equipmentSold ?? 0;
+    if (!EQUIPMENT_GOOD_IDS.has(company.recipeOutput)) continue;
+    const produced = company.lastMonth.produced;
+    const sold = company.lastMonth.sold;
+    equipmentFlow.produced[company.recipeOutput] =
+      (equipmentFlow.produced[company.recipeOutput] ?? 0) + produced;
+    const seller = equipmentFlow.sellers.get(company.id) ?? {
+      name: company.name,
+      cityId: company.cityId,
+      produced: 0,
+      sold: 0,
+    };
+    seller.produced += produced;
+    seller.sold += sold;
+    equipmentFlow.sellers.set(company.id, seller);
+  }
+}
+
 const simulation = Simulation.create(DEMO_CONFIG);
 for (let month = 1; month <= MONTHS; month += 1) {
   simulation.tick();
+  accumulateEquipmentFlow(simulation.state);
   if (CHECKPOINTS.includes(month)) printCheckpoint(simulation.state);
 }
 printSummary(simulation.state);

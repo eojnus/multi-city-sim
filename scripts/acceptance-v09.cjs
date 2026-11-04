@@ -255,8 +255,10 @@ app.whenReady().then(async () => {
     })()`);
     check('构造玩家经营三家岚港企业后，设备买卖权限在视图层生效', fixture.a && fixture.b && fixture.c && canOperate === true, JSON.stringify({ fixture, canOperate }));
 
-    // ---- 5. 界面买入新设备：现金减少、政府储备减少、财政等额增加 ----
-    step('5. 界面买入新设备：现金减少、政府储备减少、财政等额增加');
+    // ---- 5. 界面买入新设备：现金减少、设备 +1、货源（企业库存或政府储备）等额减少 ----
+    // v1.0 起世界有真实设备厂：同城设备企业库存优先于政府储备，买家价格=城市市场价；
+    // 政府储备分支按目录价收款且财政等额增加。两条路径都必须是真实资金/库存转移。
+    step('5. 界面买入新设备：设备 +1、货源减少、企业付款=卖方收款（企业库存或政府储备）');
     await openCompany(win, 'lp-energy');
     await clickTab(win, 'operation');
     await waitFor(win, `document.querySelector('[data-testid="equipment-buy-form"]')`, 8000);
@@ -264,6 +266,9 @@ app.whenReady().then(async () => {
       const s = window.__lanwan.store;
       const company = s.world.companies.find((c) => c.id === 'lp-energy');
       const view = s.companyOperatingView('lp-energy');
+      const sellers = s.world.companies
+        .filter((c) => c.cityId === 'lanport' && c.inventory && (c.inventory.energyEquipment ?? 0) > 0)
+        .map((c) => ({ id: c.id, cash: c.cash, inventory: c.inventory.energyEquipment }));
       return {
         cash: company.cash,
         treasury: s.world.cities.find((c) => c.id === 'lanport').treasury,
@@ -272,6 +277,7 @@ app.whenReady().then(async () => {
         price: view.equipmentRows.find((r) => r.kind === 'energy').catalogPrice,
         marketPrice: view.equipmentRows.find((r) => r.kind === 'energy').marketPrice,
         stockMonths: s.equipmentMarketView('lanport').offers.length,
+        sellers,
       };
     })()`);
     await typeInto(win, '[data-equipment-form="buy"] [data-equipment-kind]', 'energy');
@@ -282,20 +288,41 @@ app.whenReady().then(async () => {
       const s = window.__lanwan.store;
       const company = s.world.companies.find((c) => c.id === 'lp-energy');
       const view = s.companyOperatingView('lp-energy');
+      const sellers = s.world.companies
+        .filter((c) => c.cityId === 'lanport' && c.inventory)
+        .map((c) => ({ id: c.id, cash: c.cash, inventory: c.inventory.energyEquipment ?? 0 }));
       return {
         cash: company.cash,
         treasury: s.world.cities.find((c) => c.id === 'lanport').treasury,
         units: view.equipment.energy,
         stock: s.world.equipmentMarket.initialStock.energy,
+        sellers,
       };
     })()`);
     const spent = Math.round((buyBefore.cash - buyAfter.cash) * 100) / 100;
     const received = Math.round((buyAfter.treasury - buyBefore.treasury) * 100) / 100;
+    const sellerDelta = buyBefore.sellers.map((before) => {
+      const after = buyAfter.sellers.find((row) => row.id === before.id);
+      return {
+        id: before.id,
+        inventory: before.inventory - (after ? after.inventory : before.inventory),
+        cash: after ? after.cash - before.cash : 0,
+      };
+    }).filter((row) => row.inventory > 0);
+    const companySale = sellerDelta.length === 1
+      && Math.abs(sellerDelta[0].cash - spent) <= 0.02
+      && buyAfter.stock === buyBefore.stock;
+    const governmentSale = buyAfter.stock === buyBefore.stock - 1
+      && Math.abs(received - spent) <= 0.02
+      && Math.abs(spent - buyBefore.price) <= 0.02;
     const buyOk = buyClicked && buyAfter.units === buyBefore.units + 1
-      && buyAfter.stock === buyBefore.stock - 1
-      && Math.abs(spent - buyBefore.price) <= 0.02
-      && Math.abs(received - spent) <= 0.02;
-    check('界面买入 1 台能源设备：设备 +1、政府储备 −1、企业付款=财政收款=目录价', buyOk, JSON.stringify({ buyBefore, buyAfter, spent, received }));
+      && spent > 0
+      && (companySale || governmentSale);
+    check(
+      '界面买入 1 台能源设备：设备 +1、货源减少、企业付款=卖方收款（企业库存或政府储备）',
+      buyOk,
+      JSON.stringify({ buyBefore, buyAfter, spent, received, sellerDelta, path: companySale ? 'company' : governmentSale ? 'government' : 'invalid' }),
+    );
     await capture(win, 'v09-03-equipment-buy.png');
 
     // ---- 6. 界面挂出二手设备（lp-food 有 12 台工业设备；留空单价按 65% 目录价） ----
