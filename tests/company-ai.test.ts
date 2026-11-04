@@ -10,13 +10,17 @@ describe('企业自动经营：风格差异与约束', () => {
     const world = Simulation.create().state;
     const city = world.cities.find((entry) => entry.id === 'lanport')!;
     const company = world.companies.find((entry) => entry.cityId === city.id)!;
-    setCompanyEmployees(company, 100);
-    company.jobDemand = 100;
-    company.cash = 5_000_000;
+    // v0.9 起计划产量受劳动产能硬约束：员工要足够覆盖设备产能，利用率才由计划而非缺工决定。
+    setCompanyEmployees(company, Math.max(1000, Math.ceil(company.capacity / 50)));
+    company.jobDemand = company.employees;
+    company.cash = 1_000_000_000;
     company.utilization = 0.8;
-    company.inventory[company.recipeOutput] = company.capacity * 0.5;
-    company.previousMonth.produced = 100;
-    company.previousMonth.sold = 100;
+    // 以“设备利用率 80%”为销量参考，目标库存 0.5 个月，现有库存 0.2 个月：
+    // 计划目标会向上限（上期实际产量 +20%）调整，两种风格的利用率偏置因此可见。
+    company.salesHistory = [Math.round(company.capacity * 0.8)];
+    company.inventory[company.recipeOutput] = company.capacity * 0.2;
+    company.previousMonth.produced = company.capacity * 0.8;
+    company.previousMonth.sold = company.capacity * 0.8;
     city.market[company.recipeOutput].unmetDemand = 50;
 
     company.ai.style = 'growth';
@@ -55,8 +59,12 @@ describe('企业自动经营：风格差异与约束', () => {
         expect(company.employees).toBeGreaterThanOrEqual(0);
         expect(company.employees).toBeLessThanOrEqual(city.population.laborForce);
         expect(company.capacity).toBeLessThanOrEqual(company.maxCapacity + 0.01);
-        expect(company.ai.lastPlan).not.toBeNull();
-        expect(company.ai.lastDecision.length).toBeGreaterThan(0);
+        // v0.9 每城每月可新设企业：本 tick 才成立、尚未进入 planCompanies 的企业合法地没有计划。
+        if (company.ai.lastPlan === null) {
+          expect(company.ai.ageMonths).toBe(0);
+        } else {
+          expect(company.ai.lastDecision.length).toBeGreaterThan(0);
+        }
       }
       expect(allocated).toBe(city.population.employed);
     }

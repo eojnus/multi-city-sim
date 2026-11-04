@@ -64,15 +64,20 @@ describe('AC-I11 财政日志按现任市长身份过滤', () => {
   it('I11c 其他城市长：看不到该城的财政明细（跨城不泄漏）', () => {
     const list = messages(otherCityId);
     const cityName = store.world.cities.find((entry) => entry.id === bankruptCityId)!.name;
+    // 断言必须带城市名：v0.9 序列中另一座城市也可能在 36 月内破产，
+    // 其自身同名明细对其他城市的现任市长是可见的（那是该市自己的账）。
     expect(list.some((message) => message.includes(`${cityName} 政府破产：债务`))).toBe(false);
-    expect(list.some((message) => message.includes('银行兑付债券本金'))).toBe(false);
+    expect(list.some((message) => message.includes(`${cityName} 政府破产`) && message.includes('银行兑付债券本金'))).toBe(false);
   });
 
   it('I11d 换任后：原市长失去明细，新市长可见', () => {
+    const cityName = store.world.cities.find((entry) => entry.id === bankruptCityId)!.name;
+    const detailOfBankruptCity = (list: string[]) =>
+      list.some((message) => message.includes(`${cityName} 政府破产`) && message.includes('银行兑付债券本金'));
     // 先以市长身份确认可见
-    expect(messages(bankruptCityId).some((message) => message.includes('银行兑付债券本金'))).toBe(true);
-    // 换任为另一座城市（模拟落选/换任）
-    expect(messages(otherCityId).some((message) => message.includes('银行兑付债券本金'))).toBe(false);
-    expect(messages(bankruptCityId).some((message) => message.includes('银行兑付债券本金'))).toBe(true);
+    expect(detailOfBankruptCity(messages(bankruptCityId))).toBe(true);
+    // 换任为另一座城市（模拟落选/换任）：该城明细不可见
+    expect(detailOfBankruptCity(messages(otherCityId))).toBe(false);
+    expect(detailOfBankruptCity(messages(bankruptCityId))).toBe(true);
   });
 });

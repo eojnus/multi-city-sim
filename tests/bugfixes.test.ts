@@ -40,8 +40,7 @@ describe('已复现缺陷修复', () => {
     const companyA = a.state.companies.find((company) => company.id === 'lp-food')!;
     const companyB = b.state.companies.find((company) => company.id === 'lp-food')!;
 
-    // 两个世界除销售统计外完全相同；lastMonth 故意设成与 previousMonth 相反的方向，
-    // 修复前读取 lastMonth 会得到相反的利用率变化。
+    // 两个世界除销售统计外完全相同；lastMonth 故意设成与 previousMonth 相反的方向。
     for (const company of a.state.companies) company.previousMonth = monthStats();
     for (const company of b.state.companies) company.previousMonth = monthStats();
     companyA.previousMonth = monthStats({ produced: 100, sold: 120, exported: 0 });
@@ -49,14 +48,18 @@ describe('已复现缺陷修复', () => {
     companyA.lastMonth = monthStats({ produced: 100, sold: 10, exported: 0 });
     companyB.lastMonth = monthStats({ produced: 100, sold: 300, exported: 0 });
 
-    const utilizationBefore = companyA.utilization;
-    expect(companyB.utilization).toBe(utilizationBefore);
+    // v0.9 计划口径：平滑基准取上一完整月实际产量，计划产量应随 previousMonth 销量同向变化；
+    // 若误读 lastMonth，A/B 的方向会反转。库存清零，避免期初成品库存掩盖销量信号。
+    for (const company of [companyA, companyB]) company.inventory[company.recipeOutput] = 0;
 
     planCompanies(a.state, DEMO_CONFIG, []);
     planCompanies(b.state, DEMO_CONFIG, []);
 
-    expect(companyA.utilization).toBeGreaterThan(utilizationBefore);
-    expect(companyB.utilization).toBeLessThan(utilizationBefore);
+    expect(companyA.productionPlan).not.toBeNull();
+    expect(companyB.productionPlan).not.toBeNull();
+    expect(companyA.productionPlan!.plannedOutput).toBeGreaterThan(
+      companyB.productionPlan!.plannedOutput,
+    );
   });
 
   it('零员工企业不产出、不消耗原料；恢复员工后恢复产出', () => {

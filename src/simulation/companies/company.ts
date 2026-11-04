@@ -18,6 +18,9 @@ export function createEmptyInventory(): Record<GoodId, number> {
     food: 0,
     clothing: 0,
     household: 0,
+    farmEquipment: 0,
+    industryEquipment: 0,
+    energyEquipment: 0,
   };
 }
 

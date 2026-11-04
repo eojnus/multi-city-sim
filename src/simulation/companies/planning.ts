@@ -3,6 +3,7 @@ import type { DemoConfig } from '../../data/config';
 import { round2 } from '../core/math';
 import { companyStyleLabel, planCompanyDecision } from './ai/strategy';
 import { expandCompanyCapacity } from './lifecycle/lifecycle';
+import { recomputeProductionPlan } from './production-plan';
 import { currentStyle } from '../management/manager-pool';
 import { planPlayerOperatedCompany } from '../management/operations';
 
@@ -19,8 +20,18 @@ export function planCompanies(
   log: LogEntry[],
 ): void {
   for (const company of [...world.companies].sort((a, b) => a.id.localeCompare(b.id))) {
+    // v0.9：先重算本月生产计划（销量参考、目标库存、设备/劳动/原料上限），
+    // 计划会写回 company.productionPlan 与基于计划产量的 jobDemand；
+    // 后续 AI 决策只在此基础上调整利用率、岗位与投资。
+    const productionPlan = recomputeProductionPlan(world, company, config);
+
     // v0.4：玩家经营的企业按玩家模式处理（手动计划 / AI 辅助提案 / 高度托管授权执行）。
-    if (planPlayerOperatedCompany(world, company, config, world.time.tick, log)) continue;
+    if (planPlayerOperatedCompany(world, company, config, world.time.tick, log)) {
+      // 玩家模式：生产目标同步为玩家/授权决策的“产能 × 利用率”，
+      // 避免生产模块用 AI 计划产量覆盖玩家的手动设定（计划其余字段仍保留）。
+      productionPlan.plannedOutput = round2(company.capacity * company.utilization);
+      continue;
+    }
 
     const style = currentStyle(world, company);
     const decision = planCompanyDecision(world, company, config, style);

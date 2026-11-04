@@ -20,6 +20,7 @@ import { settleTransportMonth } from '../src/simulation/transport/settlement';
 import { advanceTransportConstruction, corridorCapacity } from '../src/simulation/transport/network';
 import { foundCompany, expandCompanyCapacity } from '../src/simulation/companies/lifecycle/lifecycle';
 import { setCompanyEmployees } from '../src/simulation/companies/company';
+import { equipmentKindForSector, recomputeCompanyCapacity } from '../src/simulation/equipment/equipment';
 import { executeIntercityPurchase } from '../src/simulation/markets/intercity';
 import { checkInvariants } from '../src/simulation/core/invariants';
 import { appointPlayerMayor, leaderOf, leaderSectorMultiplier } from '../src/simulation/politics/politics';
@@ -88,10 +89,32 @@ describe('15 项政策逐项验证：起始条件 → 财政变化 → 实际模
         setCompanyEmployees(other, 0);
         other.jobDemand = 0;
         other.capacity = 0;
+        other.equipment = { farm: 0, industry: 0, energy: 0 };
+        other.equipmentCapacity = 0;
+        other.productionPlan = null;
         other.baseCapacity = 0;
         other.maxCapacity = 0;
       }
-      setCompanyEmployees(company, 15_000);
+      setCompanyEmployees(company, 10_000);
+      // v0.9：产能来自设备；给这家食品厂配足以支撑约 2 万岗位的设备，制造真实招聘空间。
+      const kind = equipmentKindForSector(company.sector, DEMO_CONFIG);
+      const tech = city.technology.productivityMultiplier;
+      const capacityPerUnit = DEMO_CONFIG.equipment.catalog[kind].capacityPerUnit * tech;
+      const outputPerPerson = (PRODUCTIVITY['food'] ?? 1) * tech * 1.08;
+      const units = Math.ceil((20_000 * outputPerPerson) / capacityPerUnit);
+      company.equipment = { farm: 0, industry: 0, energy: 0 };
+      company.equipment[kind] = units;
+      company.productionPlan = null;
+      recomputeCompanyCapacity(world, company, DEMO_CONFIG);
+      // v0.9：产量还受原料约束；给足以支撑满产的原料，才能形成真实招聘需求。
+      company.inventory.grain = 6_000_000;
+      company.inventory.energy = 6_000_000;
+      // 与市场期末库存口径保持一致（不变量校验市场库存 == 本城企业库存合计）。
+      for (const goodId of ['grain', 'energy'] as const) {
+        city.market[goodId].closingStock = world.companies
+          .filter((entry) => entry.cityId === city.id)
+          .reduce((total, entry) => total + (entry.inventory[goodId] ?? 0), 0);
+      }
       if (!withSubsidy) {
         // 让计划岗位明显低于产能，制造招聘空间。
         company.capacity = 20_000 * (PRODUCTIVITY[company.recipeOutput] ?? 1) * city.technology.productivityMultiplier * 1.08;
@@ -123,9 +146,23 @@ describe('15 项政策逐项验证：起始条件 → 财政变化 → 实际模
       const world = richWorld();
       const city = world.cities.find((entry) => entry.id === 'greenfield')!;
       const company = world.companies.find((entry) => entry.cityId === city.id)!;
-      setCompanyEmployees(company, 100);
-      company.jobDemand = 100;
-      company.capacity = 60 * (PRODUCTIVITY[company.recipeOutput] ?? 1) * city.technology.productivityMultiplier * 1.08; // 产能只支持更少岗位，产生裁员压力
+      // v0.9：岗位来自设备产能；只保留 1 台设备，制造“产能只支持更少岗位”的裁员压力。
+      const kind = equipmentKindForSector(company.sector, DEMO_CONFIG);
+      company.equipment = { farm: 0, industry: 0, energy: 0 };
+      company.equipment[kind] = 1;
+      company.productionPlan = null;
+      recomputeCompanyCapacity(world, company, DEMO_CONFIG);
+      // v0.9：产量还受原料约束；给足以支撑满产的原料，才能形成真实招聘需求。
+      company.inventory.grain = 6_000_000;
+      company.inventory.energy = 6_000_000;
+      // 与市场期末库存口径保持一致（不变量校验市场库存 == 本城企业库存合计）。
+      for (const goodId of ['grain', 'energy'] as const) {
+        city.market[goodId].closingStock = world.companies
+          .filter((entry) => entry.cityId === city.id)
+          .reduce((total, entry) => total + (entry.inventory[goodId] ?? 0), 0);
+      }
+      setCompanyEmployees(company, 1_000);
+      company.jobDemand = 1_000;
       company.cash = 300_000;
       company.previousMonth.profit = 10_000;
       appointPlayerMayor(world, city.id);
@@ -204,7 +241,9 @@ describe('15 项政策逐项验证：起始条件 → 财政变化 → 实际模
     expect(result.ok, result.error).toBe(true);
     expect(policy.spent).toBeGreaterThan(0);
     const company = world.companies.find((entry) => entry.id === result.companyId)!;
-    expect(company.cash).toBeGreaterThan(300_000);
+    // v0.9：创办资本用于真实购买设备与原料；资本不再原样留在现金里。
+    expect(company.cash).toBeGreaterThan(0);
+    expect(company.equipment.farm + company.equipment.industry + company.equipment.energy).toBeGreaterThan(0);
     expect(world.lifecycle.foundings.at(-1)!.governmentGrant).toBeGreaterThan(0);
   });
 
@@ -229,6 +268,8 @@ describe('15 项政策逐项验证：起始条件 → 财政变化 → 实际模
     const city = world.cities.find((entry) => entry.id === 'ironvale')!;
     const company = world.companies.find((entry) => entry.cityId === city.id && entry.employees > 0)!;
     company.cash = 5_000_000;
+    // v0.9：扩产需要真实设备；设备产业尚未建立时先使用政府初始库存。
+    world.equipmentMarket.initialStock.industry = 200;
     expect(startPolicy(world, city.id, 'equipmentSubsidy', DEMO_CONFIG).ok).toBe(true);
     const policy = activePolicy(world, city.id, 'equipmentSubsidy')!;
     const capacityBefore = company.capacity;
@@ -236,7 +277,9 @@ describe('15 项政策逐项验证：起始条件 → 财政变化 → 实际模
     expect(result.ok, result.error).toBe(true);
     expect(company.capacity).toBeGreaterThan(capacityBefore);
     expect(policy.spent).toBeGreaterThan(0);
-    expect(city.treasury).toBeLessThan(80_000_000);
+    // 财政支出补贴，同时按目录价卖出政府设备库存（有限库存），故财政净变化为“补贴 − 设备款”；
+    // 用政策支出流水验证财政真实出钱，而不是断言财政余额单调下降。
+    expect(policySpendEntries(world, city.id).length).toBeGreaterThan(0);
   });
 
   it('重点产业扶持：选定行业获得财政拨款与有上限的生产率加成', () => {

@@ -28,6 +28,15 @@ function syncMarketStock(world: WorldState, cityId: string): void {
   }
 }
 
+
+function equipmentBookCost(world: WorldState, company: { cityId: string; equipment: Record<'farm' | 'industry' | 'energy', number> }): number {
+  const city = world.cities.find((entry) => entry.id === company.cityId)!;
+  return (['farm', 'industry', 'energy'] as const).reduce((sum, kind) => {
+    const price = city.market[DEMO_CONFIG.equipment.catalog[kind].goodId].price;
+    return sum + company.equipment[kind] * price;
+  }, 0);
+}
+
 describe('企业成立：居民投资群体 / 现有企业 / 城市政府', () => {
   it('居民投资群体联合创办：资金与股份来自出资人，企业获得等额现金', () => {
     const world = worldWithMoney();
@@ -47,7 +56,13 @@ describe('企业成立：居民投资群体 / 现有企业 / 城市政府', () =
       .filter((group) => group.cityId === city.id)
       .reduce((sum, group) => sum + group.cash, 0);
     expect(world.companies).toHaveLength(companiesBefore + 1);
-    expect(company.cash).toBeCloseTo(600_000, 2);
+    // v0.9：创办资本真实购买启动设备，企业现金 = 资本 − 设备支出。
+    const equipmentCost = company.lastMonth.equipmentPurchased ?? 0;
+    expect(equipmentCost).toBeGreaterThan(0);
+    expect(company.cash).toBeCloseTo(600_000 - equipmentCost, 2);
+    expect(company.equipmentCapacity).toBeGreaterThan(0);
+    expect(company.capacity).toBeCloseTo(company.equipmentCapacity, 2);
+    expect(company.jobDemand).toBeGreaterThan(0);
     expect(groupsBefore - groupsAfter).toBeCloseTo(600_000, 2);
     const holdings = world.securities.holdings.filter(
       (holding) => holding.companyId === company.id && holding.holder.type === 'investorGroup',
@@ -105,8 +120,11 @@ describe('企业成立：居民投资群体 / 现有企业 / 城市政府', () =
       DEMO_CONFIG,
     );
     expect(first.ok, first.error).toBe(true);
-    expect(city.treasury).toBeCloseTo(treasuryBefore - 400_000, 2);
     const company = world.companies.find((entry) => entry.id === first.companyId)!;
+    // 初创出资 40 万进入企业；企业再用其中一部分向政府库存购买启动设备，资金回到财政。
+    const equipmentCost = company.lastMonth.equipmentPurchased ?? 0;
+    expect(equipmentCost).toBeGreaterThan(0);
+    expect(city.treasury).toBeCloseTo(treasuryBefore - 400_000 + equipmentCost, 2);
     const cityShares = world.securities.holdings
       .filter(
         (holding) =>
@@ -222,7 +240,12 @@ describe('企业倒闭：员工、资产、库存、债务、股份与协议的�
     expect(record.debtRepaid).toBe(300_000);
     expect(record.debtForgiven).toBe(0);
     expect(record.inventoryWrittenOff.find((entry) => entry.good === 'grain')!.qty).toBe(1_000);
-    expect(record.shareholderPayout).toBeCloseTo(600_000, 2);
+    // 清算收益 = 剩余现金 + 设备处置所得 − 偿还债务（设备按清算折扣价卖给同城企业）。
+    const equipmentProceeds = (['farm', 'industry', 'energy'] as const).reduce((sum, kind) => {
+      const price = DEMO_CONFIG.equipment.catalog[kind].price * DEMO_CONFIG.equipment.liquidationPriceFactor;
+      return sum + company.equipment[kind] * price;
+    }, 0);
+    expect(record.shareholderPayout).toBeCloseTo(900_000 + equipmentProceeds - 300_000, 2);
     expect(record.holdings.length).toBeGreaterThan(0);
     expect(world.player.cash).toBeGreaterThan(playerCashBefore);
     expect(world.agreements[0]!.items[0]!.status).toBe('failed');

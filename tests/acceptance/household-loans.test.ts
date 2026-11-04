@@ -17,6 +17,7 @@ import {
 } from '../../src/simulation/population/household-finance';
 import { householdGroupsOfCity } from '../../src/simulation/population/household-groups';
 import { depositAccountFor } from '../../src/simulation/banking/banking';
+import { round2 } from '../../src/simulation/core/math';
 import { parseSave, serializeSave } from '../../src/simulation/core/save';
 import type { HouseholdGroup, WorldState } from '../../src/simulation/contracts/types';
 import { cityById, newWorld } from './helpers';
@@ -144,7 +145,7 @@ describe('AC-E03 放款是真实债务、不计收入', () => {
 });
 
 describe('AC-E04 不借超过实际成交额的钱', () => {
-  it('无供给不放款；有供给时放款额 = max(实际成交额, 单笔最低额)，且每群体每月最多一笔', () => {
+  it('无供给不放款；有供给时先存款提取、放款额=实际成交额，且每群体每月最多一笔（v0.9 T1）', () => {
     const world = newWorld(0);
     for (const good of CONSUMER_GOODS) {
       for (const company of world.companies) company.inventory[good as keyof typeof company.inventory] = 0;
@@ -174,13 +175,16 @@ describe('AC-E04 不借超过实际成交额的钱', () => {
     const loans = world.householdFinance!.loans.filter((loan) => loan.groupId === group.id);
     expect(loans).toHaveLength(1);
     const loan = loans[0]!;
-    expect(loan.principal).toBeCloseTo(
-      Math.max(detail.spend, CREDIT.minLoanAmount),
-      2,
-    );
+    const withdrawn = group.lastMonth.depositWithdrawn ?? 0;
+    // v0.9 T1：存款 40,000 本月最多提取 5%=2,000 先补基本需求，剩余资金缺口才由贷款补足；
+    // 放款额等于实际成交中由贷款承担的部分（不含提取存款），不会超过真实成交额。
+    expect(withdrawn).toBeGreaterThan(0);
+    expect(withdrawn).toBeLessThanOrEqual(round2(40_000 * 0.05) + 0.01);
+    expect(detail.spend).toBeCloseTo(round2(detail.loanFinanced! + withdrawn), 2);
+    expect(loan.principal).toBeCloseTo(detail.loanFinanced!, 2);
     expect(loan.principal).toBeLessThanOrEqual(limit + 0.01);
-    // 借到的钱先支付成交，剩余零头留在现金（仍是债务）。
-    expect(group.cash).toBeCloseTo(loan.principal - detail.spend, 2);
+    // 借到的钱先支付成交，剩余零头留在现金（仍是债务）；提取额也已全部支付。
+    expect(group.cash).toBeCloseTo(round2(loan.principal + withdrawn - detail.spend), 2);
   });
 });
 
@@ -274,7 +278,7 @@ describe('AC-E07 存档读档与重复结算幂等', () => {
 });
 
 describe('AC-E08 贷款只补足“资金缺口”，不改有效需求口径', () => {
-  it('现金预算为 0 时有效需求仍为 0；成交由贷款事后补足，且缺口分账为资金缺口', () => {
+  it('存款提取先补基本需求（≤5%）；有效需求不含可借额度，贷款只补剩余资金缺口（v0.9 T1）', () => {
     const world = newWorld(0);
     const group = richGroup(world);
     group.cash = 0;
@@ -285,22 +289,27 @@ describe('AC-E08 贷款只补足“资金缺口”，不改有效需求口径', 
     for (const good of CONSUMER_GOODS) stockInventory(world, 'lanport', good, 20_000);
 
     const snapshot = householdConsumerBudgetSnapshot(world, group, DEMO_CONFIG, 0);
-    expect(snapshot.cashBudget).toBe(0);
-    expect(snapshot.effectiveBudget).toBe(0);
+    // v0.9 T1：现金为 0、无收入，但有 30,000 存款 → 允许提取 5%=1,500 补基本需求作为现金预算；
+    // 有效预算仍只等于现金预算（不含可借额度），贷款只在事后补剩余缺口。
+    const withdrawalAllowance = round2(30_000 * 0.05);
+    expect(snapshot.cashBudget).toBeCloseTo(withdrawalAllowance, 2);
+    expect(snapshot.effectiveBudget).toBeCloseTo(snapshot.cashBudget, 2);
     expect(snapshot.loanAvailable).toBeGreaterThan(0);
 
     const city = cityById(world, 'lanport');
     const ledgers = createWorldLedgers(world);
     const result = runConsumerMarket(world, city, ledgers.lanport!, NO_INTERCITY);
     const detail = result.byGroup![group.id]!;
-    expect(detail.budget).toBe(0);
+    const withdrawn = group.lastMonth.depositWithdrawn ?? 0;
+    expect(detail.budget).toBeCloseTo(withdrawalAllowance, 2);
     expect(detail.spend).toBeGreaterThan(0);
     expect(detail.loanFinanced).toBeGreaterThan(0);
-    expect(detail.spend).toBeCloseTo(detail.loanFinanced!, 2);
+    expect(withdrawn).toBeGreaterThan(0);
+    expect(detail.spend).toBeCloseTo(round2(detail.loanFinanced! + withdrawn), 2);
     // 供给充足时缺口应分到“资金不足”而不是“供给不足”。
     expect(detail.unmetFunding!).toBeGreaterThanOrEqual(0);
     const loans = world.householdFinance!.loans.filter((loan) => loan.groupId === group.id);
     expect(loans.length).toBeGreaterThanOrEqual(1);
-    expect(loans[0]!.principal).toBeCloseTo(Math.max(detail.spend, CREDIT.minLoanAmount), 2);
+    expect(loans[0]!.principal).toBeCloseTo(detail.loanFinanced!, 2);
   });
 });

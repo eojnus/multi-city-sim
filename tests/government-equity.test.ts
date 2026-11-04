@@ -122,7 +122,8 @@ describe('修复一：政府持股的分红与公司治理', () => {
     expect(result.ok, result.error).toBe(true);
     const record = world.lifecycle.liquidations.at(-1)!;
     expect(record.holdings.some((entry) => entry.holder.type === 'city')).toBe(true);
-    expect(city.treasury - treasuryBefore).toBeCloseTo(700_000, 2);
+    // v0.9：设备按真实买家处置，清算先变现设备（1 台工业设备残值 90,000），剩余资产再按股分配。
+    expect(city.treasury - treasuryBefore).toBeCloseTo(790_000, 2);
     expect(world.investors.reduce((sum, group) => sum + group.cash, 0)).toBe(investorCashBefore);
     expect(
       world.fiscal.ledger.some(

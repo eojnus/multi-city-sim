@@ -11,6 +11,12 @@ export function computeCityGdp(world: WorldState): Record<string, number> {
   for (const record of world.lastTick.productionRecords) {
     gdpByCity[record.cityId] = round2((gdpByCity[record.cityId] ?? 0) + record.valueAdded);
   }
+  // v0.9：公共服务增加值 = 当月实际计入居民收入的公共部门工资（按支出法计入 GDP）；
+  // 财政转移支付、借款、债券发行与债务勾销不计入 GDP，企业增加值口径不变、不重复计算。
+  for (const city of world.cities) {
+    const publicServices = round2(Math.max(0, city.lastMonth.publicWageBill ?? 0));
+    gdpByCity[city.id] = round2((gdpByCity[city.id] ?? 0) + publicServices);
+  }
   for (const city of world.cities) {
     const value = Math.max(0, gdpByCity[city.id] ?? 0);
     gdpByCity[city.id] = value;
@@ -69,29 +75,18 @@ export function investInCompany(
 
   const price = companySharePrice(company, cityMarketPrices(city));
   const issuedShares = Math.max(1, Math.round(rounded / price));
-  const capacityGain = round2(
-    company.capacity *
-      clamp(
-        rounded * config.company.investmentCapacityGainPerCurrency,
-        0,
-        config.company.maxInvestmentCapacityGain,
-      ),
-  );
 
   // ---- 提交 ----
   world.player.cash = round2(world.player.cash - rounded);
   company.cash = round2(company.cash + rounded);
   // 玩家出资为一级发行；暂定给予有投票权股份（个人二级市场买入权利仍待用户决定）。
   issueShares(world, company, 'voting', { type: 'player', id: 'player' }, issuedShares, world.time.tick);
-  company.capacity = round2(company.capacity + capacityGain);
-  company.maxCapacity = round2(
-    Math.max(company.maxCapacity, company.capacity * 1.2, company.maxCapacity + capacityGain * 2),
-  );
+  // v0.9：注资只增加企业现金；扩大产能必须通过真实设备购买（企业计划或玩家操作）。
 
   world.log.push({
     tick: world.time.tick,
     kind: 'player',
-    message: `玩家向 ${company.name} 注资 ${rounded.toFixed(0)}，获得 ${issuedShares} 股有投票权股份（发行价 ${price.toFixed(2)}），产能 +${capacityGain.toFixed(0)}。`,
+    message: `玩家向 ${company.name} 注资 ${rounded.toFixed(0)}，获得 ${issuedShares} 股有投票权股份（发行价 ${price.toFixed(2)}）。`,
   });
   trimLog(world, config);
 

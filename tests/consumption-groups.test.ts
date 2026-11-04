@@ -25,6 +25,7 @@ import { deepClone } from '../src/simulation/core/save';
 import { createWorldLedgers } from '../src/simulation/markets/markets';
 import { executeIntercityPurchase } from '../src/simulation/markets/intercity';
 import { runConsumerMarket } from '../src/simulation/markets/consumer';
+import { depositAccountFor } from '../src/simulation/banking/banking';
 import { householdGroupsOfCity } from '../src/simulation/population/household-groups';
 import { settleTransportMonth } from '../src/simulation/transport/settlement';
 import { settleGovernment } from '../src/simulation/government/fiscal';
@@ -55,11 +56,15 @@ function groupOf(
   return group;
 }
 
-/** 把所有群体现金与收入清零，便于单独观察被测群体。 */
+/** 把所有群体现金、收入与银行存款清零，便于单独观察被测群体。 */
 function clearHouseholdEconomy(world: WorldState, cityId: string): void {
   for (const group of householdGroupsOfCity(world, cityId)) {
     group.cash = 0;
     group.lastMonth.income = 0;
+    group.lastMonth.depositWithdrawn = 0;
+    // v0.9 T1：存款可提取补足基本消费；本文件验证逐群体现金预算，故一并清零存款。
+    const account = depositAccountFor(world, { kind: 'household', id: group.id });
+    if (account) account.balance = 0;
   }
 }
 

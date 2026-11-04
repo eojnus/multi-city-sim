@@ -2,8 +2,8 @@
 // 这些类型描述的是“演示方案 v0.2”的数据结构，不代表最终策划规则。
 // v0.2 新增证券/治理/居民投资/协议/通知数据；旧 v1 存档由 core/save.ts 迁移。
 
-export const SAVE_FORMAT_VERSION = 8;
-export const GAME_VERSION = '0.8.3';
+export const SAVE_FORMAT_VERSION = 9;
+export const GAME_VERSION = '0.9.0';
 
 export type GoodId =
   | 'grain'
@@ -13,7 +13,10 @@ export type GoodId =
   | 'energy'
   | 'food'
   | 'clothing'
-  | 'household';
+  | 'household'
+  | 'farmEquipment'
+  | 'industryEquipment'
+  | 'energyEquipment';
 
 export type GoodCategory = 'consumer' | 'producer';
 
@@ -103,6 +106,14 @@ export interface CompanyMonthlyStats {
   capacityChange: number;
   /** v0.2：企业作为股东从其他企业取得的股息（进入企业现金，不重复计入居民收入）。 */
   dividendIncome: number;
+  /** v0.9：本月实际发放的员工奖金（现金，计入工资性收入与个税税基）。 */
+  bonusPaid?: number;
+  /** v0.9：本月购买设备的支出（信用点，已含在现金变化中）。 */
+  equipmentPurchased?: number;
+  /** v0.9：本月出售设备（含二手机）取得的收入（信用点）。 */
+  equipmentSold?: number;
+  /** v0.9：本月因紧急裁员减少的员工数（不含常规裁员）。 */
+  emergencyLayoffs?: number;
   /**
    * v0.7：经营活动现金流 = 销售收入 − 采购/工资/利息/税等经营支出（不含融资与股息）。
    * 可选：块1/数据块填充；未填充时报告用近似式并标注“近似”。
@@ -140,6 +151,73 @@ export interface Company {
   note: string;
   /** v0.3：自动经营风格与最近决策。旧存档迁移时按行业确定性分配。 */
   ai: CompanyAiState;
+  /** v0.9：设备资产（按行业类别计数的可计量资产，不是现金或商品库存）。 */
+  equipment: EquipmentAssets;
+  /** v0.9：设备产能（缓存值，权威 = equipment × 单价产能 × 技术系数）。 */
+  equipmentCapacity: number;
+  /** v0.9：最近若干月实际销量（含出口），用于生产计划的销售参考量。 */
+  salesHistory: number[];
+  /** v0.9：本月生产计划（计划产量、设备/劳动约束与原因），供生产模块与界面读取。 */
+  productionPlan: CompanyProductionPlan | null;
+  /** v0.9：最近若干月税后利润（用于季度奖金条件）。 */
+  recentProfits: number[];
+}
+
+/** v0.9：设备类别。农业设备服务农业/纤维，工业设备服务加工制造，能源设备服务能源生产。 */
+export type EquipmentKind = 'farm' | 'industry' | 'energy';
+
+/** 企业持有的设备数量（按类别）。 */
+export interface EquipmentAssets {
+  farm: number;
+  industry: number;
+  energy: number;
+}
+
+/**
+ * v0.9：企业月度生产计划。把设备产能、劳动产能、计划产量与约束分开记录，
+ * 实际产量由生产模块再按设备/劳动/原料三者取最小。
+ */
+export interface CompanyProductionPlan {
+  tick: number;
+  /** 销售参考量：最近 3 个月实际销量（含出口）均值；无历史时用有依据的初始预测。 */
+  salesReference: number;
+  /** 目标成品库存（销售参考量 × 目标库存月数）。 */
+  targetInventory: number;
+  /** 设备支撑的月产能（月末缓存）。 */
+  equipmentLimit: number;
+  /** 现有员工支撑的月产能。 */
+  laborLimit: number;
+  /** 计划产量（受设备/劳动/库存/资金约束，已应用 ±20% 平滑与紧急下调）。 */
+  plannedOutput: number;
+  /** 计划对应的岗位需求（用于招聘/裁员）。 */
+  plannedJobs: number;
+  /** 本月是否触发紧急下调（现金不足/严重积压）。 */
+  emergency: boolean;
+  reasons: string[];
+}
+
+/** v0.9：企业挂出的二手设备出售委托（真实买家成交后才转移所有权与资金）。 */
+export interface UsedEquipmentOffer {
+  id: string;
+  companyId: string;
+  cityId: string;
+  kind: EquipmentKind;
+  units: number;
+  askPrice: number;
+  listedTick: number;
+  note: string;
+}
+
+/**
+ * v0.9：设备市场。设备商品由设备企业生产并进入其库存；企业购买时从设备企业库存
+ * 或政府开局设备库存取得真实卖方与付款。二手设备通过 offers 撮合，没有买家时继续持有。
+ */
+export interface EquipmentMarketState {
+  /** 政府开局设备库存（仅新开局注入；用于启动设备产业与创办企业；出售所得进入对应城市财政）。 */
+  initialStock: EquipmentAssets;
+  /** 二手设备出售委托（按企业、类别、价格）。 */
+  offers: UsedEquipmentOffer[];
+  lastMonthSold: EquipmentAssets;
 }
 
 export interface MarketState {
@@ -1104,6 +1182,8 @@ export interface HouseholdMonthlyStats {
   loanFinancedConsumption?: number;
   /** v0.7 / v1.5 #40：因资金不足未满足的消费（与供给不足缺口分开；可选，块3 填充；存档 v7 接受缺省）。 */
   unmetFunding?: number;
+  /** v0.9：本月为补足基本消费而从本人银行存款提取的金额（先于消费贷）。 */
+  depositWithdrawn?: number;
 }
 
 export interface HouseholdGroup {
@@ -1939,6 +2019,8 @@ export interface WorldState {
   householdFinance: HouseholdFinanceState;
   /** v0.8：消费税、股息税、交通税收系数与月度税收记录。 */
   taxes: TaxState;
+  /** v0.9：设备市场（政府开局设备库存、二手设备委托、月度成交量）。 */
+  equipmentMarket: EquipmentMarketState;
   history: WorldHistoryPoint[];
   log: LogEntry[];
   lastTick: {

@@ -9,6 +9,7 @@ import type { DemoConfig } from '../../../data/config';
 import { PRODUCTIVITY } from '../../../data/demo-data';
 import { clamp, round2 } from '../../core/math';
 import { monthlyWageBill } from '../company';
+import { recomputeProductionPlan } from '../production-plan';
 import { effectiveWageRate, hiringSubsidyPerHire, retentionSubsidyPerEmployee } from '../../policies/query';
 import { workforceSkillMultiplier } from '../../labor/workforce';
 
@@ -69,38 +70,43 @@ export function planCompanyDecision(
   const tech = city.technology.productivityMultiplier;
   const skill = workforceSkillMultiplier(city);
 
-  // ---- 生产计划：按上月销售实现率、库存与需求调整利用率 ----
-  let utilization = company.utilization;
-  if (company.previousMonth.produced > 0.01) {
-    const sellRatio =
-      (company.previousMonth.sold + company.previousMonth.exported) /
-      company.previousMonth.produced;
-    utilization += (sellRatio - 1) * config.company.utilizationAdjust;
-    if (sellRatio < 0.85) reasons.push('上月销售低于产量，降低生产');
-    if (sellRatio > 1.05) reasons.push('上月销量超过产量，提高生产');
+  // ---- 生产计划：优先采用 production-plan 的计划产量 / 设备产能作为目标利用率 ----
+  // 生产模块按企业生产计划的 plannedOutput 生产；utilization 只用于展示、投资与协议口径，
+  // 因此这里把它对齐为“计划产量 ÷ 设备产能”，再叠加风格偏置，保留不同风格的可解释差异。
+  let productionPlan = company.productionPlan;
+  if (!productionPlan || productionPlan.tick !== world.time.tick) {
+    productionPlan = recomputeProductionPlan(world, company, config);
   }
-  if (stock > Math.max(1, company.capacity * 0.8)) {
-    utilization -= 0.05;
-    reasons.push('成品库存偏高，压缩生产');
-  }
-  const unmet = city.market[output]?.unmetDemand ?? 0;
-  if (stock < Math.max(1, company.capacity * 0.15) && unmet > 0) {
-    utilization += 0.05;
-    reasons.push(`市场需求未满足 ${unmet.toFixed(0)}，增加生产`);
-  }
-  utilization = clamp(
-    round2(utilization + params.utilizationBias),
+  const equipmentLimit = Math.max(0, productionPlan.equipmentLimit);
+  const plannedUtilization =
+    equipmentLimit > 0 ? productionPlan.plannedOutput / equipmentLimit : company.utilization;
+  const styleBias = productionPlan.emergency ? 0 : params.utilizationBias;
+  let utilization = clamp(
+    round2(plannedUtilization + styleBias),
     config.company.minUtilization,
     config.company.maxUtilization,
   );
+  reasons.push(...productionPlan.reasons.slice(0, 3));
 
-  // ---- 用工计划：产能需求 × 风格系数，再按补贴后的现金能力修正 ----
+  const unmet = city.market[output]?.unmetDemand ?? 0;
+  if (unmet > 0 && !productionPlan.emergency) {
+    reasons.push(`市场需求未满足 ${unmet.toFixed(0)}，按生产计划扩大招聘/投资`);
+  }
+
+  // ---- 用工计划：由计划产量推岗位需求（不再绑定历史产能），再按风格与现金能力修正 ----
   const effectiveWage = effectiveWageRate(world, city, company.id, company.wageRate, config);
   const hiringSubsidy = hiringSubsidyPerHire(world, city.id, company.wageRate, config);
   const retentionSubsidy = retentionSubsidyPerEmployee(world, city.id, company.wageRate, config);
 
-  let targetJobs = Math.ceil(company.capacity / Math.max(1, productivity * tech * skill));
-  targetJobs = Math.floor(targetJobs * params.jobFactor);
+  const perEmployee = Math.max(
+    0.01,
+    productionPlan.laborLimit > 0 && company.employees > 0
+      ? productionPlan.laborLimit / company.employees
+      : productivity * tech * skill,
+  );
+  const jobsForPlan = Math.ceil(productionPlan.plannedOutput / perEmployee);
+  const styledJobs = Math.floor(productionPlan.plannedJobs * params.jobFactor);
+  let targetJobs = Math.max(jobsForPlan, styledJobs);
   const maxJobs = Math.ceil(company.maxCapacity / Math.max(1, productivity * tech * skill));
 
   const projectedJobs = Math.max(company.employees, targetJobs, 1);
@@ -116,6 +122,8 @@ export function planCompanyDecision(
   }
   if (hiringSubsidy > 0) {
     reasons.push(`新增招聘补贴 ${hiringSubsidy.toFixed(0)}/人，补贴后用工成本 ${effectiveWage.toFixed(0)}`);
+    // 新增招聘补贴由财政承担部分首次用工成本：同等条件下小幅扩大招聘（暂定 5%）。
+    targetJobs = Math.floor(targetJobs * 1.05);
   }
   if (retentionSubsidy > 0) {
     reasons.push(`稳岗补贴 ${retentionSubsidy.toFixed(0)}/人，倾向保留现有岗位`);

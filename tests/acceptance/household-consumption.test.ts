@@ -51,6 +51,18 @@ function totalCash(world: WorldState): number {
   return Math.round((groupCash + companyCash + treasury + world.player.cash) * 100) / 100;
 }
 
+/** 清空某群体的存款与本月提取额（让“纯现金预算”口径的可比断言成立）。 */
+function zeroDeposit(world: WorldState, group: HouseholdGroup): void {
+  group.lastMonth.depositWithdrawn = 0;
+  const account = depositAccountFor(world, { kind: 'household', id: group.id });
+  if (account) account.balance = 0;
+}
+
+/** 清空世界上所有居民群体的存款与本月提取额（货币守恒类用例）。 */
+function zeroAllDeposits(world: WorldState): void {
+  for (const group of world.households.groups) zeroDeposit(world, group);
+}
+
 /** 清空所有企业的某商品库存（制造本地供给不足）。 */
 function zeroInventory(world: WorldState, goodId: string): void {
   for (const company of world.companies) {
@@ -73,6 +85,7 @@ describe('AC-D01 消费预算公式', () => {
   it('参考额 = 上月可支配收入×80% + 手头现金×5%；预算 = min(现金, max(0, 参考额))', () => {
     const world = newWorld(0);
     const group = pickGroup(world);
+    zeroDeposit(world, group);
     group.cash = 10_000;
     group.lastMonth.income = 1_000;
     const snapshot = householdConsumerBudgetSnapshot(world, group, DEMO_CONFIG, 0);
@@ -108,6 +121,7 @@ describe('AC-D03 无收入但有积蓄', () => {
   it('10 万现金 + 上月收入 0 → 预算 5,000', () => {
     const world = newWorld(0);
     const group = pickGroup(world);
+    zeroDeposit(world, group);
     group.cash = 100_000;
     group.lastMonth.income = 0;
     const snapshot = householdConsumerBudgetSnapshot(world, group, DEMO_CONFIG, 0);
@@ -120,6 +134,7 @@ describe('AC-D04 四层分账', () => {
     const world = newWorld(0);
     stockInventory(world, 'lanport', FOOD, 10_000);
     const group = pickGroup(world);
+    zeroDeposit(world, group);
     group.cash = 3_000;
     group.lastMonth.income = 1_000;
     const ledgers = createWorldLedgers(world);
@@ -141,6 +156,8 @@ describe('AC-D05 群体隔离', () => {
     const list = groups(world);
     const poor = list[1]!;
     const rich = list[2]!;
+    zeroDeposit(world, poor);
+    zeroDeposit(world, rich);
     poor.cash = 0;
     poor.lastMonth.income = 0;
     rich.cash = 50_000;
@@ -164,6 +181,7 @@ describe('AC-D06 供给不足', () => {
     const world = newWorld(0);
     for (const good of CONSUMER_GOODS) zeroInventory(world, good);
     const group = pickGroup(world);
+    zeroDeposit(world, group);
     group.cash = 10_000;
     group.lastMonth.income = 5_000;
     const city = cityById(world, 'lanport');
@@ -186,22 +204,31 @@ describe('AC-D06 供给不足', () => {
   });
 });
 
-describe('AC-D07 存款/资产不纳入预算', () => {
-  it('存款不计入预算、不被复制到手头；结算前后存款余额不变', () => {
+describe('AC-D07 存款只作提现来源、不重复计入预算（v0.9 T1）', () => {
+  it('基准预算仍不含存款；有基本需求缺口时另计提取额且 ≤ 月初存款×5%，不搬钱', () => {
     const world = newWorld(0);
     const group = pickGroup(world);
-    group.cash = 1_000;
-    group.lastMonth.income = 0;
     const account = depositAccountFor(world, { kind: 'household', id: group.id });
     expect(account).toBeDefined();
+    // 先确认“基准预算=纯现金口径”：无存款时参考额=现金×5%=50，预算=min(现金,50)=50。
+    zeroDeposit(world, group);
+    group.cash = 1_000;
+    group.lastMonth.income = 0;
+    const base = householdConsumerBudgetSnapshot(world, group, DEMO_CONFIG, 0);
+    expect(base.depositsIncluded).toBe(false);
+    expect(base.cashComponent).toBeCloseTo(1_000 * BUDGET.cashShare, 2);
+    expect(base.referenceSpend).toBeCloseTo(50, 2);
+    expect(base.cashBudget).toBeCloseTo(50, 2);
+
+    // 注入 90 万存款：基准预算不变（仍 50），额外提取补充计入 cashBudget，
+    // 上限为月初存款×5%=45,000，且只用于填补基本需求缺口。
     account!.balance = 900_000;
-    const snapshot = householdConsumerBudgetSnapshot(world, group, DEMO_CONFIG, 0);
+    const snapshot = householdConsumerBudgetSnapshot(world, group, DEMO_CONFIG, 1);
     expect(snapshot.depositsIncluded).toBe(false);
-    expect(snapshot.cashComponent).toBeCloseTo(1_000 * BUDGET.cashShare, 2);
-    // 上月收入为 0：参考额=现金×5%=50，预算=min(现金,50)=50（存款 90 万完全不参与）。
     expect(snapshot.referenceSpend).toBeCloseTo(50, 2);
-    expect(snapshot.cashBudget).toBeCloseTo(50, 2);
-    // 快照不搬钱：现金与存款都不变。
+    expect(snapshot.cashBudget).toBeGreaterThan(50);
+    expect(snapshot.cashBudget).toBeLessThanOrEqual(50 + round2(900_000 * 0.05) + 0.01);
+    // 快照不搬钱：现金与存款都不变，提取只在真实成交后发生。
     expect(group.cash).toBe(1_000);
     expect(account!.balance).toBe(900_000);
   });
@@ -225,6 +252,8 @@ describe('AC-D08 确定性', () => {
 describe('AC-D09 消费不创造资金', () => {
   it('私人现金减少额=消费税额；含应缴未缴税的世界总资金守恒', () => {
     const world = newWorld(0);
+    // 存款提取会在居民内部搬钱（存款→现金），不计入本用例的“私人现金—税”守恒，先清零。
+    zeroAllDeposits(world);
     for (const good of CONSUMER_GOODS) stockInventory(world, 'lanport', good, 50_000);
     const group = pickGroup(world);
     group.cash = 10_000;
@@ -255,10 +284,12 @@ describe('AC-D09 消费不创造资金', () => {
       0,
     );
     expect(accruedTax).toBeGreaterThan(0);
-    expect(round2(beforePrivate - privateCash())).toBeCloseTo(
-      round2(result.spend * DEMO_CONFIG.tax.consumptionTaxRate),
-      2,
-    );
+    // 每笔成交 5% 取整累加即应缴未缴税：私人现金减少额与它逐分一致。
+    expect(round2(beforePrivate - privateCash())).toBeCloseTo(round2(accruedTax), 2);
+    // 与“成交额×税率”只差逐笔舍入（每笔最多半分，这里放宽到 0.5）。
+    expect(
+      Math.abs(accruedTax - result.spend * DEMO_CONFIG.tax.consumptionTaxRate),
+    ).toBeLessThanOrEqual(0.5);
     // 把“应缴未缴税”视为政府债权后，世界总资金（居民+企业+玩家+财政+应缴税）守恒。
     expect(totalCash(world) + accruedTax).toBeCloseTo(beforeTotal, 2);
   });

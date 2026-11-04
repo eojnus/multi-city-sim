@@ -1,8 +1,9 @@
-import type { LogEntry, WorldState } from '../contracts/types';
+import type { Company, LogEntry, WorldState } from '../contracts/types';
 import type { DemoConfig } from '../../data/config';
 import { clamp, round2 } from '../core/math';
 import { monthlyWageBill } from '../companies/company';
 import { serviceCompanyLoans } from '../banking/banking';
+import { bankLoansOf } from '../banking/credit';
 import { requestCompanyWorkingCapital } from '../management/financing';
 import { distributeDividend, playerTotalShares } from '../securities/securities';
 import { accrueDividendTax } from '../government/taxes';
@@ -44,7 +45,34 @@ export function splitDividend(
 }
 
 /**
- * 企业月度财务：支付工资 → 缴纳企业所得税 → 分配股息 → 调整产能。
+ * v0.9：企业下月“已知偿债额”近似，仅用于季度奖金的现金储备校验。
+ *
+ * 口径（与 banking.serviceLoan 的下一期应收对齐，但不修改任何贷款）：
+ * - 利息 = 当前未偿本金 × 合同月利率，外加已到期未付欠息；
+ * - 本金 = min(合同月还本, 未偿本金)，最后一期按剩余未偿本金结清，外加已到期欠本；
+ * - 逾期欠款按“下一期仍会继续催收”计入，属于保守估计（实际可能更高，但不会让奖金挤占偿债）。
+ * 不含未来新增借款与罚息（本作不罚息、不计复利）。
+ */
+function estimateNextMonthDebtService(world: WorldState, company: Company): number {
+  let total = 0;
+  for (const loan of bankLoansOf(world)) {
+    if (loan.borrower.kind !== 'company' || loan.borrower.id !== company.id) continue;
+    if (loan.status === 'repaid') continue;
+    const periodNumber = loan.nextDueTick - loan.startTick;
+    const isFinalPeriod = periodNumber >= loan.termMonths;
+    const interestDue = round2(loan.outstanding * loan.rateMonthly);
+    const scheduledPrincipal = isFinalPeriod
+      ? round2(loan.outstanding)
+      : round2(Math.min(loan.monthlyPrincipal, loan.outstanding));
+    total = round2(
+      total + loan.arrearsInterest + interestDue + loan.arrearsPrincipal + scheduledPrincipal,
+    );
+  }
+  return total;
+}
+
+/**
+ * 企业月度财务：支付工资 → 缴纳企业所得税 → 分配股息 → 季度奖金 → 调整产能。
  * 股息按 world.securities 的实际持股逐笔分配：玩家、企业、居民投资实体各自入账，
  * 不会把同一笔股息重复计入居民收入。
  */
@@ -201,6 +229,46 @@ export function settleCompanyFinance(
       investorDistribution[cityId] = round2((investorDistribution[cityId] ?? 0) + amount);
     }
 
+    // v0.9 T5：季度奖金。每 bonusEveryMonths 月评估一次（默认 3 个月，即 tick 为 3 的倍数）；
+    // 发放条件 = 最近 bonusEveryMonths 个月经营利润（stats.profit，不含奖金本身）均 > 0，
+    // 且发完后仍保留 ≥ bonusReserveWageMonths×月工资 + bonusDebtServiceMonths×下月已知偿债。
+    // 奖金池 = min(窗口利润合计 × bonusProfitShare, 可动用现金 − 储备)，下限 0；
+    // 只用企业自有现金支付（绝不借款发奖金），不得把现金发成负数；核算不通过则不发。
+    // 口径说明：利润不含奖金（奖金是对税后利润的分配，避免“发奖金→利润下降→下次不发”的反馈）；
+    // 奖金计入 wagesPaid（居民工资拆分自动按职业权重分配）与城市私营工资（个税口径），
+    // 同时单独记 bonusPaid，不另造重复收入口径；企业现金减少与居民收入增加一一对应。
+    const compensation = config.compensation;
+    const bonusWindow = Math.max(1, Math.round(compensation.bonusEveryMonths));
+    let bonusPaid = 0;
+    if (world.time.tick % bonusWindow === 0) {
+      const profitWindow = [...company.recentProfits, stats.profit].slice(-bonusWindow);
+      if (
+        profitWindow.length === bonusWindow &&
+        profitWindow.every((profit) => profit > 0)
+      ) {
+        const profitSum = round2(profitWindow.reduce((total, profit) => total + profit, 0));
+        const reserve = round2(
+          monthlyWageBill(company, config) * compensation.bonusReserveWageMonths +
+            estimateNextMonthDebtService(world, company) *
+              compensation.bonusDebtServiceMonths,
+        );
+        const spendableCash = round2(Math.max(0, company.cash - reserve));
+        bonusPaid = round2(
+          Math.min(
+            Math.max(0, profitSum * compensation.bonusProfitShare),
+            spendableCash,
+          ),
+        );
+        if (bonusPaid > 0) {
+          company.cash = round2(company.cash - bonusPaid);
+          stats.bonusPaid = bonusPaid;
+          stats.wagesPaid = round2(stats.wagesPaid + bonusPaid);
+        }
+      }
+    }
+    // 维护最近 bonusEveryMonths 个月税后利润（当前月最后入队），供下次季度评估与紧急裁员判定。
+    company.recentProfits = [...company.recentProfits, stats.profit].slice(-bonusWindow);
+
     if (arrears > 0.01) {
       log.push({
         tick: world.time.tick,
@@ -209,25 +277,15 @@ export function settleCompanyFinance(
       });
     }
 
-    // 产能调整：盈利且库存偏低时小幅扩张，亏损或库存过高时收缩。
-    const stock = company.inventory[company.recipeOutput] ?? 0;
-    let capacityChange = 0;
-    if (stats.profit > 0 && stock < company.capacity * 0.5) {
-      capacityChange = company.capacity * config.company.capacityGrowth;
-    } else if (stats.profit < 0 || stock > company.capacity * 1.4) {
-      capacityChange = -company.capacity * config.company.capacityShrink;
-    }
-    const minCapacity = Math.max(1, company.baseCapacity * config.company.minCapacityMultiple);
-    const nextCapacity = clamp(
-      company.capacity + capacityChange,
-      minCapacity,
-      company.maxCapacity,
-    );
-    stats.capacityChange = round2(nextCapacity - company.capacity);
-    company.capacity = round2(nextCapacity);
+    // v0.9：产能完全由设备资产决定（购买/出售设备时重算），不再随盈亏自动增减；
+    // 避免“付费扩产”与设备购买重复获得产能。capacityChange 仅由设备交易写入。
+    stats.capacityChange = 0;
 
     corporateTaxByCity[city.id] = round2((corporateTaxByCity[city.id] ?? 0) + taxPaid);
-    privateWagesByCity[city.id] = round2((privateWagesByCity[city.id] ?? 0) + paidWages);
+    // 私营工资口径含季度奖金（工资性收入），个税与居民工资拆分因此自动覆盖奖金。
+    privateWagesByCity[city.id] = round2(
+      (privateWagesByCity[city.id] ?? 0) + paidWages + bonusPaid,
+    );
   }
 
   if (totalArrears > 0.01) {

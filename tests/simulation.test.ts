@@ -87,7 +87,7 @@ describe('模拟核心', () => {
     expect(JSON.stringify(a.state)).toBe(JSON.stringify(b.state));
   });
 
-  it('玩家注资会真实改变企业现金、产能和玩家持股', () => {
+  it('玩家注资会真实改变企业现金和玩家持股（v0.9：注资不直接扩产，产能需真实购买设备）', () => {
     const sim = Simulation.create();
     const company = sim.state.companies.find((c) => c.id === 'lp-food')!;
     const cashBefore = company.cash;
@@ -98,7 +98,9 @@ describe('模拟核心', () => {
     expect(result.shares).toBeGreaterThan(0);
     expect(sim.state.player.cash).toBe(playerBefore - 500_000);
     expect(company.cash).toBeGreaterThan(cashBefore);
-    expect(company.capacity).toBeGreaterThan(capacityBefore);
+    // v0.9：注资只增加经营现金与股份，不再直接增加产能；扩产必须通过设备购买。
+    expect(company.capacity).toBe(capacityBefore);
+    expect(company.equipmentCapacity).toBe(capacityBefore);
     const holding = sim.state.player.holdings.find((h) => h.companyId === 'lp-food')!;
     expect(holding.shares).toBeGreaterThan(0);
     expect(playerNetWorth(sim.state)).toBeGreaterThan(0);
@@ -142,14 +144,15 @@ describe('模拟核心', () => {
     expect(tamperedResult.error).toContain('不变量');
   });
 
-  it('GDP 等于企业增加值合计，不使用营业额或工资', () => {
+  it('GDP 等于企业增加值合计加公共服务工资，不使用营业额', () => {
     const sim = Simulation.create();
     run(sim, 4);
     for (const city of sim.state.cities) {
       const sum = sim.state.lastTick.productionRecords
         .filter((record) => record.cityId === city.id)
         .reduce((total, record) => total + record.valueAdded, 0);
-      expect(city.gdp).toBeCloseTo(Math.max(0, sum), 2);
+      // v0.9：公共服务增加值 = 当月实际计入居民收入的公共部门工资。
+      expect(city.gdp).toBeCloseTo(Math.max(0, sum + city.lastMonth.publicWageBill), 2);
     }
   });
 });

@@ -1,11 +1,4 @@
-import type {
-  City,
-  Company,
-  GoodId,
-  HouseholdGroup,
-  OccupationClass,
-  WorldState,
-} from '../contracts/types';
+import type { City, Company, GoodId, WorldState } from '../contracts/types';
 import type { DemoConfig } from '../../data/config';
 import { GOODS } from '../../data/demo-data';
 import type { CityLedgers } from './markets';
@@ -22,6 +15,8 @@ import {
   borrowForConsumption,
   consumptionLoanEligibility,
   householdConsumerBudgetSnapshot,
+  householdGroupNeedFactor,
+  withdrawHouseholdDeposit,
 } from '../population/household-finance';
 import { clamp, round2 } from '../core/math';
 import { taxAccrualOf } from '../government/taxes';
@@ -52,18 +47,6 @@ export interface ConsumerResult {
   unmet: Record<GoodId, number>;
   /** v0.5：按居民群体拆分的消费明细（key = householdGroupId）。 */
   byGroup?: Record<string, ConsumerGroupResult>;
-}
-
-/** 群体的消费需要系数：就业群体（含公共部门）最高，失业与非劳动力更低。 */
-function groupNeedFactor(occupation: OccupationClass, config: DemoConfig): number {
-  switch (occupation) {
-    case 'unemployed':
-      return config.consumer.unemployedNeedFactor;
-    case 'nonLabor':
-      return config.consumer.nonLaborNeedFactor;
-    default:
-      return config.consumer.employedNeedFactor;
-  }
 }
 
 function emptyGoodsRecord(): Record<GoodId, number> {
@@ -220,6 +203,8 @@ export function runConsumerMarket(
 
   for (const { group, snapshot } of orderedGroups) {
     const budget = snapshot.cashBudget;
+    // v0.9 T1：成交后按实际缺口从存款提现（存款→手头现金，再扣真实消费），先于消费贷结算。
+    const cashAtStart = round2(Math.max(0, group.cash));
     const groupBought = emptyGoodsRecord();
     const groupUnmet = emptyGoodsRecord();
     const desiredQty = new Map<GoodId, number>();
@@ -233,7 +218,7 @@ export function runConsumerMarket(
       const qty = round2(
         group.people *
           good.perCapitaMonthlyNeed *
-          groupNeedFactor(group.occupation, config) *
+          householdGroupNeedFactor(group.occupation, config) *
           clamp(elasticity, 0.55, 1.85),
       );
       desiredQty.set(good.id, qty);
@@ -292,6 +277,9 @@ export function runConsumerMarket(
         groupUnmet[good.id] = round2(effectiveQty - boughtQty);
       }
     }
+
+    // 现金段成交额（不含随后由消费贷融资的部分）：只对超出“开始消费时手头现金”的部分提存款。
+    const cashSegment = round2(groupSpend);
 
     // 4) 资金缺口补足（消费贷）：先按真实成交规则报价并校验授信，再原子提交“放款+成交”。
     //    v0.7 验收问题 3：任何一步不满足都不得成交，绝不允许“市场记成交、群体支付 0”。
@@ -410,6 +398,11 @@ export function runConsumerMarket(
       const supplyShortfall = round2(gapQty - localQty);
       groupUnmet[good.id] = supplyShortfall;
       unmetFunding = round2(unmetFunding + localQty * price);
+    }
+    // 3b) 支付顺序：手头现金 → 提取存款（真实缺口、≤月初存款5%）→ 消费贷。
+    const cashShortfall = round2(Math.max(0, cashSegment - cashAtStart));
+    if (cashShortfall > 0) {
+      withdrawHouseholdDeposit(world, group, config, cashShortfall, tick);
     }
     groupSpend = round2(groupSpend + loanFinanced);
 

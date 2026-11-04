@@ -80,6 +80,33 @@ export const GOODS: GoodDefinition[] = [
     perCapitaMonthlyNeed: 5,
     description: '居民日常消费品，使用金属件与能源生产。',
   },
+  {
+    id: 'farmEquipment',
+    name: '农业设备',
+    category: 'producer',
+    unit: '台',
+    basePrice: 120_000,
+    perCapitaMonthlyNeed: 0,
+    description: '服务农业与纤维农场的设备；企业购买后计入农场设备资产并形成产能。',
+  },
+  {
+    id: 'industryEquipment',
+    name: '工业设备',
+    category: 'producer',
+    unit: '台',
+    basePrice: 200_000,
+    perCapitaMonthlyNeed: 0,
+    description: '服务食品、纺织、成衣、日用品与金属加工的设备。',
+  },
+  {
+    id: 'energyEquipment',
+    name: '能源设备',
+    category: 'producer',
+    unit: '台',
+    basePrice: 160_000,
+    perCapitaMonthlyNeed: 0,
+    description: '服务能源生产企业的发电与输配设备。',
+  },
 ];
 
 export const RECIPES: Record<GoodId, Recipe> = {
@@ -135,6 +162,30 @@ export const RECIPES: Record<GoodId, Recipe> = {
     ],
     description: '1 单位日用品消耗 0.22 金属件与 0.08 能源。',
   },
+  farmEquipment: {
+    output: 'farmEquipment',
+    inputs: [
+      { good: 'metal', qty: 900 },
+      { good: 'energy', qty: 300 },
+    ],
+    description: '1 台农业设备消耗 900 金属件与 300 能源（首版简化配方）。',
+  },
+  industryEquipment: {
+    output: 'industryEquipment',
+    inputs: [
+      { good: 'metal', qty: 1_400 },
+      { good: 'energy', qty: 500 },
+    ],
+    description: '1 台工业设备消耗 1,400 金属件与 500 能源（首版简化配方）。',
+  },
+  energyEquipment: {
+    output: 'energyEquipment',
+    inputs: [
+      { good: 'metal', qty: 1_100 },
+      { good: 'energy', qty: 400 },
+    ],
+    description: '1 台能源设备消耗 1,100 金属件与 400 能源（首版简化配方）。',
+  },
 };
 
 /** 每名员工每月可生产的产出单位数（演示参数）。 */
@@ -147,6 +198,9 @@ export const PRODUCTIVITY: Record<GoodId, number> = {
   metal: 100,
   energy: 300,
   household: 140,
+  farmEquipment: 0.01,
+  industryEquipment: 0.01,
+  energyEquipment: 0.01,
 };
 
 export interface CitySeed {

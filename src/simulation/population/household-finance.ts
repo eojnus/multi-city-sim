@@ -5,7 +5,9 @@
  * - 预算公式：参考消费额 = 上月实际可支配收入 × lastIncomeShare(0.8) + 手头现金 × cashShare(0.05)；
  *   现金预算 = min(现金, max(0, 参考消费额))；有积蓄即可消费，上月收入不是硬上限。
  *   上月收入是“上一个月结后的可支配收入”，还款从现金里扣，不从收入基数里再扣（避免双重扣减）。
- * - 银行存款首版不自动取出（depositsIncluded=false），不偷偷把存款复制到手头。
+ * - v0.9 T1：常规预算之外，若基本需求（food）存在资金缺口，允许在单月“月初存款×5%”上限内
+ *   原子提取存款补足（存款→手头现金，depositWithdrawn 可审计），提取额不超过真实资金缺口与可用存款；
+ *   支付顺序 = 手头现金 → 提取存款 → 消费贷。存款只是提现来源，不偷偷复制到手头。
  * - 消费贷款：额度 = max(0, 群体财产基准 × creditLimitRate − 未偿消费贷本金)，
  *   财产基准 = 手头现金 + 银行存款 + 按人口折算的居民投资实体权益（与 householdPerCapitaWealth 同口径）。
  *   贷款是真实债务，资金从银行支付，**不计入居民收入**；禁止无限信用。
@@ -24,13 +26,87 @@ import type {
   WorldState,
 } from '../contracts/types';
 import type { DemoConfig } from '../../data/config';
+import { GOODS } from '../../data/demo-data';
 import { round2 } from '../core/math';
-import { depositAccountFor } from '../banking/banking';
+import { depositAccountFor, withdraw } from '../banking/banking';
 import { cityInvestorEquity, householdGroupsOfCity } from './household-groups';
+
+/**
+ * v0.9 T1：存款提取上限（相对“月初存款”）——单月最多提取 5%。
+ * 提取是存款→手头现金的转账，不创造货币；用于补足基本消费需求（food）。
+ */
+const DEPOSIT_WITHDRAWAL_MONTHLY_SHARE = 0.05;
 
 /** 群体在银行（owner.kind='household'）的存款余额。 */
 function groupDepositBalance(world: WorldState, groupId: string): number {
   return round2(Math.max(0, depositAccountFor(world, { kind: 'household', id: groupId })?.balance ?? 0));
+}
+
+/** 群体的消费需要系数：就业群体（含公共部门）最高，失业与非劳动力更低。 */
+export function householdGroupNeedFactor(
+  occupation: OccupationClass,
+  config: DemoConfig,
+): number {
+  switch (occupation) {
+    case 'unemployed':
+      return config.consumer.unemployedNeedFactor;
+    case 'nonLabor':
+      return config.consumer.nonLaborNeedFactor;
+    default:
+      return config.consumer.employedNeedFactor;
+  }
+}
+
+/** 群体“基本需求”月成本（food 的按人月需求，不含价格弹性；用于判断积蓄提取缺口）。 */
+function basicNeedCost(world: WorldState, group: HouseholdGroup, config: DemoConfig): number {
+  const city = world.cities.find((entry) => entry.id === group.cityId);
+  const food = GOODS.find((good) => good.id === 'food');
+  if (!food) return 0;
+  const price = city?.market?.food?.price ?? food.basePrice;
+  const qty = group.people * food.perCapitaMonthlyNeed * householdGroupNeedFactor(group.occupation, config);
+  return round2(qty * Math.max(0.01, price));
+}
+
+/**
+ * 本月剩余可提取额度 = max(0, 月初存款×5% − 本月已提取)。
+ * 月初存款用“当前余额 + 本月已提取”反推（同月内只有提取会减少余额；
+ * 存款利息在步骤 5 先入账，因此这里已是计息后的月初余额）。
+ */
+export function householdDepositWithdrawalRemaining(
+  world: WorldState,
+  group: HouseholdGroup,
+): number {
+  const balance = groupDepositBalance(world, group.id);
+  const withdrawn = round2(Math.max(0, group.lastMonth.depositWithdrawn ?? 0));
+  const monthStart = round2(balance + withdrawn);
+  if (monthStart <= 0) return 0;
+  const cap = round2(monthStart * DEPOSIT_WITHDRAWAL_MONTHLY_SHARE);
+  return round2(Math.max(0, cap - withdrawn));
+}
+
+/**
+ * 原子地从该群体存款账户提取到本群体现金（存款减少、现金增加，总量不变），
+ * 并累加 HouseholdMonthlyStats.depositWithdrawn。取款额自动封顶于
+ * “本月剩余额度、存款余额、申请额”三者最小值；失败返回 0（不留半期状态）。
+ * 仅应在真实消费成交后按实际缺口调用，避免“先提钱再闲置”。
+ */
+export function withdrawHouseholdDeposit(
+  world: WorldState,
+  group: HouseholdGroup,
+  config: DemoConfig,
+  amount: number,
+  tick: number,
+): number {
+  const requested = round2(amount);
+  if (!Number.isFinite(requested) || requested <= 0) return 0;
+  const remaining = householdDepositWithdrawalRemaining(world, group);
+  const balance = groupDepositBalance(world, group.id);
+  const take = round2(Math.max(0, Math.min(requested, remaining, balance)));
+  if (take <= 0) return 0;
+  const result = withdraw(world, { kind: 'household', id: group.id }, take, config, tick);
+  if (!result.ok) return 0;
+  group.lastMonth.depositWithdrawn = round2((group.lastMonth.depositWithdrawn ?? 0) + take);
+  return take;
 }
 
 /** 居民投资实体权益按人口折算到该群体（与 householdPerCapitaWealth 同口径，不重复计价）。 */
@@ -221,7 +297,15 @@ function buildSnapshot(
   const incomeComponent = round2(lastMonthIncome * budgetConfig.lastIncomeShare);
   const cashComponent = round2(cash * budgetConfig.cashShare);
   const referenceSpend = round2(incomeComponent + cashComponent);
-  const cashBudget = round2(Math.min(cash, Math.max(0, referenceSpend)));
+  const baseCashBudget = round2(Math.min(cash, Math.max(0, referenceSpend)));
+  // v0.9 T1：常规预算 = min(现金, 0.8×上月收入 + 0.05×现金)；当它不足以覆盖基本需求（food）时，
+  // 允许在“月初存款×5%”上限内提取存款补足，且提取额不超过真实资金缺口（基本需求成本 − 手头现金）。
+  const basicCost = basicNeedCost(world, group, config);
+  const fundingGap = round2(Math.max(0, basicCost - cash));
+  const withdrawalAllowance = round2(
+    Math.min(fundingGap, householdDepositWithdrawalRemaining(world, group), groupDepositBalance(world, group.id)),
+  );
+  const cashBudget = round2(baseCashBudget + withdrawalAllowance);
   const loanAvailable = householdCreditLimit(world, group, config);
   const snapshot: ConsumerBudgetSnapshot = {
     tick,
@@ -240,7 +324,7 @@ function buildSnapshot(
     actualSpend: 0,
     unmetByFunding: 0,
     depositsIncluded: budgetConfig.depositsIncluded,
-    note: '【暂定】现金预算 = min(现金, 0.8×上月可支配收入 + 0.05×现金)；存款首版不进预算；有效需求不含可借额度（#26）。',
+    note: '【v0.9 T1】现金预算 = min(手头现金, 0.8×上月可支配收入 + 0.05×现金) + 基本需求缺口补充；补充 ≤ 月初存款×5% 且 ≤ 真实资金缺口（基本需求成本−手头现金）；存款只是提现来源、不是复制品；有效需求不含可借额度（#26）。',
   };
   group.lastMonth.budget = cashBudget;
   return snapshot;

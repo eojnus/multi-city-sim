@@ -1,7 +1,36 @@
-import type { City, LogEntry, WorldState } from '../contracts/types';
+import type { City, Company, LogEntry, WorldState } from '../contracts/types';
 import type { DemoConfig } from '../../data/config';
+import { round2 } from '../core/math';
 import { setCityPopulation, syncCityPopulationFromAllocations } from '../population/population';
-import { setCompanyEmployees } from '../companies/company';
+import { monthlyWageBill, setCompanyEmployees } from '../companies/company';
+import { availableCredit } from '../banking/credit';
+
+/**
+ * v0.9 T5：企业是否满足“紧急裁员”情形。
+ *
+ * 条件（全部满足）：
+ * 1. 最近 config.labor.emergencyLossMonths 个月（默认 2）经营利润均 < 0；
+ * 2. 现金 + 合法可借授信 < config.labor.emergencyCashWageMonths 个月（默认 1）工资。
+ *    授信取 availableCredit（同一主体全部银行贷款共享额度），因此“无资金”既包括现金耗尽，
+ *    也包括授信耗尽；本判定只放宽当月裁员速度上限，不改变“需求下降才裁员”的岗位依据。
+ * 该判定不修改任何状态；`recentProfits` 由 finance.settleCompanyFinance 每月维护。
+ */
+function isEmergencyLayoffEligible(
+  world: WorldState,
+  company: Company,
+  config: DemoConfig,
+): boolean {
+  const lossMonths = Math.max(1, Math.round(config.labor.emergencyLossMonths));
+  if (company.recentProfits.length < lossMonths) return false;
+  const recent = company.recentProfits.slice(-lossMonths);
+  if (!recent.every((profit) => profit < 0)) return false;
+  const wageMonths = Math.max(0, config.labor.emergencyCashWageMonths);
+  const liquidity = round2(
+    company.cash +
+      availableCredit(world, { kind: 'company', id: company.id }, config),
+  );
+  return liquidity < round2(monthlyWageBill(company, config) * wageMonths);
+}
 
 function layoffCompanies(
   city: City,
@@ -51,13 +80,32 @@ export function reconcileLabor(
       .filter((company) => company.cityId === city.id)
       .sort((a, b) => a.id.localeCompare(b.id));
 
-    // 1) 需求下降时逐步裁员（演示：每月最多裁减 8%），避免断崖式失业。
+    // 1) 需求下降时逐步裁员：常规每月最多裁减 maxMonthlyLayoffRate（默认 8%），
+    //    避免断崖式失业；v0.9 起严重情形（连续亏损 + 现金/授信不足 1 个月工资）允许
+    //    当月上限提高到 emergencyLayoffShare（默认 30%），超出常规上限的部分记入
+    //    stats.emergencyLayoffs（常规部分不计入，便于审计区分）。裁员依据仍是生产计划需求
+    //    jobDemand：最多裁到需求人数为止，不得裁掉仍在计划中的岗位，也不得裁成负数。
     for (const company of companies) {
-      if (company.employees > company.jobDemand) {
-        const gradualFloor = Math.ceil(
-          company.employees * (1 - config.labor.maxMonthlyLayoffRate),
-        );
-        setCompanyEmployees(company, Math.max(company.jobDemand, gradualFloor));
+      if (company.employees <= company.jobDemand) continue;
+      const regularCut = Math.max(
+        0,
+        company.employees -
+          Math.ceil(company.employees * (1 - config.labor.maxMonthlyLayoffRate)),
+      );
+      const emergency = isEmergencyLayoffEligible(world, company, config);
+      const emergencyShare = Math.max(0, Math.min(1, config.labor.emergencyLayoffShare));
+      const emergencyCut = Math.max(
+        0,
+        company.employees - Math.ceil(company.employees * (1 - emergencyShare)),
+      );
+      const allowedCut = emergency ? Math.max(regularCut, emergencyCut) : regularCut;
+      const desiredCut = company.employees - company.jobDemand;
+      const cut = Math.max(0, Math.min(desiredCut, allowedCut, company.employees));
+      if (cut > 0) {
+        setCompanyEmployees(company, company.employees - cut);
+        if (emergency && cut > regularCut) {
+          company.lastMonth.emergencyLayoffs = cut - regularCut;
+        }
       }
     }
     if (city.publicSector.employees > city.publicSector.jobs) {

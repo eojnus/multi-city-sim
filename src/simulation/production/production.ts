@@ -22,7 +22,18 @@ import { workforceSkillMultiplier } from '../labor/workforce';
 import { leaderSectorMultiplier } from '../politics/politics';
 import { keyIndustryFocus } from '../policies/query';
 
+/**
+ * 本月生产目标。
+ *
+ * v0.9：优先读取企业生产计划的 plannedOutput（由设备产能、劳动产能、原料资金与
+ * “近 3 月销量 + 目标库存”共同决定）；旧档/新企业没有计划时回退旧口径
+ * “产能 × 利用率”。实际产量仍由 runProduction 再按劳动与原料收紧，不会超计划。
+ */
 export function productionTarget(company: Company): number {
+  const planned = company.productionPlan?.plannedOutput;
+  if (typeof planned === 'number' && Number.isFinite(planned) && planned >= 0) {
+    return Math.max(0, round2(planned));
+  }
   return Math.max(0, round2(company.capacity * company.utilization));
 }
 

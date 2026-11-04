@@ -390,6 +390,13 @@ describe('居民群体：收入、消费与储蓄入账', () => {
     const sim = Simulation.create();
     const city = cityOf(sim.state, 'lanport');
     for (const group of householdGroupsOfCity(sim.state, city.id)) group.cash = 0;
+    // v0.9 T1：存在基本需求缺口时允许从存款提取（≤ 月初存款 5%），这会抬高现金预算。
+    // 本用例只验证“现金预算不含贷款额度”，故同时清零存款，聚焦纯现金口径。
+    for (const group of householdGroupsOfCity(sim.state, city.id)) {
+      group.lastMonth.depositWithdrawn = 0;
+      const account = depositAccountFor(sim.state, { kind: 'household', id: group.id });
+      if (account) account.balance = 0;
+    }
 
     const result = sim.tick();
     expect(result.ok, result.error).toBe(true);

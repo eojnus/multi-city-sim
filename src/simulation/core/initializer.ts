@@ -20,6 +20,7 @@ import {
   RECIPES,
   TRADE_ROUTE_SEEDS,
 } from '../../data/demo-data';
+import { emptyEquipmentAssets, equipmentKindForSector } from '../equipment/equipment';
 import { createEmptyInventory, setCompanyEmployees, monthlyWageBill } from '../companies/company';
 import { setCityPopulation, laborForceFor } from '../population/population';
 import { round2, allocateProportionally } from '../core/math';
@@ -104,7 +105,12 @@ function seedInitialHouseholdIncome(world: WorldState, config: DemoConfig): void
 }
 
 export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState {
-  const cities: City[] = CITY_SEEDS.map((seed) => ({
+  const cities: City[] = CITY_SEEDS.map((seed) => {
+    // v0.9：新开局人口按配置倍数放大；非劳动人口占初始总人口固定比例，其余为劳动力。
+    const total = Math.round(seed.totalPopulation * config.population.initialPopulationMultiplier);
+    const nonLabor = Math.round(total * config.population.initialNonLaborShare);
+    const laborForce = total - nonLabor;
+    return {
     id: seed.id,
     name: seed.name,
     englishName: seed.englishName,
@@ -112,11 +118,11 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
     color: seed.color,
     region: { ...seed.region },
     population: {
-      total: seed.totalPopulation,
+      total,
       employed: 0,
       unemployed: 0,
-      nonLabor: seed.totalPopulation,
-      laborForce: 0,
+      nonLabor,
+      laborForce,
     },
     publicSector: {
       jobs: seed.publicJobs,
@@ -159,8 +165,8 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
       trainedLastTick: 0,
     },
     housing: {
-      units: Math.round(seed.totalPopulation * 0.32),
-      demand: Math.round(seed.totalPopulation * 0.3),
+      units: Math.round(total * 0.32),
+      demand: Math.round(total * 0.3),
       rentSubsidyPaid: 0,
     },
     // v0.7：政府债务与破产为全新状态；GDP 窗口在全部企业/市场就绪后统一播种估计值。
@@ -168,7 +174,8 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
     gdpWindow: [],
     gdpEstimate: null,
     bankruptcy: { status: 'solvent', tick: null, recordId: null, debtRatio: null },
-  }));
+    };
+  });
 
   const companies: Company[] = COMPANY_SEEDS.map((seed, companyIndex) => {
     const city = cities.find((candidate) => candidate.id === seed.cityId);
@@ -179,6 +186,12 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
     const capacity = baseCapacity;
     const target = capacity * config.company.initialUtilization;
     const inventory = createEmptyInventory();
+    const equipment = emptyEquipmentAssets();
+    const equipKind = equipmentKindForSector(seed.sector, config);
+    equipment[equipKind] = Math.max(
+      1,
+      Math.round(baseCapacity / Math.max(1, config.equipment.catalog[equipKind].capacityPerUnit * tech)),
+    );
     const recipe = RECIPES[seed.recipeOutput];
     for (const input of recipe.inputs) {
       inventory[input.good] = round2(
@@ -206,6 +219,11 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
       wageRate: seed.wageRate,
       priceFactor: seed.priceFactor,
       inventory,
+      equipment,
+      equipmentCapacity: capacity,
+      salesHistory: [],
+      productionPlan: null,
+      recentProfits: [],
       totalShares: config.company.totalSharesDefault,
       lastMonth: {
         revenue: 0,
@@ -222,6 +240,10 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
         unmetDemand: 0,
         capacityChange: 0,
         dividendIncome: 0,
+        bonusPaid: 0,
+        equipmentPurchased: 0,
+        equipmentSold: 0,
+        emergencyLayoffs: 0,
       },
       previousMonth: {
         revenue: 0,
@@ -238,6 +260,10 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
         unmetDemand: 0,
         capacityChange: 0,
         dividendIncome: 0,
+        bonusPaid: 0,
+        equipmentPurchased: 0,
+        equipmentSold: 0,
+        emergencyLayoffs: 0,
       },
       dividendPayoutRatio: config.governance.defaultDividendPayoutRatio,
       note: seed.note,
@@ -338,6 +364,16 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
     householdFinance: createEmptyHouseholdFinanceState(),
     // v0.8：税收账本（空账本；旧档迁移时同样为空，不补记过去税额）。
     taxes: createEmptyTaxState(),
+    // v0.9：政府开局设备库存（仅新开局注入，用于启动设备产业与创办企业；不是每月补贴）。
+    equipmentMarket: {
+      initialStock: {
+        farm: config.equipment.governmentInitialStockPerCity.farm * CITY_SEEDS.length,
+        industry: config.equipment.governmentInitialStockPerCity.industry * CITY_SEEDS.length,
+        energy: config.equipment.governmentInitialStockPerCity.energy * CITY_SEEDS.length,
+      },
+      offers: [],
+      lastMonthSold: emptyEquipmentAssets(),
+    },
     history: [],
     log: [],
     lastTick: {

@@ -146,6 +146,7 @@ export function checkInvariants(world: WorldState, audits: GoodsAudit[] = []): s
   problems.push(...checkHouseholds(world));
   problems.push(...checkManagement(world));
   problems.push(...checkBanking(world));
+  problems.push(...checkEquipment(world));
   // ---- v0.7 政府债务、债券、居民消费金融与 GDP 判定窗口 ----
   checkGovernmentDebtInvariants(world, problems);
 
@@ -1016,4 +1017,82 @@ export function checkGovernmentDebtInvariants(world: WorldState, problems: strin
       }
     }
   }
+}
+
+/** v0.9 设备与产能一致性：设备台数整数非负、设备产能与缓存一致、计划字段合法、设备市场记账合法。 */
+function checkEquipment(world: WorldState): string[] {
+  const problems: string[] = [];
+  if (!world.equipmentMarket || !world.equipmentMarket.initialStock) {
+    return ['世界缺少设备市场数据'];
+  }
+  const kinds = ['farm', 'industry', 'energy'] as const;
+  for (const kind of kinds) {
+    const stock = world.equipmentMarket.initialStock[kind];
+    if (!Number.isFinite(stock) || stock < 0) {
+      problems.push(`设备市场初始库存 ${kind}: 数值非法 (${stock})`);
+    }
+    const sold = world.equipmentMarket.lastMonthSold?.[kind] ?? 0;
+    if (!Number.isFinite(sold) || sold < 0) {
+      problems.push(`设备市场本月成交 ${kind}: 数值非法 (${sold})`);
+    }
+  }
+  for (const offer of world.equipmentMarket.offers) {
+    if (!kinds.includes(offer.kind)) {
+      problems.push(`设备挂单 ${offer.id}: 设备类别非法 (${String(offer.kind)})`);
+    }
+    if (!Number.isInteger(offer.units) || offer.units <= 0) {
+      problems.push(`设备挂单 ${offer.id}: 台数非法 (${offer.units})`);
+    }
+    if (!(offer.askPrice > 0)) {
+      problems.push(`设备挂单 ${offer.id}: 价格非法 (${offer.askPrice})`);
+    }
+    if (!world.companies.some((company) => company.id === offer.companyId)) {
+      problems.push(`设备挂单 ${offer.id}: 引用不存在的企业 ${offer.companyId}`);
+    }
+  }
+  for (const company of world.companies) {
+    if (!company.equipment) {
+      problems.push(`${company.name}: 缺少设备资产`);
+      continue;
+    }
+    for (const kind of kinds) {
+      const units = company.equipment[kind];
+      if (!Number.isInteger(units) || units < 0) {
+        problems.push(`${company.name}: ${kind} 设备台数非法 (${units})`);
+      }
+    }
+    if (!Number.isFinite(company.equipmentCapacity) || company.equipmentCapacity < 0) {
+      problems.push(`${company.name}: 设备产能非法 (${company.equipmentCapacity})`);
+    }
+    if (Math.abs(company.capacity - company.equipmentCapacity) > 0.01) {
+      problems.push(
+        `${company.name}: 产能 ${company.capacity} 与设备产能 ${company.equipmentCapacity} 不一致`,
+      );
+    }
+    if (!Array.isArray(company.salesHistory) || company.salesHistory.length > 3) {
+      problems.push(`${company.name}: 销量历史长度异常 (${company.salesHistory?.length ?? 'n/a'})`);
+    }
+    if (!Array.isArray(company.recentProfits) || company.recentProfits.length > 3) {
+      problems.push(`${company.name}: 近期利润长度异常 (${company.recentProfits?.length ?? 'n/a'})`);
+    }
+    const plan = company.productionPlan;
+    if (plan) {
+      if (!Number.isFinite(plan.plannedOutput) || plan.plannedOutput < 0) {
+        problems.push(`${company.name}: 生产计划产量非法 (${plan.plannedOutput})`);
+      }
+      if (!Number.isInteger(plan.plannedJobs) || plan.plannedJobs < 0) {
+        problems.push(`${company.name}: 生产计划岗位非法 (${plan.plannedJobs})`);
+      }
+      if (!Number.isFinite(plan.equipmentLimit) || plan.equipmentLimit < 0) {
+        problems.push(`${company.name}: 生产计划设备产能上限非法 (${plan.equipmentLimit})`);
+      }
+      if (!Number.isFinite(plan.laborLimit) || plan.laborLimit < 0) {
+        problems.push(`${company.name}: 生产计划劳动产能上限非法 (${plan.laborLimit})`);
+      }
+      if (typeof plan.emergency !== 'boolean' || !Array.isArray(plan.reasons)) {
+        problems.push(`${company.name}: 生产计划 emergency/reasons 非法`);
+      }
+    }
+  }
+  return problems;
 }

@@ -135,10 +135,25 @@ describe('AC-I10 公开破产面板权限（非市长可见破产事实、不见
   });
 
   it('I10e 未破产城市：无公开破产面板、公开投影为 null', () => {
-    expect(solventCityId).toBeTruthy();
-    expect(store.publicBankruptcy(solventCityId)).toBeNull();
-    store.selectCity(solventCityId);
-    const html = renderRightCity(store, panelState);
-    expect(html).not.toContain('data-testid="public-bankruptcy-notice"');
+    // v0.9 序列中三座城市都会在 36 月内破产，因此这里构造一个“未破产”城市视图，
+    // 只验证投影与面板逻辑（不改动真实破产记录，断言后恢复原状态）。
+    const cityId = solventCityId || bankruptCityId;
+    const city = store.world.cities.find((entry) => entry.id === cityId)!;
+    const savedGovernment = city.government.bankruptcy;
+    const savedMirror = city.bankruptcy;
+    const savedRecords = city.government.records;
+    city.government.bankruptcy = { status: 'solvent', tick: null, recordId: null, debtRatio: null };
+    city.bankruptcy = { status: 'solvent', tick: null, recordId: null, debtRatio: null };
+    city.government.records = [];
+    try {
+      expect(store.publicBankruptcy(cityId)).toBeNull();
+      store.selectCity(cityId);
+      const html = renderRightCity(store, panelState);
+      expect(html).not.toContain('data-testid="public-bankruptcy-notice"');
+    } finally {
+      city.government.bankruptcy = savedGovernment;
+      city.bankruptcy = savedMirror;
+      city.government.records = savedRecords;
+    }
   });
 });

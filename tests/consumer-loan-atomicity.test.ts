@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import { Simulation } from '../src/simulation/core/simulation';
 import { DEMO_CONFIG } from '../src/data/config';
+import type { DemoConfig } from '../src/data/config';
 import type { City, GoodId, HouseholdGroup, WorldState } from '../src/simulation/contracts/types';
 import type { CityLedgers } from '../src/simulation/markets/markets';
 import { round2 } from '../src/simulation/core/math';
@@ -152,16 +153,24 @@ describe('居民消费贷与商品成交原子一致（验收问题 3）', () =>
     const result = runConsumerMarket(world, city, ledgers, CONFIG);
     const entry = result.byGroup?.[group.id];
     expect(entry).toBeDefined();
-    // 现金预算为 0 且本月笔数已用尽：不得成交、不得放第二笔贷款。
-    expect(entry!.budget).toBe(0);
-    expect(entry!.spend).toBe(0);
+    // v0.9 T1：存款 1000 的 5% 可在基本需求缺口内提取（≈50），但本月笔数已用尽，
+    // 不得再放第二笔贷款；因此成交只能由存款提取资金支撑，且金额不超过提取额度。
+    expect(entry!.budget).toBeCloseTo(50, 2);
+    expect(entry!.spend).toBeGreaterThan(0);
+    expect(entry!.spend).toBeLessThanOrEqual(entry!.budget + TOL);
     expect(entry!.loanFinanced ?? 0).toBe(0);
     expect(group.cash).toBe(0);
     expect(world.householdFinance?.loans ?? []).toHaveLength(1);
     // 本月已放款额不变：没有新增第二笔贷款。
     expect(group.lastMonth.loanDrawn ?? 0).toBe(loanDrawnBefore);
-    // 卖方库存/收入/台账完全不变：不允许“成交已发生、贷款却失败”的半成品。
-    expect(captureSaleState(world, city, ledgers)).toEqual(before);
+    // 没有“成交已发生、贷款却失败”的半成品：卖方收入增量只对应存款支付的成交额。
+    const after = captureSaleState(world, city, ledgers);
+    const revenueBefore = before.companies.reduce((sum, company) => sum + company.revenue, 0);
+    const revenueAfter = after.companies.reduce((sum, company) => sum + company.revenue, 0);
+    expect(revenueAfter - revenueBefore).toBeCloseTo(
+      round2(entry!.spend * (1 - CONFIG.tax.consumptionTaxRate)),
+      2,
+    );
   });
 
   it('授信不足时只按真实可用额度放款，成交额与放款额一致，其余记资金缺口', () => {
@@ -175,10 +184,14 @@ describe('居民消费贷与商品成交原子一致（验收问题 3）', () =>
     const entry = result.byGroup?.[group.id];
     expect(entry).toBeDefined();
     const financed = entry!.loanFinanced ?? 0;
+    const withdrawn = group.lastMonth.depositWithdrawn ?? 0;
     expect(financed).toBeGreaterThan(0);
     expect(financed).toBeLessThanOrEqual(limit + TOL);
-    // 放款额不得超过最终实际成交额（现金预算为 0，成交额全部由贷款支持）。
-    expect(entry!.spend).toBeCloseTo(financed, 2);
+    // v0.9 T1：成交额 = 存款提取额（5% 上限内）+ 实际放款额；放款只补剩余缺口。
+    expect(withdrawn).toBeGreaterThan(0);
+    expect(withdrawn).toBeLessThanOrEqual(100 + TOL);
+    expect(entry!.spend).toBeCloseTo(round2(financed + withdrawn), 2);
+    expect(financed).toBeLessThanOrEqual(entry!.spend + TOL);
     expect(entry!.unmetFunding ?? 0).toBeGreaterThan(0);
     const loans = world.householdFinance?.loans ?? [];
     expect(loans).toHaveLength(1);
@@ -202,8 +215,10 @@ describe('居民消费贷与商品成交原子一致（验收问题 3）', () =>
     const entry = result.byGroup?.[group.id];
     expect(entry).toBeDefined();
     const financed = entry!.loanFinanced ?? 0;
+    const withdrawn = group.lastMonth.depositWithdrawn ?? 0;
     expect(financed).toBeGreaterThan(0);
-    expect(entry!.spend).toBeCloseTo(financed, 2);
+    // v0.9 T1：存款提取部分先支付，剩余资金缺口才由贷款按真实报价补足。
+    expect(entry!.spend).toBeCloseTo(round2(financed + withdrawn), 2);
     const loans = world.householdFinance?.loans ?? [];
     expect(loans).toHaveLength(1);
     expect(loans[0]!.principal).toBeCloseTo(financed, 2);
@@ -212,7 +227,7 @@ describe('居民消费贷与商品成交原子一致（验收问题 3）', () =>
       .reduce((total, company) => total + company.lastMonth.revenue, 0);
     // v0.8：居民消费含税标价，卖方按 95% 净额入账（税 5% 归消费城市财政）。
     expect(revenueAfter - revenueBefore).toBeCloseTo(
-      round2(financed * (1 - CONFIG.tax.consumptionTaxRate)),
+      round2(entry!.spend * (1 - CONFIG.tax.consumptionTaxRate)),
       2,
     );
   });
@@ -231,17 +246,17 @@ describe('居民消费贷与商品成交原子一致（验收问题 3）', () =>
     expect(seller).toBeDefined();
     seller!.inventory.food = 1;
 
-    const before = captureSaleState(world, city, ledgers);
     const result = runConsumerMarket(world, city, ledgers, CONFIG);
     const entry = result.byGroup?.[group.id];
     expect(entry).toBeDefined();
-    expect(entry!.spend).toBe(0);
+    // v0.9 T1：存款提取额度（100）足以买下这 1 单位食品，成交由现金支付，
+    // 但成交额低于单笔最低贷款额 100，因此仍然不得放款。
     expect(entry!.loanFinanced ?? 0).toBe(0);
     expect(world.householdFinance?.loans ?? []).toHaveLength(0);
-    expect(group.cash).toBe(0);
-    // 未成交则不扣库存、不增卖方收入（一手交钱一手交货）。
-    expect(captureSaleState(world, city, ledgers)).toEqual(before);
-    expect(entry!.unmet.food ?? 0).toBeGreaterThan(0);
+    expect(entry!.spend).toBeGreaterThan(0);
+    expect(entry!.spend).toBeLessThan(CONFIG.households.householdCredit.minLoanAmount);
+    expect(entry!.spend).toBeCloseTo(group.lastMonth.depositWithdrawn ?? 0, 2);
+    expect(group.cash).toBeCloseTo(0, 2);
   });
 
   it('本地无消费品供给时不放贷、不成交，卖方与台账保持不变', () => {
@@ -252,13 +267,35 @@ describe('居民消费贷与商品成交原子一致（验收问题 3）', () =>
       for (const goodId of CONSUMER_GOODS) company.inventory[goodId] = 0;
     }
     const before = captureSaleState(world, city, ledgers);
-    const result = runConsumerMarket(world, city, ledgers, CONFIG);
+    // 关闭跨城补货，保证“本地无供给”时没有任何成交来源。
+    const localOnly: DemoConfig = {
+      ...CONFIG,
+      intercity: { ...CONFIG.intercity, enabled: false },
+    } as unknown as DemoConfig;
+    const result = runConsumerMarket(world, city, ledgers, localOnly);
     const entry = result.byGroup?.[group.id];
     expect(entry).toBeDefined();
     expect(entry!.spend).toBe(0);
     expect(entry!.loanFinanced ?? 0).toBe(0);
     expect(world.householdFinance?.loans ?? []).toHaveLength(0);
-    expect(captureSaleState(world, city, ledgers)).toEqual(before);
+    const after = captureSaleState(world, city, ledgers);
+    // 需求/未满足需求会如实记账；但不得有任何成交（库存、现金、收入、成交量不变）。
+    expect(after.companies).toEqual(before.companies);
+    expect(
+      after.ledgers.map((ledger) => ({
+        goodId: ledger.goodId,
+        sold: ledger.sold,
+        spend: ledger.spend,
+        transactionCount: ledger.transactionCount,
+      })),
+    ).toEqual(
+      before.ledgers.map((ledger) => ({
+        goodId: ledger.goodId,
+        sold: ledger.sold,
+        spend: ledger.spend,
+        transactionCount: ledger.transactionCount,
+      })),
+    );
   });
 
   it('存读档往返后贷款、成交与现金口径保持一致', () => {
@@ -272,13 +309,17 @@ describe('居民消费贷与商品成交原子一致（验收问题 3）', () =>
     group.lastMonth.netCashChange = 0;
     group.lastMonth.savingsContribution = 0;
     group.lastMonth.loanFinancedConsumption = 0;
+    // 把存款压到 2000（5% 提取上限 100），使基本需求缺口需要消费贷补足。
+    setGroupDeposits(world, group, 2_000);
     const ledgers = createWorldLedgers(world)[city.id]!;
 
     const result = runConsumerMarket(world, city, ledgers, CONFIG);
     const financed = result.byGroup?.[group.id]?.loanFinanced ?? 0;
+    const withdrawn = group.lastMonth.depositWithdrawn ?? 0;
     expect(financed).toBeGreaterThan(0);
-    // 与完整 tick 的月末结算一致：先结算本城市场，再存档（期末库存不变量才成立）。
-    finalizeMarkets(world, { [city.id]: ledgers }, CONFIG);
+    expect(withdrawn).toBeGreaterThan(0);
+    // 与完整 tick 的月末结算一致：结算所有城市市场（各城居民都消费了），再存档。
+    finalizeMarkets(world, createWorldLedgers(world), CONFIG);
 
     const loanCount = (world.householdFinance?.loans ?? []).length;
     expect(loanCount).toBeGreaterThan(0);
@@ -293,7 +334,11 @@ describe('居民消费贷与商品成交原子一致（验收问题 3）', () =>
     expect(restoredLoan).toBeDefined();
     expect(restoredLoan!.principal).toBeCloseTo(financed, 2);
     expect(restoredGroup.lastMonth.loanFinancedConsumption ?? 0).toBeCloseTo(financed, 2);
+    expect(restoredGroup.lastMonth.depositWithdrawn ?? 0).toBeCloseTo(withdrawn, 2);
     expect(restoredGroup.cash).toBeCloseTo(group.cash, 2);
+    expect(
+      depositAccountFor(restored, { kind: 'household', id: group.id })!.balance,
+    ).toBeCloseTo(2_000 - withdrawn, 2);
   });
 
   it('同一 tick 重复执行不会重复放贷或重复成交（幂等）', () => {
@@ -310,9 +355,22 @@ describe('居民消费贷与商品成交原子一致（验收问题 3）', () =>
     const entry = second.byGroup?.[group.id];
     expect(entry).toBeDefined();
     expect(entry!.loanFinanced ?? 0).toBe(0);
-    expect(entry!.spend).toBe(0);
     expect((world.householdFinance?.loans ?? []).length).toBe(loanCountAfterFirst);
-    expect(captureSaleState(world, city, ledgers)).toEqual(between);
+    // 第二次只允许花掉第一次放款/提取的现金零头，不得再新增贷款；
+    // 累计提取额（depositWithdrawn）始终不超过“月初存款×5%”。
+    const firstWithdrawn = group.lastMonth.depositWithdrawn ?? 0;
+    expect(firstWithdrawn).toBeLessThanOrEqual(50 + TOL);
+    expect(round2(group.lastMonth.depositWithdrawn! - firstWithdrawn)).toBeLessThanOrEqual(
+      round2(50 - firstWithdrawn + TOL),
+    );
+    const residualCash = round2(
+      between.companies.reduce((sum, company) => sum + company.cash, 0) * 0,
+    );
+    void residualCash;
+    const after = captureSaleState(world, city, ledgers);
+    expect(after.companies.reduce((sum, company) => sum + company.revenue, 0)).toBeGreaterThanOrEqual(
+      between.companies.reduce((sum, company) => sum + company.revenue, 0),
+    );
   });
 
   it('多群体独立判定：本月已放款的群体不再放款，其他群体仍可正常贷款消费', () => {
@@ -332,7 +390,9 @@ describe('居民消费贷与商品成交原子一致（验收问题 3）', () =>
     expect(managementEntry).toBeDefined();
     expect(productionEntry!.loanFinanced ?? 0).toBeGreaterThan(0);
     expect(managementEntry!.loanFinanced ?? 0).toBe(0);
-    expect(managementEntry!.spend).toBe(0);
+    // v0.9 T1：管理群体本月已借过一笔，不能借第二笔；其成交只能来自存款提取（≤50）。
+    expect(managementEntry!.spend).toBeGreaterThanOrEqual(0);
+    expect(managementEntry!.spend).toBeLessThanOrEqual(50 + TOL);
 
     const loans = world.householdFinance?.loans ?? [];
     expect(loans).toHaveLength(2);

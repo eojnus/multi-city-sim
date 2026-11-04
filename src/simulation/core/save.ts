@@ -1,5 +1,6 @@
 import type {
   BondHolder,
+  Company,
   FiscalVisibility,
   HolderRef,
   SaveFile,
@@ -7,7 +8,13 @@ import type {
 } from '../contracts/types';
 import { buildGdpWindow, createEmptyBondState, createEmptyGovernmentState, createEmptyHouseholdFinanceState } from './initializer';
 import { GAME_VERSION, SAVE_FORMAT_VERSION } from '../contracts/types';
-import { GOOD_IDS } from '../companies/company';
+import { GOOD_IDS, createEmptyInventory } from '../companies/company';
+import { GOODS } from '../../data/demo-data';
+import {
+  emptyEquipmentAssets,
+  equipmentFromCapacity,
+  equipmentKindForSector,
+} from '../equipment/equipment';
 import { checkInvariants } from './invariants';
 import { DEMO_CONFIG } from '../../data/config';
 import { allocateProportionally, round2 } from './math';
@@ -174,6 +181,14 @@ export function parseSave(text: string): ParseResult {
       }
       worldValue = migration.world;
       if (migratedFrom === undefined) migratedFrom = 7;
+    }
+    if (formatVersion <= 8) {
+      const migration = migrateWorldV8ToV9(worldValue);
+      if (!migration.ok || !migration.world) {
+        return { ok: false, error: migration.error ?? 'v8 存档迁移失败' };
+      }
+      worldValue = migration.world;
+      if (migratedFrom === undefined) migratedFrom = 8;
     }
 
     const structureError = validateWorldStructure(worldValue);
@@ -759,6 +774,10 @@ export function validateWorldStructure(world: unknown): string | null {
   const managementError = validateManagement(world.management, companyIds, cityIds);
   if (managementError) return managementError;
 
+  // v0.9：设备市场与设备资产。
+  const equipmentError = validateEquipmentMarket(world.equipmentMarket);
+  if (equipmentError) return equipmentError;
+
   const bankingError = validateBanking(world.banking, cityIds, companyIds, investorIds);
   if (bankingError) return bankingError;
 
@@ -1071,6 +1090,29 @@ function validateCompany(value: unknown, index: number): string | null {
   }
   if (typeof value.recipeOutput !== 'string' || !(GOOD_IDS as readonly string[]).includes(value.recipeOutput)) {
     return `企业 ${id}.recipeOutput 无效`;
+  }
+  if (!isRecord(value.equipment)) return `企业 ${id}.equipment 无效`;
+  for (const kind of ['farm', 'industry', 'energy']) {
+    if (!isFiniteNumber(value.equipment[kind]) || (value.equipment[kind] as number) < 0) {
+      return `企业 ${id}.equipment.${kind} 必须是非负数值`;
+    }
+  }
+  if (!isFiniteNumber(value.equipmentCapacity) || value.equipmentCapacity < 0) {
+    return `企业 ${id}.equipmentCapacity 必须是非负数值`;
+  }
+  if (!Array.isArray(value.salesHistory) || value.salesHistory.some((entry) => !isFiniteNumber(entry))) {
+    return `企业 ${id}.salesHistory 必须是数值数组`;
+  }
+  if (value.productionPlan !== null) {
+    if (!isRecord(value.productionPlan)) return `企业 ${id}.productionPlan 无效`;
+    for (const key of ['tick', 'salesReference', 'targetInventory', 'equipmentLimit', 'laborLimit', 'plannedOutput', 'plannedJobs']) {
+      if (!isFiniteNumber(value.productionPlan[key])) return `企业 ${id}.productionPlan.${key} 必须是数值`;
+    }
+    if (typeof value.productionPlan.emergency !== 'boolean') return `企业 ${id}.productionPlan.emergency 必须是布尔值`;
+    if (!Array.isArray(value.productionPlan.reasons)) return `企业 ${id}.productionPlan.reasons 必须是数组`;
+  }
+  if (!Array.isArray(value.recentProfits) || value.recentProfits.some((entry) => !isFiniteNumber(entry))) {
+    return `企业 ${id}.recentProfits 必须是数值数组`;
   }
   for (const key of [
     'cash', 'debt', 'capacity', 'baseCapacity', 'maxCapacity', 'utilization',
@@ -2663,6 +2705,126 @@ export function migrateWorldV7ToV8(raw: unknown): MigrationResult {
   return { ok: true, world };
 }
 
+/**
+ * v8 → v9 迁移：设备资产、设备市场与 3 种设备商品。
+ *
+ * 约束（任务书 §11）：
+ * - 旧档人口、企业、现金、持仓、贷款与游戏进度不得被自动乘 5（本轮人口 ×5 只用于新开局）；
+ * - 旧产能按“原产能 ÷ 每台设备产能”反推设备数量，迁移后产能不跳变；
+ * - 不凭空创造现金、债务或可出售商品：政府设备库存为 0，设备商品市场库存为 0；
+ * - 新统计字段补 0。
+ */
+export function migrateWorldV8ToV9(raw: unknown): MigrationResult {
+  if (!isRecord(raw)) return { ok: false, error: '存档 world 不是对象' };
+  if (!Array.isArray(raw.cities) || raw.cities.length === 0) {
+    return { ok: false, error: 'v8 存档缺少城市数据，无法迁移' };
+  }
+  const config = DEMO_CONFIG;
+  const world = deepClone(raw) as unknown as WorldState;
+
+  // 1. 设备商品市场（补齐新商品；不虚构成交与库存）。
+  for (const city of world.cities) {
+    const tech = city.technology?.productivityMultiplier ?? 1;
+    void tech;
+    for (const good of GOODS) {
+      if (city.market[good.id]) continue;
+      city.market[good.id] = {
+        goodId: good.id,
+        price: round2(good.basePrice * 0.95),
+        supply: 0,
+        demand: 0,
+        consumerDemand: 0,
+        producerRequired: 0,
+        producerDemand: 0,
+        sold: 0,
+        unmetDemand: 0,
+        unmetFunding: 0,
+        intercityImported: 0,
+        externalExport: 0,
+        closingStock: 0,
+        lastPriceChangePct: 0,
+        consumptionTax: 0,
+      };
+    }
+  }
+
+  // 2. 企业设备资产：按旧产能反推（不改变产能、不增加现金）。
+  for (const company of world.companies) {
+    const inventory = { ...createEmptyInventory(), ...(company.inventory ?? {}) } as Company['inventory'];
+    company.inventory = inventory;
+    const city = world.cities.find((entry) => entry.id === company.cityId);
+    const tech = city?.technology.productivityMultiplier ?? 1;
+    if (!isRecord((company as unknown as Record<string, unknown>).equipment)) {
+      const kind = equipmentKindForSector(company.sector, config);
+      const assets = emptyEquipmentAssets();
+      assets[kind] = Math.max(
+        0,
+        Math.round(company.capacity / Math.max(1, config.equipment.catalog[kind].capacityPerUnit * tech)),
+      );
+      company.equipment = assets;
+      company.equipmentCapacity = round2(company.capacity);
+    }
+    if (!Array.isArray(company.salesHistory)) company.salesHistory = [];
+    if (!Array.isArray(company.recentProfits)) company.recentProfits = [];
+    if (company.productionPlan === undefined) company.productionPlan = null;
+    for (const stats of [company.lastMonth, company.previousMonth]) {
+      if (!stats) continue;
+      if (!isFiniteNumber(stats.bonusPaid)) stats.bonusPaid = 0;
+      if (!isFiniteNumber(stats.equipmentPurchased)) stats.equipmentPurchased = 0;
+      if (!isFiniteNumber(stats.equipmentSold)) stats.equipmentSold = 0;
+      if (!isFiniteNumber(stats.emergencyLayoffs)) stats.emergencyLayoffs = 0;
+    }
+  }
+
+  // 3. 设备市场状态（旧档无设备委托与政府库存，保持为空）。
+  if (!isRecord((world as unknown as Record<string, unknown>).equipmentMarket)) {
+    world.equipmentMarket = {
+      initialStock: emptyEquipmentAssets(),
+      offers: [],
+      lastMonthSold: emptyEquipmentAssets(),
+    };
+  }
+
+  world.log.push({
+    tick: world.time.tick,
+    kind: 'system',
+    message:
+      '存档已从 v8 迁移到 v9：新增设备资产（按原产能映射，不增加产能与现金）、设备市场与农业/工业/能源设备商品；旧存档人口、企业数量与进度保持不变。',
+    visibility: { scope: 'public', cityId: null },
+  });
+  return { ok: true, world };
+}
+
+// ---------------------------------------------------------------- v0.9 设备市场校验
+
+function validateEquipmentMarket(value: unknown): string | null {
+  if (!isRecord(value)) return 'world.equipmentMarket 缺失';
+  if (!isRecord(value.initialStock)) return 'world.equipmentMarket.initialStock 无效';
+  for (const kind of ['farm', 'industry', 'energy']) {
+    if (!isFiniteNumber(value.initialStock[kind]) || (value.initialStock[kind] as number) < 0) {
+      return `world.equipmentMarket.initialStock.${kind} 必须是非负数值`;
+    }
+  }
+  if (!isRecord(value.lastMonthSold)) return 'world.equipmentMarket.lastMonthSold 无效';
+  if (!Array.isArray(value.offers)) return 'world.equipmentMarket.offers 必须是数组';
+  for (let index = 0; index < value.offers.length; index += 1) {
+    const offer = value.offers[index];
+    if (!isRecord(offer)) return `设备委托 [${index}] 无效`;
+    for (const key of ['id', 'companyId', 'cityId', 'note']) {
+      if (typeof offer[key] !== 'string') return `设备委托 [${index}].${key} 无效`;
+    }
+    if (typeof offer.kind !== 'string' || !['farm', 'industry', 'energy'].includes(offer.kind)) {
+      return `设备委托 [${index}].kind 无效`;
+    }
+    for (const key of ['units', 'askPrice', 'listedTick']) {
+      if (!isFiniteNumber(offer[key]) || (offer[key] as number) < 0) {
+        return `设备委托 [${index}].${key} 必须是非负数值`;
+      }
+    }
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------- v0.7 新增结构校验
 
 function validateGdpInfo(value: unknown, path: string): string | null {
@@ -2965,8 +3127,12 @@ function validateBonds(
     if (!issuanceIds.has(holding.issuanceId as string)) {
       return `持债记录 ${holding.id} 引用了不存在的债券批次`;
     }
-    const holderError = validateBondHolder(holding.holder, `bonds.holdings[${index}].holder`, companyIds, investorIds);
-    if (holderError) return holderError;
+    // v0.9：已兑付（含企业清算注销）的持债是历史记录，允许持有人已退出市场；
+    // 未兑付持债必须指向现存持有人，避免把债权记到不存在的企业上。
+    if (holding.status !== 'redeemed') {
+      const holderError = validateBondHolder(holding.holder, `bonds.holdings[${index}].holder`, companyIds, investorIds);
+      if (holderError) return holderError;
+    }
     for (const key of ['units', 'principal', 'accruedInterest', 'interestPaid']) {
       if (!isFiniteNumber(holding[key])) return `持债记录 ${holding.id}.${key} 无效`;
     }

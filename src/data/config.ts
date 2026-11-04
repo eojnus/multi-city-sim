@@ -53,7 +53,14 @@ export const DEMO_CONFIG = {
     maxHistory: 240,
   },
   population: {
-    participationRate: 0.38,
+    /**
+     * v0.9【已确认】：新开局每城初始总人口 = 基线初始人口 × 5。
+     * 只作用于新开局；旧存档迁移不做任何人口放大。
+     */
+    initialPopulationMultiplier: 5,
+    /** v0.9【已确认】：开局非劳动人口占总人口 20%，其余 80% 为劳动力；运行后不强制重置。 */
+    initialNonLaborShare: 0.2,
+    participationRate: 0.8,
     monthlyBirthRate: 0.00045,
     monthlyDeathRate: 0.00025,
     naturalNoise: 0.00012,
@@ -73,6 +80,10 @@ export const DEMO_CONFIG = {
     hiringOrder: 'public-first',
     /** 演示：企业每月最多裁减 8% 员工，避免一次性需求波动造成断崖式失业。 */
     maxMonthlyLayoffRate: 0.08,
+    /** v0.9：紧急裁员条件与上限（连续亏损 ≥ 2 月且现金 + 合法授信 < 1 个月工资时，可裁 30%）。 */
+    emergencyLossMonths: 2,
+    emergencyCashWageMonths: 1,
+    emergencyLayoffShare: 0.3,
     /**
      * 【暂定】职业工资倍数：以企业 wageRate 为基准的岗位系数。
      * 口径：岗位月工资率 = company.wageRate × 该倍数；企业工资总额按岗位人数加权求和。
@@ -183,14 +194,16 @@ export const DEMO_CONFIG = {
     minCapital: 250_000,
     /** 资本转换为初始产能：capacity = capital / capitalPerCapacity。 */
     capitalPerCapacity: 500,
-    maxCompaniesPerCity: 16,
+    /** v0.9【已确认】：每城同时经营的企业上限 160；初始企业数量不变。 */
+    maxCompaniesPerCity: 160,
     maxInvestorsPerSyndicate: 3,
     maxCompaniesPerInvestorGroup: 3,
     maxCompaniesPerCompany: 1,
     maxGovernmentCompaniesPerCity: 1,
-    maxFoundingsPerCityMonth: 1,
-    /** 同一城市两次自动创办之间的最小间隔（月），避免企业数量爆发式增长。 */
-    foundingCooldownMonths: 4,
+    /** v0.9【已确认】：为适配 5 倍人口与 160 家上限，每城每月最多自动创办 2 家。 */
+    maxFoundingsPerCityMonth: 2,
+    /** v0.9：旧冷却已与“每城每月最多 2 家”冲突，改为不额外限制（由月度上限控制节奏）。 */
+    foundingCooldownMonths: 0,
     /** 每个居民投资实体对应的居民人数（仅用于资格判断，不新增人口）。 */
     populationPerInvestorGroup: 60_000,
     bankruptcy: {
@@ -339,6 +352,73 @@ export const DEMO_CONFIG = {
   production: {
     /** 【暂定】产能还受当期员工限制：每名员工可支撑的生产率倍数。 */
     laborCapacityFactor: 1.08,
+    /**
+     * v0.9【首版暂定】生产计划参数：计划产量围绕“近 3 月实际销量 + 目标库存”调整，
+     * 正常月份上下调均不超过 20%；现金不足或严重积压时允许紧急下调（下限 60%）。
+     */
+    plan: {
+      salesLookbackMonths: 3,
+      targetInventoryMonths: 0.5,
+      maxUpAdjust: 0.2,
+      maxDownAdjust: 0.2,
+      emergencyDownAdjust: 0.6,
+      stuckInventoryMonths: 2,
+      /** 无销量历史时，初始销售参考量 = 设备产能 × 该系数（有依据的初始需求预测）。 */
+      initialSalesFactor: 0.8,
+      /** 计划产量下限（相对设备产能），避免完全停产但仍保留最低维护性产出。 */
+      minOutputRatio: 0.05,
+    },
+  },
+  /**
+   * v0.9【首版暂定】设备市场。设备是按行业分类的可计数资产：
+   * 企业产能 = Σ(设备数量 × capacityPerUnit × 城市技术系数)；设备商品由设备企业生产。
+   * 单价与产能为演示参数，单位：设备按“台”计，capacityPerUnit 为每台设备每月产出的产出单位。
+   */
+  equipment: {
+    catalog: {
+      farm: {
+        name: '农业设备',
+        goodId: 'farmEquipment',
+        price: 120_000,
+        capacityPerUnit: 300_000,
+        sectors: ['agriculture', 'fiber-farm'],
+      },
+      industry: {
+        name: '工业设备',
+        goodId: 'industryEquipment',
+        price: 200_000,
+        capacityPerUnit: 300_000,
+        sectors: ['food', 'textile', 'garment', 'appliance', 'metal'],
+      },
+      energy: {
+        name: '能源设备',
+        goodId: 'energyEquipment',
+        price: 160_000,
+        capacityPerUnit: 300_000,
+        sectors: ['utility'],
+      },
+    },
+    /** 未知行业的兜底设备类别。 */
+    fallbackKind: 'industry',
+    /** 二手设备成交参考价 = 目录价 × 该系数（最终由卖方报价决定）。 */
+    usedPriceFactor: 0.65,
+    /** 企业清算时设备挂牌折价（无人购买则移交政府设备库存，不产生现金）。 */
+    liquidationPriceFactor: 0.45,
+    /** 政府开局设备库存（每城数量）：用于启动设备产业与创办企业，出售所得进入本城财政。 */
+    governmentInitialStockPerCity: { farm: 24, industry: 60, energy: 16 },
+    /** 单企业单月购买设备数量上限（防止一次性吃光库存）。 */
+    maxBuyUnitsPerMonth: 60,
+  },
+  /** v0.9【首版暂定】工资、奖金与裁员参数。 */
+  compensation: {
+    /** 每 3 个月评估一次奖金。 */
+    bonusEveryMonths: 3,
+    /** 奖金池 ≤ 最近 3 个月累计税后利润的 10%。 */
+    bonusProfitShare: 0.1,
+    /** 发放奖金后至少保留 2 个月工资。 */
+    bonusReserveWageMonths: 2,
+    /** 并保留 1 个月已知偿债额。 */
+    bonusDebtServiceMonths: 1,
   },
   securities: {
     /** 新世界初始发行：每个企业两类股份。 */

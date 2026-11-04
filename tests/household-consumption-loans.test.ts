@@ -21,6 +21,7 @@ import {
   repayHouseholdLoans,
   transferHouseholdDebtsForMigration,
 } from '../src/simulation/population/household-finance';
+import { depositAccountFor } from '../src/simulation/banking/banking';
 import { householdGroupsOfCity } from '../src/simulation/population/household-groups';
 
 const CONFIG = DEMO_CONFIG;
@@ -53,6 +54,10 @@ function resetCityHouseholds(world: WorldState, city: City): void {
     group.lastMonth.loanDrawn = 0;
     group.lastMonth.loanFinancedConsumption = 0;
     group.lastMonth.unmetFunding = 0;
+    // v0.9 T1：存款可提取补足基本消费，这里清零存款并清掉提取统计，保持“纯现金预算”用例的口径。
+    group.lastMonth.depositWithdrawn = 0;
+    const account = depositAccountFor(world, { kind: 'household', id: group.id });
+    if (account) account.balance = 0;
   }
 }
 

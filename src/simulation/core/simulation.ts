@@ -67,6 +67,7 @@ import {
   settleDepositInterest,
 } from '../banking/banking';
 import { refreshCreditSnapshots } from '../banking/credit';
+import { emptyEquipmentAssets } from '../equipment/equipment';
 import { ensureOperators, pruneOperatorPool, releaseOperator } from '../management/manager-pool';
 import { autoCastElectionVotes, maybeOpenElections } from '../management/elections';
 import {
@@ -91,6 +92,10 @@ function blankStats(): CompanyMonthlyStats {
     unmetDemand: 0,
     capacityChange: 0,
     dividendIncome: 0,
+    bonusPaid: 0,
+    equipmentPurchased: 0,
+    equipmentSold: 0,
+    emergencyLayoffs: 0,
   };
 }
 
@@ -140,6 +145,8 @@ function resetCompanyMonth(world: WorldState): void {
     startWorkforceMonth(city);
   }
   world.securities.lastTrades = [];
+  // v0.9：设备市场本月成交清零（存量设备与挂单不动）。
+  world.equipmentMarket.lastMonthSold = emptyEquipmentAssets();
   // 上期交通统计的维护支出口径保留，其余在结算时重写。
   world.transport.lastMonth = { ...world.transport.lastMonth, maintenancePaid: 0 };
   // v0.4：银行本月流量统计清零（存款/贷款存量在结算时实时刷新，不清零）。

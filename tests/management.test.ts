@@ -641,6 +641,22 @@ function prepareRichPlayerCompany(world: WorldState): Company {
   const company = companyOf(world, 'lp-food');
   makePlayerOperator(world, 'lp-food');
   ensurePlayerOperations(world, DEMO_CONFIG, 0);
+  // v0.9：扩产必须真实购买设备；为测试准备充足的城市设备供给。
+  world.equipmentMarket.initialStock.industry = 400;
+  // 固定本月生产计划（避免 plan 重算覆盖岗位需求），并让计划岗位高于现有岗位，
+  // 从而在 assisted 模式触发“重大招聘”提案（批准只改 jobDemand）。
+  company.jobDemand = Math.max(0, company.employees - 50);
+  company.productionPlan = {
+    tick: world.time.tick,
+    salesReference: company.capacity,
+    targetInventory: 0,
+    equipmentLimit: company.equipmentCapacity,
+    laborLimit: company.capacity,
+    plannedOutput: company.capacity,
+    plannedJobs: company.employees,
+    emergency: false,
+    reasons: [],
+  };
   company.cash = 2_000_000_000;
   company.previousMonth.profit = 5_000_000;
   company.dividendPayoutRatio = 0.6;
