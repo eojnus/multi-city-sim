@@ -13,7 +13,11 @@ import type {
   ShareKind,
   TradeAgreement,
 } from '../simulation/contracts/types';
-import type { GameStore, LayerMode, ViewMode } from '../app/gameStore';
+import type {
+  GameStore,
+  LayerMode,
+  ViewMode,
+} from '../app/gameStore';
 import { renderPopulationPie, POPULATION_PIE_COLORS } from './charts/pie';
 import {
   aggregateTradeFlows,
@@ -2585,6 +2589,7 @@ export function renderCompanyDetail(
           >扩产 +${qty(expansionEstimate)} · ${money(expansionCost)}</button>
         </div>
       </section>
+      ${renderCompanyEquipmentSection(store, company)}
       <div class="finance-grid">
         <div class="fin-block">
           <h4>上月损益</h4>
@@ -2594,6 +2599,10 @@ export function renderCompanyDetail(
               <tr><td>投入</td><td>${money(lastMonth.inputCost)}</td></tr>
               <tr><td>工资</td><td>${money(lastMonth.wagesPaid)}</td></tr>
               ${lastMonth.wageArrears > 0 ? `<tr class="is-warn"><td>欠薪</td><td>${money(lastMonth.wageArrears)}</td></tr>` : ''}
+              ${(lastMonth.bonusPaid ?? 0) > 0 ? `<tr><td>奖金</td><td>${money(lastMonth.bonusPaid ?? 0)}</td></tr>` : ''}
+              ${(lastMonth.equipmentPurchased ?? 0) > 0 ? `<tr><td>设备支出</td><td>${money(lastMonth.equipmentPurchased ?? 0)}</td></tr>` : ''}
+              ${(lastMonth.equipmentSold ?? 0) > 0 ? `<tr><td>设备出售</td><td>${money(lastMonth.equipmentSold ?? 0)}</td></tr>` : ''}
+              ${(lastMonth.emergencyLayoffs ?? 0) > 0 ? `<tr class="is-warn"><td>紧急裁员</td><td>${num(lastMonth.emergencyLayoffs ?? 0)} 人</td></tr>` : ''}
               <tr><td>利息</td><td>${money(lastMonth.interestPaid)}</td></tr>
               <tr><td>公司税</td><td>${money(lastMonth.corporateTax)}</td></tr>
               <tr><td>股息</td><td>${money(lastMonth.dividendsPaid)}</td></tr>
@@ -2972,13 +2981,17 @@ export function renderPopulationStrataSection(store: GameStore, city: City): str
           <th scope="row">${esc(group.name)}</th>
           <td>${num(group.people)}</td>
           <td>${money(group.income)}</td>
+          <td>${money(group.desiredConsumption)}</td>
           <td>${money(group.consumption)}</td>
+          <td class="${group.unmetFunding > 0 ? 'is-warn' : ''}">${money(group.unmetFunding)}</td>
           <td>${money(group.savings)}</td>
           <td>${money(group.cash)}</td>
           <td>${money(group.deposits)}</td>
         </tr>`,
     )
     .join('');
+  const demand = view.demand;
+  const unmetShare = demand.desiredConsumption > 0 ? demand.unmetFunding / demand.desiredConsumption : 0;
   return `
     <section class="panel-section strata-section" data-testid="population-strata-section">
       <div class="section-head">
@@ -2989,6 +3002,27 @@ export function renderPopulationStrataSection(store: GameStore, city: City): str
         <span class="section-tag">${qty(view.population.total)} 人</span>
       </div>
       <p class="strata-note">人数由城市人口与岗位派生，一个人只统计一次；人均资产 = 现金 + 银行存款 + 股票权益，股票市值不是现金。</p>
+      <div class="strata-structure" data-testid="population-structure">
+        <span>就业<b>${qty(view.population.employed)}</b></span>
+        <span>失业<b>${qty(view.population.unemployed)}</b></span>
+        <span>非劳动力<b>${qty(view.population.nonLabor)}</b></span>
+        <span>劳动力<b>${qty(view.population.laborForce)}</b></span>
+      </div>
+      <div class="detail-subsection strata-demand" data-testid="population-demand-vs-trade">
+        <div class="sub-head">
+          <h4>需求 vs 成交</h4>
+          <span>本月 · 信用点</span>
+        </div>
+        <div class="strata-demand-grid">
+          <span><i>需求总额</i><b>${money(demand.desiredConsumption)}</b><small>想要购买的商品成本</small></span>
+          <span><i>实际成交</i><b class="is-teal">${money(demand.consumption)}</b><small>本月真实买到</small></span>
+          <span class="${demand.unmetFunding > 0 ? 'is-warn' : ''}"><i>资金缺口</i><b>${money(demand.unmetFunding)}</b><small>想买但资金不足 · ${pct(unmetShare, 1)}</small></span>
+          <span><i>消费预算</i><b>${money(demand.budget)}</b><small>含工资、分红与转移</small></span>
+          <span><i>消费贷支持</i><b>${money(demand.loanFinancedConsumption)}</b><small>借款支撑的消费</small></span>
+          <span><i>存款提取</i><b>${money(demand.depositWithdrawn)}</b><small>为消费取出的存款</small></span>
+        </div>
+        <p class="fin-hint">需求与成交都是商品成本口径；资金缺口来自居民现金与预算不足，不是缺货（缺货见市场标签的未满足需求）。</p>
+      </div>
       <div class="detail-subsection strata-tiers">
         <div class="sub-head">
           <h4>财富阶层</h4>
@@ -3025,7 +3059,9 @@ export function renderPopulationStrataSection(store: GameStore, city: City): str
                 <th scope="col">职业</th>
                 <th scope="col">人数</th>
                 <th scope="col">收入</th>
-                <th scope="col">消费</th>
+                <th scope="col">需求</th>
+                <th scope="col">成交</th>
+                <th scope="col">资金缺口</th>
                 <th scope="col">储蓄</th>
                 <th scope="col">现金</th>
                 <th scope="col">存款</th>
@@ -3506,6 +3542,207 @@ function renderPlayerOperation(company: Company, operation: OperationView): stri
       <div class="gov-sub-head"><span>提案</span><em>${pending.length} 项待批准</em></div>
       ${proposalRows}
     </div>`;
+}
+
+/**
+ * v0.9：企业设备、产能与生产计划（公司「经营」标签）。
+ * 设备交易全部走 GameStore 命令（canOperate 校验、真实付款）；面板本身只读，不维护账本。
+ */
+export function renderCompanyEquipmentSection(store: GameStore, company: Company): string {
+  const view = store.companyOperatingView(company.id);
+  if (!view) return '';
+  const market = store.equipmentMarketView(company.cityId);
+  const plan = view.plan;
+  const isPlayerOperator = view.isPlayerOperator;
+  const equipmentRows = view.equipmentRows
+    .map(
+      (row) => `
+        <tr>
+          <th scope="row">${esc(row.name)}</th>
+          <td>${num(row.units)} 台</td>
+          <td>${qty(row.unitCapacity)}</td>
+          <td>${qty(row.capacity)}</td>
+          <td>${money(row.catalogPrice)} / ${money(row.marketPrice)}</td>
+          <td title="同城设备企业可立即交付的新机库存 / 政府开局设备储备">${num(row.supply)} / ${num(row.governmentStock)} 台</td>
+        </tr>`,
+    )
+    .join('');
+  const kindOptions = view.equipmentRows
+    .map(
+      (row) =>
+        `<option value="${esc(row.kind)}">${esc(row.name)} · 目录 ${money(row.catalogPrice)}/台</option>`,
+    )
+    .join('');
+  const ownedOptions = view.equipmentRows
+    .filter((row) => row.units > 0)
+    .map((row) => `<option value="${esc(row.kind)}">${esc(row.name)} · 持有 ${num(row.units)} 台</option>`)
+    .join('');
+  const held = view.equipmentRows.reduce((total, row) => total + row.units, 0);
+  const offers = market?.offers ?? [];
+  const offerRows =
+    offers.length === 0
+      ? '<p class="fin-hint" data-testid="equipment-used-empty">本城暂无二手设备委托；其他企业出售设备后会出现在这里。</p>'
+      : `<ul class="equip-offers">${offers
+          .map((offer) => {
+            const isOwn = offer.companyId === company.id;
+            const action = !isPlayerOperator
+              ? '<span class="equip-offer-note">只读</span>'
+              : isOwn
+                ? `<button
+                    type="button"
+                    class="ken-btn ken-btn--mini"
+                    data-action="cancel-used-equipment"
+                    data-company-id="${esc(company.id)}"
+                    data-offer-id="${esc(offer.id)}"
+                    data-focus-key="cancel-used-${esc(offer.id)}"
+                  >撤单</button>`
+                : `<button
+                    type="button"
+                    class="ken-btn ken-btn--gold ken-btn--mini"
+                    data-action="buy-used-equipment"
+                    data-company-id="${esc(company.id)}"
+                    data-offer-id="${esc(offer.id)}"
+                    data-units="${num(offer.units)}"
+                    data-focus-key="buy-used-${esc(offer.id)}"
+                  >买入 ${num(offer.units)} 台</button>`;
+            return `
+              <li class="equip-offer" data-testid="used-offer-${esc(offer.id)}">
+                <div class="equip-offer-main">
+                  <b>${esc(offer.kindName)}</b>
+                  <span>${num(offer.units)} 台 · ${esc(offer.companyName)}${isOwn ? '（你经营）' : ''}</span>
+                </div>
+                <div class="equip-offer-meta">
+                  <span>单价 ${money(offer.askPrice)}</span>
+                  <span>发布于 T${num(offer.listedTick)}</span>
+                  <span>${esc(offer.note)}</span>
+                </div>
+                ${action}
+              </li>`;
+          })
+          .join('')}</ul>`;
+  const planHtml = plan
+    ? `<div class="equip-plan" data-testid="equipment-plan">
+        <div class="equip-plan-grid">
+          <span><i>计划产量</i><b>${qty(plan.plannedOutput)}</b></span>
+          <span><i>计划岗位</i><b>${num(plan.plannedJobs)}</b></span>
+          <span><i>设备上限</i><b>${qty(plan.equipmentLimit)}</b></span>
+          <span><i>劳动上限</i><b>${qty(plan.laborLimit)}</b></span>
+          <span><i>销售参考</i><b>${qty(plan.salesReference)}</b></span>
+          <span><i>目标库存</i><b>${qty(plan.targetInventory)}</b></span>
+          ${plan.emergency ? '<span class="is-warn"><i>状态</i><b>紧急下调</b></span>' : ''}
+        </div>
+        ${
+          plan.reasons.length > 0
+            ? `<ul class="equip-plan-reasons">${plan.reasons
+                .slice(0, 4)
+                .map((reason) => `<li>${esc(reason)}</li>`)
+                .join('')}</ul>`
+            : ''
+        }
+        <p class="fin-hint">计划更新于 T${num(plan.tick)}；产量取设备/劳动/原料支持产能三者最小，紧急时自动下调。</p>
+      </div>`
+    : '<p class="fin-hint" data-testid="equipment-plan-empty">暂无计划：推进 1 个月后，生产计划模块会按销售参考、目标库存与设备/劳动能力生成。</p>';
+  const tradeForms = isPlayerOperator
+    ? `<div class="equip-trade">
+        <form class="equip-form" data-testid="equipment-buy-form" data-equipment-form="buy" onsubmit="return false">
+          <div class="sub-head">
+            <h4>购买新设备</h4>
+            <span>真实付款 · 政府储备进入本城财政</span>
+          </div>
+          <div class="equip-form-row">
+            <label>设备 <select data-equipment-kind="new">${kindOptions}</select></label>
+            <label>数量 <input type="number" min="1" max="${num(market?.maxBuyUnitsPerMonth ?? 60)}" step="1" value="1" data-equipment-units /></label>
+            <button
+              type="button"
+              class="ken-btn ken-btn--gold ken-btn--mini"
+              data-action="buy-equipment"
+              data-company-id="${esc(company.id)}"
+              data-testid="buy-equipment-${esc(company.id)}"
+              data-focus-key="buy-equipment-${esc(company.id)}"
+            >购买</button>
+          </div>
+          <p class="fin-hint">新机优先由同城设备企业供货；不足部分动用政府储备（目录价付款）。每月最多买 ${num(market?.maxBuyUnitsPerMonth ?? 60)} 台。企业现金 ${money(view.cash)}。</p>
+        </form>
+        <form class="equip-form" data-testid="equipment-sell-form" data-equipment-form="sell" onsubmit="return false">
+          <div class="sub-head">
+            <h4>挂出二手设备</h4>
+            <span>挂出后立即扣减产能</span>
+          </div>
+          <div class="equip-form-row">
+            <label>设备 <select data-equipment-kind="sell">${
+              ownedOptions || '<option value="farm">暂无可出售设备</option>'
+            }</select></label>
+            <label>数量 <input type="number" min="1" step="1" value="1" data-equipment-units ${held > 0 ? '' : 'disabled'} /></label>
+            <label>单价 <input type="number" min="0" step="1" placeholder="留空 65% 目录价" data-equipment-price ${held > 0 ? '' : 'disabled'} /></label>
+            <button
+              type="button"
+              class="ken-btn ken-btn--mini"
+              data-action="sell-used-equipment"
+              data-company-id="${esc(company.id)}"
+              data-testid="sell-used-equipment-${esc(company.id)}"
+              data-focus-key="sell-used-equipment-${esc(company.id)}"
+              ${held > 0 ? '' : 'disabled'}
+            >挂出</button>
+          </div>
+          <p class="fin-hint">默认挂单价 = 目录价 × ${pct(market?.usedPriceFactor ?? 0.65, 0)}；成交后买方付款、设备所有权即时转移。</p>
+        </form>
+      </div>`
+    : `<p class="fin-hint equip-readonly" data-testid="equipment-readonly">你目前不经营该企业：只能查看设备、产能与生产计划；购买/出售设备需要经营授权。</p>`;
+  return `
+    <section class="detail-subsection company-equipment" data-testid="company-equipment">
+      <div class="sub-head">
+        <h4>设备 · 产能 · 生产计划</h4>
+        <span class="mini-tag">${esc(goodName(view.outputGood))}</span>
+      </div>
+      <div class="equip-kpis">
+        <span><i>设备产能</i><b>${qty(view.equipmentCapacity)}</b><small>单位 / 月</small></span>
+        <span><i>劳动产能</i><b>${qty(view.laborCapacity)}</b><small>单位 / 月</small></span>
+        <span><i>计划产量</i><b>${plan ? qty(plan.plannedOutput) : '—'}</b><small>${plan ? `T${num(plan.tick)} 计划` : '暂无计划'}</small></span>
+        <span><i>上月产出</i><b>${qty(view.lastMonth.produced)}</b><small>利用率 ${pct(view.utilization, 1)}</small></span>
+        <span><i>员工 / 岗位</i><b>${num(view.employees)} / ${num(view.jobDemand)}</b><small>工资 ${money(view.monthlyWageBill)}/月</small></span>
+        <span><i>成品库存</i><b>${qty(view.finishedStock)}</b><small>${
+          view.sellableMonths === null ? '无销售参考' : `约 ${num(view.sellableMonths, 1)} 个月销量`
+        }</small></span>
+      </div>
+      <div class="equip-block">
+        <div class="sub-head"><span>设备持有</span><em>技术系数 ×${num(view.techMultiplier, 2)}</em></div>
+        <div class="table-wrap">
+          <table class="fin-table equip-table" aria-label="${esc(company.name)} 设备持有" title="单价与可购数量：同城设备企业库存 / 政府储备">
+            <thead>
+              <tr>
+                <th scope="col">设备</th>
+                <th scope="col">台数</th>
+                <th scope="col">单台产能</th>
+                <th scope="col">合计产能</th>
+                <th scope="col">目录价 / 市场价</th>
+                <th scope="col">可购（同城 / 储备）</th>
+              </tr>
+            </thead>
+            <tbody>${equipmentRows}</tbody>
+          </table>
+        </div>
+      </div>
+      <div class="equip-block">
+        <div class="sub-head"><span>本月工资与用工</span><em>${esc(sectorLabel(view.sector))}</em></div>
+        <div class="equip-labor">
+          <span><i>本月工资</i><b>${money(view.lastMonth.wagesPaid)}</b></span>
+          <span class="${view.lastMonth.wageArrears > 0 ? 'is-warn' : ''}"><i>欠薪</i><b>${money(view.lastMonth.wageArrears)}</b></span>
+          <span><i>奖金</i><b>${money(view.lastMonth.bonusPaid)}</b></span>
+          <span class="${view.lastMonth.emergencyLayoffs > 0 ? 'is-warn' : ''}"><i>紧急裁员</i><b>${num(view.lastMonth.emergencyLayoffs)} 人</b></span>
+          <span><i>上月销售</i><b>${qty(view.lastMonth.sold)}</b><small>出口 ${qty(view.lastMonth.exported)}</small></span>
+          <span><i>设备支出 / 收入</i><b>${money(view.lastMonth.equipmentPurchased)} / ${money(view.lastMonth.equipmentSold)}</b></span>
+        </div>
+      </div>
+      <div class="equip-block">
+        <div class="sub-head"><span>生产计划</span><em>设备 / 劳动 / 原料取最小</em></div>
+        ${planHtml}
+      </div>
+      ${tradeForms}
+      <div class="equip-block equip-used" data-testid="equipment-used-market">
+        <div class="sub-head"><span>本城二手设备</span><em>${offers.length} 条委托 · 买方付款后转移</em></div>
+        ${offerRows}
+      </div>
+    </section>`;
 }
 
 /** D. 企业经营者区块：现任、选任状态与玩家经营模式。 */

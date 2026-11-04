@@ -9147,3 +9147,387 @@ kbd {
 .stock-exited-panel {
   padding: 4px 0;
 }
+
+/* ===== 组件：v0.9 设备/产能/生产计划 · 居民需求 vs 成交 ===== */
+
+.strata-structure {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 3px 0 4px;
+  padding: 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.015);
+  font-size: 6.8px;
+  color: var(--muted);
+}
+
+.strata-structure span {
+  display: inline-flex;
+  gap: 5px;
+  align-items: baseline;
+}
+
+.strata-structure b {
+  color: var(--gold);
+  font-family: var(--pixel);
+  font-size: 7.6px;
+}
+
+.strata-demand .strata-demand-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.strata-demand-grid > span {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.strata-demand-grid i {
+  color: var(--faint);
+  font-size: 6.4px;
+  font-style: normal;
+}
+
+.strata-demand-grid b {
+  color: var(--text);
+  font-family: var(--pixel);
+  font-size: 8px;
+}
+
+.strata-demand-grid small {
+  color: var(--faint);
+  font-size: 6.2px;
+  line-height: 1.35;
+}
+
+.strata-demand-grid .is-teal b {
+  color: var(--teal);
+}
+
+.strata-demand-grid .is-warn b {
+  color: var(--orange);
+}
+
+.strata-table--groups {
+  min-width: 430px;
+}
+
+.company-equipment .equip-kpis {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  margin: 3px 0 5px;
+}
+
+.equip-kpis > span {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.equip-kpis i {
+  color: var(--faint);
+  font-size: 6.4px;
+  font-style: normal;
+}
+
+.equip-kpis b {
+  color: var(--gold);
+  font-family: var(--pixel);
+  font-size: 8.4px;
+}
+
+.equip-kpis small {
+  color: var(--faint);
+  font-size: 6.2px;
+}
+
+.equip-block {
+  margin: 5px 0;
+  padding: 4px 0 2px;
+  border-top: 1px dashed var(--line);
+}
+
+.equip-block:first-of-type {
+  border-top: none;
+}
+
+.equip-block .sub-head em {
+  color: var(--faint);
+  font-size: 6.4px;
+  font-style: normal;
+}
+
+.equip-table {
+  min-width: 0;
+  font-size: 6.5px;
+}
+
+.equip-table th,
+.equip-table td {
+  padding: 2px 3px;
+  white-space: nowrap;
+}
+
+.equip-table th:first-child,
+.equip-table td:first-child {
+  white-space: normal;
+}
+
+.equip-labor {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  margin-top: 3px;
+}
+
+.equip-labor > span {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.012);
+  font-size: 6.6px;
+  color: var(--muted);
+}
+
+.equip-labor i {
+  color: var(--faint);
+  font-size: 6.3px;
+  font-style: normal;
+}
+
+.equip-labor b {
+  color: var(--text);
+  font-family: var(--pixel);
+  font-size: 7.8px;
+}
+
+.equip-labor small {
+  color: var(--faint);
+  font-size: 6.2px;
+}
+
+.equip-labor .is-warn b {
+  color: var(--orange);
+}
+
+.equip-plan {
+  margin-top: 3px;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: rgba(242, 193, 78, 0.035);
+}
+
+.equip-plan-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.equip-plan-grid > span {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.equip-plan-grid i {
+  color: var(--faint);
+  font-size: 6.3px;
+  font-style: normal;
+}
+
+.equip-plan-grid b {
+  color: var(--text);
+  font-family: var(--pixel);
+  font-size: 7.8px;
+}
+
+.equip-plan-grid .is-warn b {
+  color: var(--orange);
+}
+
+.equip-plan-reasons {
+  margin: 4px 0 2px;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.equip-plan-reasons li {
+  padding-left: 10px;
+  position: relative;
+  color: var(--muted);
+  font-size: 6.4px;
+  line-height: 1.4;
+}
+
+.equip-plan-reasons li::before {
+  content: '·';
+  position: absolute;
+  left: 2px;
+  color: var(--gold);
+}
+
+.equip-trade {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin: 6px 0 4px;
+}
+
+.equip-form {
+  padding: 5px 6px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.equip-form .sub-head {
+  margin-bottom: 4px;
+}
+
+.equip-form .sub-head span {
+  color: var(--faint);
+  font-size: 6.2px;
+}
+
+.equip-form-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: flex-end;
+}
+
+.equip-form-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--faint);
+  font-size: 6.3px;
+}
+
+.equip-form-row select,
+.equip-form-row input {
+  min-width: 70px;
+  max-width: 130px;
+  padding: 3px 5px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--text);
+  font-size: 6.8px;
+}
+
+.equip-form-row input[type='number'] {
+  width: 74px;
+}
+
+.equip-form-row .ken-btn {
+  margin-left: auto;
+}
+
+.equip-readonly {
+  margin: 4px 0;
+  padding: 4px 7px;
+  border: 1px dashed var(--line);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.equip-offers {
+  margin: 3px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.equip-offer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: center;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.012);
+}
+
+.equip-offer-main {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  font-size: 6.9px;
+}
+
+.equip-offer-main b {
+  color: var(--gold);
+  font-size: 7.2px;
+}
+
+.equip-offer-main span {
+  color: var(--muted);
+}
+
+.equip-offer-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 9px;
+  color: var(--faint);
+  font-size: 6.3px;
+}
+
+.equip-offer .ken-btn {
+  margin-left: auto;
+}
+
+.equip-offer-note {
+  margin-left: auto;
+  color: var(--faint);
+  font-size: 6.3px;
+}
+
+@media (max-width: 1180px) {
+  .strata-demand .strata-demand-grid,
+  .equip-labor {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .equip-trade {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .company-equipment .equip-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-height: 720px) {
+  .equip-kpis b {
+    font-size: 7.8px;
+  }
+
+  .equip-plan-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}

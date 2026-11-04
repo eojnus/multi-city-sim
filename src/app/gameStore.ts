@@ -1,12 +1,16 @@
 import type {
   CityTaxMonth,
   Company,
+  CompanyProductionPlan,
+  EquipmentKind,
+  GoodId,
   HolderRef,
   InvestmentResult,
   MayorFiscalView,
   OwnBondHoldingView,
   PlayerNotification,
   PublicBondOfferView,
+  SectorId,
   ShareKind,
   StockClassHistory,
   TradeActionResult,
@@ -20,7 +24,19 @@ import { createCityLayout } from '../data/city-layout';
 import type { BuildingDefinition, CityLayout, DistrictDefinition } from '../data/city-layout';
 import type { SaveBridge } from '../platform/saveBridge';
 import type { SaveSlotInfo } from '../platform/desktop';
-import { companySharePrice } from '../simulation/companies/company';
+import { companySharePrice, monthlyWageBill } from '../simulation/companies/company';
+import {
+  buyNewEquipment,
+  buyUsedEquipment,
+  cancelUsedEquipmentOffer,
+  companyEquipmentKind,
+  equipmentCatalog,
+  equipmentUnitPrice,
+  listUsedEquipment,
+  localNewEquipmentSupply,
+  recomputeCompanyCapacity,
+} from '../simulation/equipment/equipment';
+import { laborCapacity } from '../simulation/production/production';
 import { cityMarketPrices } from '../simulation/markets/markets';
 import { playerNetWorth, holdingStake } from '../simulation/economy/gdp';
 import {
@@ -286,6 +302,110 @@ export interface PublicBankruptcyNotice {
   interestWrittenOff: number | null;
   note: string;
   trustHoldings: { companyId: string; companyName: string; shares: number }[];
+}
+
+// ---------------------------------------------------------------- v0.9 设备与生产视图
+
+/** 设备类别（农业/工业/能源）；顺序固定，供 UI 与市场表格使用。 */
+export const EQUIPMENT_KINDS: readonly EquipmentKind[] = ['farm', 'industry', 'energy'];
+
+export interface CompanyEquipmentRowView {
+  kind: EquipmentKind;
+  name: string;
+  units: number;
+  unitCapacity: number;
+  capacity: number;
+  catalogPrice: number;
+  marketPrice: number;
+  /** 同城设备企业可立即交付的新机库存。 */
+  supply: number;
+  /** 政府开局设备储备（按目录价付款，进入本城财政）。 */
+  governmentStock: number;
+}
+
+export interface CompanyLastMonthView {
+  produced: number;
+  sold: number;
+  exported: number;
+  revenue: number;
+  wagesPaid: number;
+  wageArrears: number;
+  bonusPaid: number;
+  equipmentPurchased: number;
+  equipmentSold: number;
+  emergencyLayoffs: number;
+  profit: number;
+}
+
+export interface CompanyOperatingView {
+  companyId: string;
+  companyName: string;
+  cityId: string;
+  cityName: string;
+  sector: SectorId;
+  outputGood: GoodId;
+  isPlayerOperator: boolean;
+  cash: number;
+  debt: number;
+  equipment: Record<EquipmentKind, number>;
+  equipmentRows: CompanyEquipmentRowView[];
+  equipmentCapacity: number;
+  capacity: number;
+  laborCapacity: number;
+  utilization: number;
+  employees: number;
+  jobDemand: number;
+  wageRate: number;
+  monthlyWageBill: number;
+  plan: CompanyProductionPlan | null;
+  salesHistory: number[];
+  recentProfits: number[];
+  finishedStock: number;
+  /** 现有成品库存可支撑的销售月数；没有销售参考时为 null。 */
+  sellableMonths: number | null;
+  salesReference: number;
+  lastMonth: CompanyLastMonthView;
+  techMultiplier: number;
+  note: string;
+}
+
+export interface EquipmentKindMarketView {
+  kind: EquipmentKind;
+  name: string;
+  goodId: string;
+  catalogPrice: number;
+  marketPrice: number;
+  capacityPerUnit: number;
+  unitCapacity: number;
+  techMultiplier: number;
+  sectors: string[];
+  supply: number;
+  governmentStock: number;
+  lastMonthSold: number;
+}
+
+export interface UsedEquipmentOfferView {
+  id: string;
+  companyId: string;
+  companyName: string;
+  cityId: string;
+  kind: EquipmentKind;
+  kindName: string;
+  units: number;
+  askPrice: number;
+  listedTick: number;
+  note: string;
+}
+
+export interface EquipmentMarketView {
+  cityId: string;
+  cityName: string;
+  kinds: EquipmentKindMarketView[];
+  offers: UsedEquipmentOfferView[];
+  usedPriceFactor: number;
+  liquidationPriceFactor: number;
+  maxBuyUnitsPerMonth: number;
+  note: string;
 }
 
 export class GameStore {
@@ -1852,12 +1972,19 @@ export class GameStore {
       incomeTax: group.lastMonth.incomeTax,
       consumption: group.lastMonth.consumption,
       desiredConsumption: group.lastMonth.desiredConsumption,
+      unmetFunding: group.lastMonth.unmetFunding ?? 0,
+      budget: group.lastMonth.budget ?? 0,
+      loanFinancedConsumption: group.lastMonth.loanFinancedConsumption ?? 0,
+      depositWithdrawn: group.lastMonth.depositWithdrawn ?? 0,
       savings: group.lastMonth.savingsContribution,
       cash: group.cash,
       deposits:
         depositAccountFor(this.world, { kind: 'household', id: group.id })?.balance ?? 0,
     }));
     const stats = this.world.households.lastStats.find((entry) => entry.cityId === cityId) ?? null;
+    const totalDesiredConsumption = groups.reduce((total, group) => total + group.desiredConsumption, 0);
+    const totalConsumption = groups.reduce((total, group) => total + group.consumption, 0);
+    const totalUnmetFunding = groups.reduce((total, group) => total + group.unmetFunding, 0);
     return {
       cityId,
       cityName: city.name,
@@ -1867,7 +1994,18 @@ export class GameStore {
       totalCash: groups.reduce((total, group) => total + group.cash, 0),
       totalDeposits: cityHouseholdDeposits(this.world, cityId),
       investorEquity: cityInvestorEquity(this.world, cityId),
-      note: '人数由城市人口与岗位派生，一个人只统计一次；股票权益按人口比例归属居民投资实体，不是现金。',
+      demand: {
+        desiredConsumption: totalDesiredConsumption,
+        consumption: totalConsumption,
+        unmetFunding: totalUnmetFunding,
+        budget: groups.reduce((total, group) => total + group.budget, 0),
+        loanFinancedConsumption: groups.reduce(
+          (total, group) => total + group.loanFinancedConsumption,
+          0,
+        ),
+        depositWithdrawn: groups.reduce((total, group) => total + group.depositWithdrawn, 0),
+      },
+      note: '人数由城市人口与岗位派生，一个人只统计一次；股票权益按人口比例归属居民投资实体，不是现金。需求 = 居民本月想要购买的商品成本；成交 = 实际买到的商品成本；资金缺口 = 想买但资金不足的金额。',
     };
   }
 
@@ -2105,6 +2243,251 @@ export class GameStore {
       this.world.time.tick,
     );
     return this.finishAction(result, '取款已完成。');
+  }
+
+  // ---------------------------------------------------------------- v0.9 设备、产能与生产计划
+
+  /** 企业经营视图：设备/劳动产能、生产计划、工资奖金与库存可售月数（只读）。 */
+  companyOperatingView(companyId: string): CompanyOperatingView | null {
+    const company = this.world.companies.find((entry) => entry.id === companyId);
+    if (!company) return null;
+    const city = this.world.cities.find((entry) => entry.id === company.cityId) ?? null;
+    const config = DEMO_CONFIG;
+    const tech = city?.technology.productivityMultiplier ?? 1;
+    const salesHistory = [...(company.salesHistory ?? [])];
+    const previousSold = company.previousMonth.sold + company.previousMonth.exported;
+    const referenceSamples = salesHistory.length > 0 ? salesHistory.slice(-3) : [previousSold];
+    const salesReference =
+      referenceSamples.reduce((total, value) => total + value, 0) / Math.max(1, referenceSamples.length);
+    const finishedStock = Math.max(0, company.inventory[company.recipeOutput] ?? 0);
+    const equipmentRows = EQUIPMENT_KINDS.map((kind) => {
+      const catalog = equipmentCatalog(kind, config);
+      const units = Math.floor(company.equipment[kind] ?? 0);
+      return {
+        kind,
+        name: catalog.name,
+        units,
+        unitCapacity: catalog.capacityPerUnit * tech,
+        capacity: units * catalog.capacityPerUnit * tech,
+        catalogPrice: catalog.price,
+        marketPrice: equipmentUnitPrice(this.world, company.cityId, kind, config),
+        supply: localNewEquipmentSupply(this.world, company.cityId, kind, config),
+        governmentStock: Math.floor(this.world.equipmentMarket.initialStock[kind] ?? 0),
+      };
+    });
+    const lastMonth = company.lastMonth;
+    const plan = company.productionPlan
+      ? { ...company.productionPlan, reasons: [...company.productionPlan.reasons] }
+      : null;
+    return {
+      companyId: company.id,
+      companyName: company.name,
+      cityId: company.cityId,
+      cityName: city?.name ?? '',
+      sector: company.sector,
+      outputGood: company.recipeOutput,
+      isPlayerOperator: canOperate(this.world, companyId),
+      cash: company.cash,
+      debt: company.debt,
+      equipment: { ...company.equipment },
+      equipmentRows,
+      equipmentCapacity: company.equipmentCapacity,
+      capacity: company.capacity,
+      laborCapacity: city ? laborCapacity(company, city, config, this.world) : 0,
+      utilization: company.utilization,
+      employees: company.employees,
+      jobDemand: company.jobDemand,
+      wageRate: company.wageRate,
+      monthlyWageBill: monthlyWageBill(company, config),
+      plan,
+      salesHistory,
+      recentProfits: [...(company.recentProfits ?? [])],
+      finishedStock,
+      sellableMonths: salesReference > 0 ? finishedStock / salesReference : null,
+      salesReference,
+      lastMonth: {
+        produced: lastMonth.produced,
+        sold: lastMonth.sold,
+        exported: lastMonth.exported,
+        revenue: lastMonth.revenue,
+        wagesPaid: lastMonth.wagesPaid,
+        wageArrears: lastMonth.wageArrears,
+        bonusPaid: lastMonth.bonusPaid ?? 0,
+        equipmentPurchased: lastMonth.equipmentPurchased ?? 0,
+        equipmentSold: lastMonth.equipmentSold ?? 0,
+        emergencyLayoffs: lastMonth.emergencyLayoffs ?? 0,
+        profit: lastMonth.profit,
+      },
+      techMultiplier: tech,
+      note: '设备产能 = 台数 × 每台产能 × 城市技术系数；员工支持产能按生产口径（员工 × 人均生产率 × 技术 × 技能 × 政策）。计划产量取设备/劳动/原料三者最小。',
+    };
+  }
+
+  /** 城市设备市场视图：新机价格与供给、政府储备、二手委托（只读）。 */
+  equipmentMarketView(cityId: string): EquipmentMarketView | null {
+    const city = this.world.cities.find((entry) => entry.id === cityId);
+    if (!city) return null;
+    const config = DEMO_CONFIG;
+    const tech = city.technology.productivityMultiplier;
+    const kinds = EQUIPMENT_KINDS.map((kind) => {
+      const catalog = equipmentCatalog(kind, config);
+      return {
+        kind,
+        name: catalog.name,
+        goodId: catalog.goodId,
+        catalogPrice: catalog.price,
+        marketPrice: equipmentUnitPrice(this.world, cityId, kind, config),
+        capacityPerUnit: catalog.capacityPerUnit,
+        unitCapacity: catalog.capacityPerUnit * tech,
+        techMultiplier: tech,
+        sectors: [...catalog.sectors],
+        supply: localNewEquipmentSupply(this.world, cityId, kind, config),
+        governmentStock: Math.floor(this.world.equipmentMarket.initialStock[kind] ?? 0),
+        lastMonthSold: Math.floor(this.world.equipmentMarket.lastMonthSold[kind] ?? 0),
+      };
+    });
+    const offers = this.world.equipmentMarket.offers
+      .filter((offer) => offer.cityId === cityId)
+      .map((offer) => ({
+        id: offer.id,
+        companyId: offer.companyId,
+        companyName: this.world.companies.find((entry) => entry.id === offer.companyId)?.name ?? '已退出企业',
+        cityId: offer.cityId,
+        kind: offer.kind,
+        kindName: equipmentCatalog(offer.kind, config).name,
+        units: offer.units,
+        askPrice: offer.askPrice,
+        listedTick: offer.listedTick,
+        note: offer.note,
+      }))
+      .sort((a, b) => a.askPrice - b.askPrice || a.id.localeCompare(b.id));
+    return {
+      cityId,
+      cityName: city.name,
+      kinds,
+      offers,
+      usedPriceFactor: config.equipment.usedPriceFactor,
+      liquidationPriceFactor: config.equipment.liquidationPriceFactor,
+      maxBuyUnitsPerMonth: config.equipment.maxBuyUnitsPerMonth,
+      note: '新设备优先由同城设备企业供货；不足部分可动用政府开局设备储备（按目录价真实付款，款项进入本城财政）。二手设备需买方真实付款、卖方设备才会转移。',
+    };
+  }
+
+  /** 购买新设备：玩家经营的企业才可操作；真实扣款，政府储备付款进入本城财政。 */
+  buyEquipment(companyId: string, kind: EquipmentKind, units: number): boolean {
+    const company = this.world.companies.find((entry) => entry.id === companyId);
+    if (!company) {
+      this.toast('企业不存在。', 'error');
+      this.emit();
+      return false;
+    }
+    if (!canOperate(this.world, company.id)) {
+      this.toast('只有具备该企业经营权的玩家才能购买设备。', 'warning');
+      this.emit();
+      return false;
+    }
+    if (!EQUIPMENT_KINDS.includes(kind)) {
+      this.toast('设备类别无效。', 'error');
+      this.emit();
+      return false;
+    }
+    if (!Number.isInteger(units) || units <= 0) {
+      this.toast('购买数量必须是正整数。', 'error');
+      this.emit();
+      return false;
+    }
+    const result = buyNewEquipment(this.world, company, kind, units, DEMO_CONFIG, this.world.time.tick, {
+      allowGovernmentStock: true,
+      reason: '玩家设备投资',
+      log: this.world.log,
+    });
+    const catalog = equipmentCatalog(kind, DEMO_CONFIG);
+    return this.finishAction(result, `已购买 ${result.units} 台${catalog.name}，支出 ${result.cost.toFixed(0)} 信用点。`);
+  }
+
+  /** 挂出二手设备：立即从企业设备中扣除并进入本城二手市场。 */
+  sellUsedEquipment(companyId: string, kind: EquipmentKind, units: number, askPrice?: number): boolean {
+    const company = this.world.companies.find((entry) => entry.id === companyId);
+    if (!company) {
+      this.toast('企业不存在。', 'error');
+      this.emit();
+      return false;
+    }
+    if (!canOperate(this.world, company.id)) {
+      this.toast('只有具备该企业经营权的玩家才能出售设备。', 'warning');
+      this.emit();
+      return false;
+    }
+    if (!EQUIPMENT_KINDS.includes(kind)) {
+      this.toast('设备类别无效。', 'error');
+      this.emit();
+      return false;
+    }
+    if (!Number.isInteger(units) || units <= 0) {
+      this.toast('出售数量必须是正整数。', 'error');
+      this.emit();
+      return false;
+    }
+    if (askPrice !== undefined && (!Number.isFinite(askPrice) || askPrice <= 0)) {
+      this.toast('挂牌单价必须是正数（留空按目录价 65% 挂出）。', 'error');
+      this.emit();
+      return false;
+    }
+    const result = listUsedEquipment(this.world, company, kind, units, DEMO_CONFIG, this.world.time.tick, askPrice);
+    const catalog = equipmentCatalog(kind, DEMO_CONFIG);
+    return this.finishAction(result, `已挂出 ${units} 台二手${catalog.name}。`);
+  }
+
+  /** 买入二手设备：真实付款给卖方，设备所有权即时转移。 */
+  buyUsedEquipment(companyId: string, offerId: string, units: number): boolean {
+    const company = this.world.companies.find((entry) => entry.id === companyId);
+    if (!company) {
+      this.toast('企业不存在。', 'error');
+      this.emit();
+      return false;
+    }
+    if (!canOperate(this.world, company.id)) {
+      this.toast('只有具备该企业经营权的玩家才能购买二手设备。', 'warning');
+      this.emit();
+      return false;
+    }
+    if (!offerId) {
+      this.toast('设备委托不存在。', 'error');
+      this.emit();
+      return false;
+    }
+    if (!Number.isInteger(units) || units <= 0) {
+      this.toast('购买数量必须是正整数。', 'error');
+      this.emit();
+      return false;
+    }
+    const result = buyUsedEquipment(
+      this.world,
+      company,
+      offerId,
+      units,
+      DEMO_CONFIG,
+      this.world.time.tick,
+    );
+    return this.finishAction(result, `已购买二手设备 ${result.units} 台，支出 ${result.cost.toFixed(0)} 信用点。`);
+  }
+
+  /** 撤销本企业的二手设备委托（返还设备并重算产能）。 */
+  cancelUsedEquipment(companyId: string, offerId: string): boolean {
+    const company = this.world.companies.find((entry) => entry.id === companyId);
+    if (!company) {
+      this.toast('企业不存在。', 'error');
+      this.emit();
+      return false;
+    }
+    if (!canOperate(this.world, company.id)) {
+      this.toast('只有具备该企业经营权的玩家才能撤销设备委托。', 'warning');
+      this.emit();
+      return false;
+    }
+    const result = cancelUsedEquipmentOffer(this.world, company.id, offerId);
+    if (result.ok) recomputeCompanyCapacity(this.world, company, DEMO_CONFIG);
+    return this.finishAction(result, '已撤销设备出售委托，设备已返还企业。');
   }
 
   /** 统一处理命令结果：成功 toast + 自动存档 + 重绘；失败只提示与重绘。 */

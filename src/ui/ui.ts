@@ -1113,6 +1113,74 @@ export class GameUI {
       case 'expand-capacity':
         if (companyId) this.store.expandCapacity(companyId);
         break;
+      // ---------------------------------------------------------- v0.9 设备交易
+      case 'buy-equipment': {
+        if (!companyId) {
+          this.rejectAction('企业不存在。');
+          break;
+        }
+        const form = element.closest<HTMLElement>('[data-equipment-form="buy"]');
+        const kind = form?.querySelector<HTMLSelectElement>('[data-equipment-kind]')?.value ?? '';
+        const unitsText = form?.querySelector<HTMLInputElement>('[data-equipment-units]')?.value ?? '';
+        const units = Number(unitsText);
+        if (kind !== 'farm' && kind !== 'industry' && kind !== 'energy') {
+          this.rejectAction('设备类别无效。');
+          break;
+        }
+        if (!Number.isInteger(units) || units <= 0) {
+          this.rejectAction('购买数量必须是正整数。');
+          break;
+        }
+        // 供给、金额与权限最终由 GameStore 校验；UI 只做基础输入检查。
+        this.store.buyEquipment(companyId, kind, units);
+        break;
+      }
+      case 'sell-used-equipment': {
+        if (!companyId) {
+          this.rejectAction('企业不存在。');
+          break;
+        }
+        const form = element.closest<HTMLElement>('[data-equipment-form="sell"]');
+        const kind = form?.querySelector<HTMLSelectElement>('[data-equipment-kind]')?.value ?? '';
+        const unitsText = form?.querySelector<HTMLInputElement>('[data-equipment-units]')?.value ?? '';
+        const priceText = form?.querySelector<HTMLInputElement>('[data-equipment-price]')?.value.trim() ?? '';
+        const units = Number(unitsText);
+        const askPrice = priceText === '' ? undefined : Number(priceText);
+        if (kind !== 'farm' && kind !== 'industry' && kind !== 'energy') {
+          this.rejectAction('设备类别无效。');
+          break;
+        }
+        if (!Number.isInteger(units) || units <= 0) {
+          this.rejectAction('出售数量必须是正整数。');
+          break;
+        }
+        if (askPrice !== undefined && (!Number.isFinite(askPrice) || askPrice <= 0)) {
+          this.rejectAction('挂牌单价必须是正数（留空按目录价 65% 挂出）。');
+          break;
+        }
+        this.store.sellUsedEquipment(companyId, kind, units, askPrice);
+        break;
+      }
+      case 'buy-used-equipment': {
+        if (!companyId || !offerId) {
+          this.rejectAction('设备委托参数缺失。');
+          break;
+        }
+        const units = Number(element.dataset.units ?? '');
+        if (!Number.isInteger(units) || units <= 0) {
+          this.rejectAction('购买数量必须是正整数。');
+          break;
+        }
+        this.store.buyUsedEquipment(companyId, offerId, units);
+        break;
+      }
+      case 'cancel-used-equipment':
+        if (!companyId || !offerId) {
+          this.rejectAction('设备委托参数缺失。');
+          break;
+        }
+        this.store.cancelUsedEquipment(companyId, offerId);
+        break;
       // ---------------------------------------------------------- v0.8 右侧栏标签
       case 'right-tab': {
         const tab = element.dataset.tab;
