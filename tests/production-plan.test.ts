@@ -27,8 +27,10 @@ import {
   assessExpansion,
   companyDemandShare,
   equipmentLimitFor,
+  outputPerEmployee,
   recomputeProductionPlan,
 } from '../src/simulation/companies/production-plan';
+import { planCompanyDecision } from '../src/simulation/companies/ai/strategy';
 import { planCompanies } from '../src/simulation/companies/planning';
 import { laborCapacity, productionTarget, runProduction } from '../src/simulation/production/production';
 import { createWorldLedgers } from '../src/simulation/markets/markets';
@@ -468,5 +470,52 @@ describe('v1.0 缺货信号、扩产与招聘/采购优先级', () => {
     expect(plan.reasons.some((reason) => reason.includes('城市缺货'))).toBe(true);
     // 同 tick 重算幂等，不会重复吸收缺货。
     expect(recomputeProductionPlan(world, company, DEMO_CONFIG)).toBe(plan);
+  });
+
+  it('v1.2 招聘目标被设备产能可支撑岗位封顶，稳岗补贴也不能维持超编', () => {
+    // 1 台工业设备 ≈ 30 万产能，人均产出约 140 → 设备最多支撑约 2000 人；
+    // 现有多达 5000 人且上月利润为 0（旧逻辑里 ≥0 会触发稳岗补贴保留 95% 员工）。
+    const { world, company, city } = stageCompany({
+      employees: 5000,
+      salesHistory: [1000],
+      priorOutput: 1500,
+    });
+    company.equipment = { farm: 0, industry: 1, energy: 0 };
+    company.previousMonth = monthStats({ produced: 0, sold: 1000, profit: 0 });
+    world.policies.active.push({
+      id: 'policy-test-retention',
+      cityId: city.id,
+      policyId: 'retentionSubsidy',
+      budget: 1_000_000_000,
+      spent: 0,
+      monthsRemaining: 6,
+      startedTick: world.time.tick,
+      status: 'active',
+      targetSector: null,
+      taxDirection: null,
+      transportTarget: null,
+      effects: {},
+      reason: '测试稳岗补贴',
+      note: '',
+    });
+
+    const plan = recomputeProductionPlan(world, company, DEMO_CONFIG);
+    const perEmployee = Math.max(0.01, outputPerEmployee(world, company, DEMO_CONFIG));
+    const equipmentJobCap = Math.floor(plan.equipmentLimit / perEmployee);
+    expect(equipmentJobCap).toBeGreaterThan(0);
+    expect(equipmentJobCap).toBeLessThan(company.employees);
+    expect(plan.plannedJobs).toBeLessThanOrEqual(equipmentJobCap);
+
+    company.productionPlan = plan;
+    const decision = planCompanyDecision(world, company, DEMO_CONFIG, 'steady');
+    // 旧口径下稳岗补贴会把 targetJobs 拉回 5000×0.95=4750；新口径必须被设备岗位上限截断。
+    expect(decision.plan.targetJobs).toBe(decision.targetJobs);
+    expect(decision.targetJobs).toBeLessThanOrEqual(equipmentJobCap);
+    expect(decision.targetJobs).toBeLessThan(Math.floor(company.employees * 0.95));
+    expect(decision.reasons.some((reason) => reason.includes('设备产能限制'))).toBe(true);
+
+    // planning 写回 jobDemand 后，labor 模块只会按目标裁员，不会继续维持超编。
+    planCompanies(world, DEMO_CONFIG, []);
+    expect(company.jobDemand).toBeLessThanOrEqual(equipmentJobCap);
   });
 });

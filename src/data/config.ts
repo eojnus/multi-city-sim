@@ -202,8 +202,12 @@ export const DEMO_CONFIG = {
     maxCompaniesPerInvestorGroup: 3,
     maxCompaniesPerCompany: 1,
     maxGovernmentCompaniesPerCity: 1,
-    /** v1.1【已确认】：小规模真实创业，每城每月最多自动创办 4 家（原 2 家）；160 在营上限不变。 */
-    maxFoundingsPerCityMonth: 4,
+    /**
+     * v1.2【已确认】：每城每月自动创办上限 4→100。100 是上限不是目标——实际创办数仍受
+     * 可支付缺口、真实出资/授信、设备库存、劳动力、利润与周转金逐次约束；机会/资源耗尽即早停。
+     * 160 在营企业上限与开局 65 家不变；玩家经界面发起的创办不受该月上限限制。
+     */
+    maxFoundingsPerCityMonth: 100,
     /** v0.9：旧冷却已与月度创办上限冲突，改为不额外限制（由月度上限控制节奏）。 */
     foundingCooldownMonths: 0,
     /** 每个居民投资实体对应的居民人数（仅用于资格判断，不新增人口）。 */
@@ -331,6 +335,17 @@ export const DEMO_CONFIG = {
     utilizationAdjust: 0.18,
     wageReserveMonths: 1,
     dividendPayoutRatio: 1.0,
+    /**
+     * v1.2：分红前必须保留的经营工作资金（按“月数 × 对应月度支出”估算）。
+     * 旧口径只预留 0.5 个月工资，盈利企业把利润 100% 分掉后，下月买不起原料、
+     * 发不出工资，形成“盈利企业被分红抽干现金 → 停产 → 倒闭”的死锁
+     * （v1.2 验收问题三：食品链最早断点）。
+     * 分红上限 = min(利润 × dividendPayoutRatio, cash − 工作资金保留额)，
+     * 保留额 = 工资月数×月工资 + 原料月数×按生产计划估算的计划原料采购额。
+     * 只限制分红金额，不产生现金、不改变利润/税收/持股口径。
+     */
+    dividendReserveWageMonths: 2,
+    dividendReserveMaterialMonths: 1,
     capacityGrowth: 0.004,
     capacityShrink: 0.005,
     maxCapacityMultiple: 2.5,

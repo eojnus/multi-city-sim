@@ -227,15 +227,18 @@ describe('居民闲钱投资实体（v1.1 §2）', () => {
       groups.reduce((sum, group) => sum + (group.investorLedger?.dividends ?? 0), 0),
     );
     expect(totalLedgerDividends).toBeCloseTo(1_000, 2);
-    const totalShares = round2(
-      groups.reduce((sum, group) => sum + (group.investorLedger?.shares ?? 0), 0),
-    );
+    // v1.2 §1：权威口径 = 有效份额（历史投入份额 + 开局无主旧资产起始份额）。
+    expect(groups.every((group) => group.investorLedger?.openingShares !== undefined)).toBe(true);
+    const effectiveShares = (group: {
+      investorLedger?: { shares: number; openingShares?: number };
+    }): number => round2((group.investorLedger?.shares ?? 0) + (group.investorLedger?.openingShares ?? 0));
+    const totalShares = round2(groups.reduce((sum, group) => sum + effectiveShares(group), 0));
     expect(ledgerFirst.dividends).toBeCloseTo(
-      round2((1_000 * ledgerFirst.shares) / totalShares),
+      round2((1_000 * effectiveShares(first)) / totalShares),
       1,
     );
     expect(ledgerSecond.dividends).toBeCloseTo(
-      round2((1_000 * ledgerSecond.shares) / totalShares),
+      round2((1_000 * effectiveShares(second)) / totalShares),
       1,
     );
     // 归属只是账本记录，现金仅因本月转入而减少（不额外划走股息）。

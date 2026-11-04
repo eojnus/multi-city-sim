@@ -161,10 +161,14 @@ describe('居民股息资金流（不得重复计入）', () => {
       ) * IDLE_CASH_MONTHLY_INVEST_SHARE,
     );
     collectInvestableFunds(world, DEMO_CONFIG, []);
-    const contribution = round2(
+    const expectedContribution = round2(
       Math.min(budgetBeforeSavings * DEMO_CONFIG.investors.savingsRate, idleCap),
     );
-    expect(city.lastMonth.investableContribution).toBeCloseTo(contribution, 2);
+    // v1.2：储蓄按群体逐笔分币 round2 后汇总，城市层面的目标额可能差 ≤ 1 分；
+    // 这是分币取整（每笔转账与实体现金一一对应），不是资金丢失。
+    const contribution = city.lastMonth.investableContribution;
+    expect(contribution).toBeGreaterThan(0);
+    expect(Math.abs(contribution - expectedContribution)).toBeLessThanOrEqual(0.02);
     expect(city.householdIncomeLastMonth).toBeCloseTo(budgetBeforeSavings - contribution, 2);
 
     const savingsGain = groups.reduce(

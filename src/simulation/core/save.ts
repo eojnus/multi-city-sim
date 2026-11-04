@@ -24,7 +24,11 @@ import {
   syncCompanyTotalShares,
   syncPlayerHoldings,
 } from '../securities/securities';
-import { createInvestorGroups, groupHolder } from '../investors/investors';
+import {
+  createInvestorGroups,
+  ensureInvestorOpeningShares,
+  groupHolder,
+} from '../investors/investors';
 import { createInitialTransport } from '../transport/network';
 import { createInitialPolitics } from '../politics/politics';
 import { freshAiState } from '../companies/lifecycle/lifecycle';
@@ -209,6 +213,9 @@ export function parseSave(text: string): ParseResult {
 
     const world = worldValue as WorldState;
     syncCompanyTotalSharesSafe(world);
+    // v1.2 §1：旧档/旧版世界首次读取时按开局人口补齐“无主旧资产”起始份额（幂等：
+    // 已写入 openingShares 的存档不会重算，避免读档后重复归属或凭空增现金）。
+    ensureInvestorOpeningShares(world);
     const problems = checkInvariants(world);
     if (problems.length > 0) {
       return {
@@ -2177,6 +2184,29 @@ function validateHouseholds(value: unknown, cityIds: Set<string>): string | null
       'netCashChange',
     ]) {
       if (!isFiniteNumber(stats[key])) return `居民群体 ${group.id}.lastMonth.${key} 无效`;
+    }
+    // v1.2 §1：投资份额账本可选（旧档缺省 = 未初始化/0，读取时按开局人口补齐）；
+    // 出现时各分量必须为非负有限数，tick 必须为整数（-1 表示从未发生）。
+    if (group.investorLedger !== undefined) {
+      if (!isRecord(group.investorLedger)) {
+        return `居民群体 ${group.id}.investorLedger 无效`;
+      }
+      const ledger = group.investorLedger;
+      for (const key of ['contributed', 'shares', 'dividends']) {
+        if (!isFiniteNumber(ledger[key]) || ledger[key] < 0) {
+          return `居民群体 ${group.id}.investorLedger.${key} 无效`;
+        }
+      }
+      if (ledger.openingShares !== undefined) {
+        if (!isFiniteNumber(ledger.openingShares) || ledger.openingShares < 0) {
+          return `居民群体 ${group.id}.investorLedger.openingShares 无效`;
+        }
+      }
+      for (const key of ['lastContributionTick', 'lastDividendTick']) {
+        if (!isInteger(ledger[key])) {
+          return `居民群体 ${group.id}.investorLedger.${key} 无效`;
+        }
+      }
     }
   }
   // v1.1 §2：投资份额账本与月度流水可选；出现时必须结构合法（旧存档缺省视为未投入）。

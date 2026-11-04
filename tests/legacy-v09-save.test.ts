@@ -216,8 +216,12 @@ describe('v0.9 真实旧档（f942cc9）读取兼容', () => {
     expect(simulation.state.time.tick).toBe(RAW_WORLD.time.tick + 1);
     // 一个月内新增企业属于正常经营/创办，但与“重新开局追加 48 家”完全不同。
     expect(simulation.state.companies.length).toBeGreaterThanOrEqual(RAW_WORLD.companies.length);
-    // v1.1 每城每月最多自动创办 4 家（3 城合计 ≤12），且旧档不得重新执行开局（+48 家）。
-    expect(simulation.state.companies.length).toBeLessThan(RAW_WORLD.companies.length + 13);
+    // v1.2 每城每月自动创办上限为 config.lifecycle.maxFoundingsPerCityMonth（默认 100），
+    // 且旧档不得重新执行开局（+48 家）；单月新增上界为 3 城 × 月上限。
+    const maxFoundingsPerMonth = 3 * DEMO_CONFIG.lifecycle.maxFoundingsPerCityMonth;
+    expect(simulation.state.companies.length).toBeLessThan(
+      RAW_WORLD.companies.length + maxFoundingsPerMonth + 1,
+    );
 
     for (const company of simulation.state.companies) {
       expect(company.capacity).toBeCloseTo(company.equipmentCapacity, 2);
@@ -276,7 +280,13 @@ describe('v0.9 真实旧档（f942cc9）读取兼容', () => {
     }
 
     // 新存档里已包含余量字段，再读取不应重复补日志（幂等）。
-    expect(reloaded.log.filter((entry) => entry.message.startsWith(COMPAT_LOG_PREFIX))).toHaveLength(1);
+    // v1.2 单月可创办较多企业，日志容量会裁剪最旧条目；因此不要求兼容日志一定仍在，
+    // 只要求“再读取不新增”：解析后的条数必须与已保存文本中的条数相同（0 或 1）。
+    const savedCompat = (
+      (JSON.parse(savedText) as { world?: { log?: Array<{ message?: string }> } }).world?.log ?? []
+    ).filter((entry) => (entry.message ?? '').startsWith(COMPAT_LOG_PREFIX)).length;
+    expect(savedCompat).toBeLessThanOrEqual(1);
+    expect(compatLogEntries(reloaded)).toHaveLength(savedCompat);
   });
 
   it('兼容处理幂等：已有余量的存档再次读取不会重复补齐或改动金额', () => {

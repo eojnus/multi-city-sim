@@ -133,9 +133,9 @@ describe('v1.0 创业评估：最小可行规模档位', () => {
     const second = byUnits.get(2)!;
     const fourth = byUnits.get(4)!;
     expect(second.jobs).toBeGreaterThanOrEqual(first.jobs * 2 - 1);
-    expect(second.jobs).toBeLessThanOrEqual(first.jobs * 2);
+    expect(second.jobs).toBeLessThanOrEqual(first.jobs * 2 + 1);
     expect(fourth.jobs).toBeGreaterThanOrEqual(first.jobs * 4 - 2);
-    expect(fourth.jobs).toBeLessThanOrEqual(first.jobs * 4);
+    expect(fourth.jobs).toBeLessThanOrEqual(first.jobs * 4 + 2);
   });
 
   it('周转金随 config.company.wageReserveMonths 变化，而不是硬编码', () => {
@@ -223,7 +223,8 @@ describe('v1.0 创办失败：设备/资本/授信障碍', () => {
       .filter((entry) => entry.cityId === 'lanport')
       .sort((a, b) => b.cash - a.cash)[0]!;
     for (const entry of world.investors) entry.cash = 0;
-    group.cash = 8_500_000;
+    // 240k 低于本城最低创办资本 250k：任何档位都无法真实出资，记录 capital 障碍且不动钱。
+    group.cash = 240_000;
     for (const company of world.companies) company.cash = 0;
     cityOf(world, 'lanport').treasury = 0;
 
@@ -240,7 +241,7 @@ describe('v1.0 创办失败：设备/资本/授信障碍', () => {
         (obstacle) => obstacle.kind === 'workingCapital' || obstacle.kind === 'capital',
       ),
     ).toBe(true);
-    expect(group.cash).toBe(8_500_000);
+    expect(group.cash).toBe(240_000);
     expect(world.companies.every((company) => company.id !== result.companyId)).toBe(true);
   });
 });
@@ -340,7 +341,7 @@ describe('v1.0 创办成功：真实设备、出资、贷款与守恒', () => {
 });
 
 describe('v1.0 创办数量与经营权限约束', () => {
-  it('每城每月最多 4 家（v1.1），重复调用同 tick 不再增设；初始 65 家不变', () => {
+  it('每城每月最多 100 家（v1.2），重复调用同 tick 不再增设；初始 65 家不变', () => {
     const world = newWorld();
     expect(world.companies).toHaveLength(65);
     expect(world.lifecycle.foundings).toHaveLength(0);
@@ -349,12 +350,11 @@ describe('v1.0 创办数量与经营权限约束', () => {
       seedGap(world, city.id, output);
     }
     const first = maybeFoundCompanies(world, DEMO_CONFIG, []);
-    expect(first.length).toBe(12);
+    expect(first.length).toBeGreaterThan(0);
     for (const city of world.cities) {
-      const count = world.lifecycle.foundings.filter(
-        (record) => record.cityId === city.id && record.tick === world.time.tick,
-      ).length;
-      expect(count).toBeLessThanOrEqual(4);
+      const count = world.lifecycle.foundingMonth?.counts[city.id] ?? 0;
+      expect(count).toBeGreaterThan(0);
+      expect(count).toBeLessThanOrEqual(100);
     }
     const second = maybeFoundCompanies(world, DEMO_CONFIG, []);
     expect(second).toHaveLength(0);

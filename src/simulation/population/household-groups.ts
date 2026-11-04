@@ -24,6 +24,7 @@ import { companySharePrice, occupationWageRate } from '../companies/company';
 import { cityMarketPrices } from '../markets/markets';
 import { depositAccountFor, ensureDepositAccount } from '../banking/banking';
 import { reallocateHouseholdDebtsForGroupChange } from './household-finance';
+import { ensureInvestorOpeningShares } from '../investors/investors';
 
 /** 职业类别的固定顺序（确定性遍历与展示顺序）。 */
 export const OCCUPATIONS: OccupationClass[] = [
@@ -339,6 +340,9 @@ export function syncHouseholdPeople(world: WorldState, config: DemoConfig): void
       group.people = targets.get(group.occupation) ?? 0;
     }
   }
+  // v1.2 §1：开局/旧档首次同步人口时，把投资实体已有净资产一次性记为各群体的起始份额
+  // （份额挂在“城 + 职业”群体上；自然人口变化不搬份额，只改变人均权益）。
+  ensureInvestorOpeningShares(world);
 }
 
 export interface MigrationAssetTransfer {

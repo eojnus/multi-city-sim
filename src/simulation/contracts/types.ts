@@ -3,7 +3,7 @@
 // v0.2 新增证券/治理/居民投资/协议/通知数据；旧 v1 存档由 core/save.ts 迁移。
 
 export const SAVE_FORMAT_VERSION = 9;
-export const GAME_VERSION = '1.1.0';
+export const GAME_VERSION = '1.2.0';
 
 export type GoodId =
   | 'grain'
@@ -1237,6 +1237,13 @@ export interface HouseholdInvestorLedger {
   contributed: number;
   /** 累计记账份额（1 信用点投入 = 1 份；分红归属按份额占比分摊）。 */
   shares: number;
+  /**
+   * v1.2 §1：一次性“开局无主旧资产”起始份额（1 份 = 1 信用点权益，>= 0）。
+   * 投资实体开局已有净资产（现金 + 持股）在首次结算时按开局人口/基本生活费户数记到各群体，
+   * 之后新增投入按 1:1 累加；旧档读取时补齐（不追溯改现金、不重复补）。
+   * 有效份额 = shares + openingShares；可选字段，缺省视为未初始化/0。
+   */
+  openingShares?: number;
   /** 累计按份额归属的投资实体股息（记账口径，不代表现金已划给该群体）。 */
   dividends: number;
   /** 最近一次投入记账的 tick（从未投入为 -1）。 */

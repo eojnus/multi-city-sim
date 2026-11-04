@@ -366,6 +366,13 @@ describe('v1.1 §9：小规模创业与失败回滚', () => {
     expect(
       assessment.scaleTiers[0]?.blockers.some((blocker) => blocker.kind === 'equipment'),
     ).toBe(true);
-    expect(foundingAttempts(world).length).toBe(attemptCountBefore);
+    // v1.2 起“本轮没有机会”也会写结构化 stop attempt（city/候选/障碍），
+    // 因此允许新增 attempt，但必须是 rejected 且带明确停止原因，不得静默。
+    const newAttempts = foundingAttempts(world).slice(attemptCountBefore);
+    expect(newAttempts.length).toBeGreaterThan(0);
+    for (const attempt of newAttempts) {
+      expect(attempt.outcome).toBe('rejected');
+      expect(attempt.note).toContain('本轮自动创办停止');
+    }
   });
 });

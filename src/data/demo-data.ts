@@ -560,8 +560,11 @@ function openingEntries(): OpeningCompanyEntry[] {
     { suffix: 'grain3', name: '谷物三厂', sector: 'agriculture', output: 'grain', employees: 1_900, priceFactor: 0.99, note: '本地谷物种植合作社，补充区域粮食供给。' },
     { suffix: 'grain4', name: '谷物四厂', sector: 'agriculture', output: 'grain', employees: 1_800, priceFactor: 1.0, note: '小型谷物农场，面向本地食品企业。' },
     // 能源 2 家：为新增加的食品/谷物/设备产能供能。
-    { suffix: 'energy2', name: '能源二厂', sector: 'utility', output: 'energy', employees: 800, priceFactor: 0.99, note: '本地第二座能源站，服务新增工业产能。' },
-    { suffix: 'energy3', name: '能源三厂', sector: 'utility', output: 'energy', employees: 700, priceFactor: 1.01, note: '分布式能源站，补充城市能源供给。' },
+    // v1.2 校准：原 800/700 人使每城能源劳动产能约 0.64M/月，而开局能源需求约 0.45M/月，
+    // 叠加原有能源站后长期约 2 倍过剩 → 价格跌到地板、能源企业现金耗尽 → 粮食缺能停产。
+    // 按开局需求估到约 0.54M/月（含原有能源站），留出短缺时的招聘空间。
+    { suffix: 'energy2', name: '能源二厂', sector: 'utility', output: 'energy', employees: 300, priceFactor: 0.99, note: '本地第二座能源站，服务新增工业产能。' },
+    { suffix: 'energy3', name: '能源三厂', sector: 'utility', output: 'energy', employees: 260, priceFactor: 1.01, note: '分布式能源站，补充城市能源供给。' },
     // 金属/基础材料 1 家：为设备与日用品企业供应金属件。
     { suffix: 'metal2', name: '金属二厂', sector: 'metal', output: 'metal', employees: 1_200, priceFactor: 1.0, note: '金属件加工企业，供应本地设备与日用品生产。' },
     // 设备制造 3 家：农业、工业、能源设备各一家，形成世界内真实设备来源。

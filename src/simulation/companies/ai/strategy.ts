@@ -9,7 +9,7 @@ import type { DemoConfig } from '../../../data/config';
 import { PRODUCTIVITY } from '../../../data/demo-data';
 import { clamp, round2 } from '../../core/math';
 import { monthlyWageBill } from '../company';
-import { recomputeProductionPlan, cityShortageFor } from '../production-plan';
+import { recomputeProductionPlan, cityShortageFor, outputPerEmployee } from '../production-plan';
 import { effectiveWageRate, hiringSubsidyPerHire, retentionSubsidyPerEmployee } from '../../policies/query';
 import { workforceSkillMultiplier } from '../../labor/workforce';
 
@@ -108,7 +108,23 @@ export function planCompanyDecision(
   const jobsForPlan = Math.ceil(productionPlan.plannedOutput / perEmployee);
   const styledJobs = Math.floor(productionPlan.plannedJobs * params.jobFactor);
   let targetJobs = Math.max(jobsForPlan, styledJobs);
-  const maxJobs = Math.ceil(company.maxCapacity / Math.max(1, productivity * tech * skill));
+  // v1.2 §6：招聘目标必须被“设备产能可支撑的岗位数”封顶。
+  // 设备产能 ÷ 人均产出（含技术/技能/政策/1.08 系数）才是设备真正能喂饱的岗位数；
+  // 不能用 maxCapacity 或 laborLimit / 现有员工数推导——后者会让超编企业靠历史用工自我维持。
+  const perEmployeeCapacity = Math.max(0.01, outputPerEmployee(world, company, config));
+  const equipmentJobCap =
+    equipmentLimit > 0.01
+      ? Math.max(0, Math.floor(equipmentLimit / perEmployeeCapacity))
+      : Number.POSITIVE_INFINITY;
+  const capacityMaxJobs = Math.ceil(company.maxCapacity / Math.max(1, productivity * tech * skill));
+  const maxJobs = Number.isFinite(equipmentJobCap)
+    ? Math.min(capacityMaxJobs, equipmentJobCap)
+    : capacityMaxJobs;
+  if (company.employees > maxJobs) {
+    reasons.push(
+      `岗位需求受设备产能限制（最多 ${maxJobs} 人，现有 ${company.employees} 人），超编人员按月度裁员率下降`,
+    );
+  }
 
   const projectedJobs = Math.max(company.employees, targetJobs, 1);
   const effectiveBill = effectiveWage * projectedJobs;

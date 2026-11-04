@@ -35,6 +35,7 @@ import { GOODS } from '../../data/demo-data';
 import { round2 } from '../core/math';
 import { depositAccountFor, withdraw } from '../banking/banking';
 import { cityInvestorEquity, householdGroupsOfCity } from './household-groups';
+import { transferInvestorLedgerForMigration } from '../investors/investors';
 
 /**
  * v0.9 T1：存款提取上限（相对“月初存款”）——单月最多提取 5%。
@@ -900,6 +901,9 @@ export function transferHouseholdDebtsForMigration(
   tick: number = world.time.tick,
 ): { principalMoved: number; loansMoved: number } {
   void config;
+  // v1.2 §1：居民投资份额随迁移守恒——与消费贷同一“城 + 职业”粒度、同一人数口径，
+  // 按迁出人数占源群体比例拆分份额给目的地同职业群体；不产生现金、不改实体现金与持股。
+  transferInvestorLedgerForMigration(world, fromCityId, toCityId, people, laborForceMoved);
   const result = { principalMoved: 0, loansMoved: 0 };
   const finance = world.householdFinance;
   if (!finance || people <= 0) return result;

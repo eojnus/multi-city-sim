@@ -22,6 +22,57 @@ import { workforceSkillMultiplier } from '../labor/workforce';
 import { leaderSectorMultiplier } from '../politics/politics';
 import { keyIndustryFocus } from '../policies/query';
 
+/** 单个投入品的采购计划（阶段 A/B 共用的中间结构）。 */
+interface InputPurchasePlan {
+  goodId: GoodId;
+  shortage: number;
+  price: number;
+  localStock: number;
+  intercitySupply: number;
+  supplyQty: number;
+}
+
+interface AccountedInputPlan extends InputPurchasePlan {
+  effectiveDemand: number;
+}
+
+/**
+ * 一家企业的本月采购上下文。
+ *
+ * v1.2：采购拆成两个阶段执行，但需求记账与融资裁决仍在第一阶段一次性完成
+ * （使用月初可售供给快照，不随后续成交变化），因此账本口径与旧实现一致。
+ */
+interface CompanyInputPurchasing {
+  company: Company;
+  city: City;
+  cityLedgers: CityLedgers;
+  plans: AccountedInputPlan[];
+  /** 自有采购预算（现金−工资预留）与已裁决的周转授信额度，跨阶段持续扣减。 */
+  budget: number;
+  creditRoom: number;
+  /** 每个投入品已成交数量（本地 + 跨城），用于最终缺货记账。 */
+  bought: number[];
+}
+
+/** 按权重把数量分配到 0.01（最大余数法），保证合计严格等于 total。 */
+function allocateByWeight(total: number, weights: number[]): number[] {
+  const sum = weights.reduce((acc, weight) => acc + Math.max(0, weight), 0);
+  if (!(sum > 0) || total <= 0) return weights.map(() => 0);
+  const raw = weights.map((weight) => (total * Math.max(0, weight)) / sum);
+  const shares = raw.map((value) => Math.floor(value * 100) / 100);
+  let remainder = round2(total - shares.reduce((acc, share) => acc + share, 0));
+  const order = raw
+    .map((value, index) => ({ index, fraction: value * 100 - Math.floor(value * 100) }))
+    .sort((a, b) => b.fraction - a.fraction || a.index - b.index);
+  for (const entry of order) {
+    if (remainder <= 0.001) break;
+    const add = Math.min(0.01, remainder);
+    shares[entry.index] = round2((shares[entry.index] ?? 0) + add);
+    remainder = round2(remainder - add);
+  }
+  return shares;
+}
+
 /**
  * 本月生产目标。
  *
@@ -98,6 +149,12 @@ export function laborCapacity(
  *
  * 有效需求只取决于购买力，不取决于可售数量：部分供应时不会把可售数量当成全部需求；
  * 购买力按当前可成交来源的最低价估算，没有可售供应时退化为市场价。
+ *
+ * v1.2 两阶段成交（各城产业循环公平性）：
+ * - 阶段 A：所有企业先按优先级买完本地可售库存（本地卖家与买家同城）；
+ * - 阶段 B：仍缺货的企业才跨城，可售供给按“各企业剩余缺口”加权分配
+ *   （最大余数到 0.01），成交前重新核对预算与授信。
+ * 阶段顺序只改变成交先后，不改变需求记账、融资裁决与账本口径。
  */
 export function runInputPurchasing(
   world: WorldState,
@@ -120,6 +177,10 @@ export function runInputPurchasing(
     return priority(b) - priority(a) || a.id.localeCompare(b.id);
   });
 
+  // v1.2：先完成所有企业的需求记账与融资裁决（口径不变），再分两阶段成交：
+  // 阶段 A 所有企业先买本地，阶段 B 跨城按剩余缺口比例分配。
+  const purchases: CompanyInputPurchasing[] = [];
+
   for (const company of ordered) {
     const city = world.cities.find((candidate) => candidate.id === company.cityId);
     const cityLedgers = ledgers[company.cityId];
@@ -139,11 +200,10 @@ export function runInputPurchasing(
     const wage = monthlyWageBill(company, config);
     const wageReserve = wage * config.company.wageReserveMonths * 0.5;
     let budget = round2(Math.max(0, company.cash - wageReserve));
-    let purchaseSpend = 0;
 
     // 1) 计划需求与可售供应：先完整收集，再决定融资与成交。
     //    完全没有供应时也保留需求，避免“needs 为空 → 提前跳过 → 市场显示 0 需求”。
-    const plans = shortages
+    const plans: InputPurchasePlan[] = shortages
       .filter((entry) => entry.shortage > 0)
       .map((entry) => {
         const goodId = entry.input.good;
@@ -278,11 +338,186 @@ export function runInputPurchasing(
       return { ...plan, effectiveDemand };
     });
 
-    // 4) 成交：只买有效需求内的量。无供应时不借款、不成交，只留下缺货未满足需求。
-    for (const plan of accounted) {
-      const ledger = cityLedgers[plan.goodId];
-      if (plan.effectiveDemand <= 0.01) continue;
+    // 4) 成交推迟到下面的阶段 A/B；这里只保存本企业的采购上下文，
+    //    预算与授信额度在成交时继续扣减。
+    purchases.push({
+      company,
+      city,
+      cityLedgers,
+      plans: accounted,
+      budget,
+      creditRoom,
+      bought: accounted.map(() => 0),
+    });
+  }
 
+  // 阶段 A：所有企业先买完全部本地可售库存。
+  // 本地卖家与买家同城，属于本城产业循环；先让所有城市的本地采购成交，
+  // 再开始跨城采购，避免排序靠前的大厂先到先得，把别城卖家的库存买空、
+  // 让卖家本城的产业只能吃跨城剩货（v1.1 消费侧公平性修复的同构问题）。
+  for (const pending of purchases) {
+    for (let index = 0; index < pending.plans.length; index += 1) {
+      const plan = pending.plans[index]!;
+      if (plan.effectiveDemand <= 0.01 || plan.localStock <= 0.01) continue;
+      const company = pending.company;
+      // 本地采购：先按真实报价估算所需现金，再在已裁决额度内放款（每笔独立合同）。
+      const localQuote = quoteLocalPurchase(
+        world,
+        pending.city,
+        plan.goodId,
+        plan.effectiveDemand,
+        pending.budget + pending.creditRoom,
+        company.id,
+      );
+      if (localQuote.qty > 0 && pending.budget < localQuote.cost - 0.01 && pending.creditRoom > 0) {
+        const needed = round2(Math.min(localQuote.cost - pending.budget, pending.creditRoom));
+        const drawn = drawPlannedWorkingCapital(world, config, tick, company, needed);
+        if (drawn > 0) {
+          pending.budget = round2(pending.budget + drawn);
+          pending.creditRoom = round2(Math.max(0, pending.creditRoom - drawn));
+        }
+      }
+      const local = executePurchase(
+        world,
+        pending.city,
+        pending.cityLedgers,
+        plan.goodId,
+        plan.effectiveDemand,
+        pending.budget,
+        { buyerCompanyId: company.id },
+      );
+      pending.budget = Math.max(0, round2(pending.budget - local.spend));
+      pending.bought[index] = round2((pending.bought[index] ?? 0) + local.qty);
+    }
+  }
+
+  // 阶段 B：跨城采购按“各企业剩余缺口比例”分配可售供给。
+  // 阶段 A 之后仍缺货的企业才进入跨城；可售供给是其他城市剩余库存，
+  // 按缺口加权（最大余数到 0.01）分摊，任何一个城市/企业都不能先到先得吃光。
+  interface IntercityDemand {
+    pending: CompanyInputPurchasing;
+    index: number;
+    remaining: number;
+  }
+  const demandsByGood = new Map<GoodId, IntercityDemand[]>();
+  for (const pending of purchases) {
+    for (let index = 0; index < pending.plans.length; index += 1) {
+      const plan = pending.plans[index]!;
+      const remaining = round2(plan.effectiveDemand - (pending.bought[index] ?? 0));
+      if (remaining <= 0.01 || plan.intercitySupply <= 0.01) continue;
+      if (pending.budget + pending.creditRoom <= 0.01) continue;
+      const list = demandsByGood.get(plan.goodId) ?? [];
+      list.push({ pending, index, remaining });
+      demandsByGood.set(plan.goodId, list);
+    }
+  }
+  for (const [goodId, demands] of demandsByGood) {
+    const totalGap = round2(demands.reduce((total, demand) => total + demand.remaining, 0));
+    if (totalGap <= 0.01) continue;
+    // 按城市统计阶段 A 之后的剩余可售库存。买方本城的剩余库存不再参与跨城分配：
+    // 它只能通过阶段 A 的本地成交卖出；若把它算进跨城可售，会让份额被本地库存“虚增”，
+    // 却无法真正成交（v1.2 §1：本地有效需求优先，剩余才跨城）。
+    const stockByCity = new Map<string, number>();
+    for (const seller of world.companies) {
+      const qty = offeredStock(seller, goodId);
+      if (qty <= 0.01) continue;
+      stockByCity.set(seller.cityId, round2((stockByCity.get(seller.cityId) ?? 0) + qty));
+    }
+    const totalStock = round2([...stockByCity.values()].reduce((total, qty) => total + qty, 0));
+    if (totalStock <= 0.01) continue;
+    const crossAvailable = (cityId: string): number =>
+      round2(Math.max(0, totalStock - (stockByCity.get(cityId) ?? 0)));
+    if (demands.every((demand) => crossAvailable(demand.pending.city.id) <= 0.01)) continue;
+    // 跨城成交总量不超过“缺口总量”，也不超过“其他城市剩余可售供给”，按缺口比例分摊；
+    // 每个买方再按“其他城市可售”上限回调，未用完的额度进入下一轮重新按比例分配，
+    // 仍然不是先到先得。
+    const allocations: number[] = demands.map(() => 0);
+    let pool = totalStock;
+    for (let pass = 0; pass < 3 && pool > 0.01; pass += 1) {
+      const eligible = demands
+        .map((demand, index) => ({ demand, index }))
+        .filter(
+          ({ demand, index }) =>
+            demand.remaining - (allocations[index] ?? 0) > 0.01 &&
+            crossAvailable(demand.pending.city.id) - (allocations[index] ?? 0) > 0.01,
+        );
+      if (eligible.length === 0) break;
+      const gapSum = round2(
+        eligible.reduce(
+          (total, { demand, index }) => total + demand.remaining - (allocations[index] ?? 0),
+          0,
+        ),
+      );
+      if (gapSum <= 0.01) break;
+      const shares = allocateByWeight(
+        round2(Math.min(gapSum, pool)),
+        eligible.map(({ demand, index }) => demand.remaining - (allocations[index] ?? 0)),
+      );
+      let used = 0;
+      eligible.forEach(({ demand, index }, position) => {
+        const remainingGap = round2(demand.remaining - (allocations[index] ?? 0));
+        const room = round2(
+          crossAvailable(demand.pending.city.id) - (allocations[index] ?? 0),
+        );
+        const granted = round2(
+          Math.max(0, Math.min(shares[position] ?? 0, remainingGap, room)),
+        );
+        allocations[index] = round2((allocations[index] ?? 0) + granted);
+        used = round2(used + granted);
+      });
+      if (used <= 0.01) break;
+      pool = round2(pool - used);
+    }
+    demands.forEach((demand, index) => {
+      const pending = demand.pending;
+      const company = pending.company;
+      const allocated = round2(Math.min(allocations[index] ?? 0, demand.remaining));
+      if (allocated <= 0.01) return;
+      // 成交前重新核对预算/授信：预算不足时再按真实报价申请已裁决额度内的周转贷。
+      const quote = quoteIntercityPurchase(
+        world,
+        pending.city,
+        goodId,
+        allocated,
+        pending.budget + pending.creditRoom,
+        config,
+        company.id,
+      );
+      const needed = round2(Math.max(0, quote.cost - pending.budget));
+      if (needed > 0.01 && pending.creditRoom > 0) {
+        const drawn = drawPlannedWorkingCapital(
+          world,
+          config,
+          tick,
+          company,
+          round2(Math.min(needed, pending.creditRoom)),
+        );
+        if (drawn > 0) {
+          pending.budget = round2(pending.budget + drawn);
+          pending.creditRoom = round2(Math.max(0, pending.creditRoom - drawn));
+        }
+      }
+      if (pending.budget <= 0.01) return;
+      const imported = executeIntercityPurchase(
+        world,
+        pending.city,
+        pending.cityLedgers,
+        goodId,
+        allocated,
+        pending.budget,
+        { buyerCompanyId: company.id },
+        config,
+      );
+      pending.budget = Math.max(0, round2(pending.budget - imported.spend));
+      pending.bought[demand.index] = round2((pending.bought[demand.index] ?? 0) + imported.qty);
+    });
+  }
+
+  // 需求收尾：缺货只按“有效需求 − 本地成交 − 跨城成交”记一次。
+  for (const pending of purchases) {
+    pending.plans.forEach((plan, index) => {
+      if (plan.effectiveDemand <= 0.01) return;
+      const ledger = pending.cityLedgers[plan.goodId];
       if (plan.supplyQty <= 0.01) {
         if (ledger) {
           ledger.unmetDemand = round2(ledger.unmetDemand + plan.effectiveDemand);
@@ -290,88 +525,11 @@ export function runInputPurchasing(
         log.push({
           tick,
           kind: 'market',
-          message: `${company.name} 需要 ${plan.shortage.toFixed(0)} ${plan.goodId}，但本地与跨城都没有可售供应（缺货 ${plan.effectiveDemand.toFixed(0)}）。`,
+          message: `${pending.company.name} 需要 ${plan.shortage.toFixed(0)} ${plan.goodId}，但本地与跨城都没有可售供应（缺货 ${plan.effectiveDemand.toFixed(0)}）。`,
         });
-        continue;
+        return;
       }
-
-      // 本地采购：先按真实报价估算所需现金，再在已裁决额度内放款（每笔独立合同）。
-      const localQuote = quoteLocalPurchase(
-        world,
-        city,
-        plan.goodId,
-        plan.effectiveDemand,
-        budget + creditRoom,
-        company.id,
-      );
-      if (localQuote.qty > 0 && budget < localQuote.cost - 0.01 && creditRoom > 0) {
-        const needed = round2(Math.min(localQuote.cost - budget, creditRoom));
-        const drawn = drawPlannedWorkingCapital(world, config, tick, company, needed);
-        if (drawn > 0) {
-          budget = round2(budget + drawn);
-          creditRoom = round2(Math.max(0, creditRoom - drawn));
-        }
-      }
-      const local = executePurchase(
-        world,
-        city,
-        cityLedgers,
-        plan.goodId,
-        plan.effectiveDemand,
-        budget,
-        { buyerCompanyId: company.id },
-      );
-      budget = Math.max(0, round2(budget - local.spend));
-      purchaseSpend = round2(purchaseSpend + local.spend);
-      let bought = local.qty;
-
-      // 跨城补货：只补本地未成交的部分，需求与未满足都不会重复计算。
-      const remainingDemand = round2(plan.effectiveDemand - local.qty);
-      if (
-        remainingDemand > 0.01 &&
-        plan.intercitySupply > 0.01 &&
-        budget + creditRoom > 0
-      ) {
-        const quote = quoteIntercityPurchase(
-          world,
-          city,
-          plan.goodId,
-          remainingDemand,
-          budget + creditRoom,
-          config,
-          company.id,
-        );
-        const needed = round2(Math.max(0, quote.cost - budget));
-        if (needed > 0.01 && creditRoom > 0) {
-          const drawn = drawPlannedWorkingCapital(
-            world,
-            config,
-            tick,
-            company,
-            round2(Math.min(needed, creditRoom)),
-          );
-          if (drawn > 0) {
-            budget = round2(budget + drawn);
-            creditRoom = round2(Math.max(0, creditRoom - drawn));
-          }
-        }
-        if (budget > 0) {
-          const imported = executeIntercityPurchase(
-            world,
-            city,
-            cityLedgers,
-            plan.goodId,
-            remainingDemand,
-            budget,
-            { buyerCompanyId: company.id },
-            config,
-          );
-          budget = Math.max(0, round2(budget - imported.spend));
-          purchaseSpend = round2(purchaseSpend + imported.spend);
-          bought = round2(bought + imported.qty);
-        }
-      }
-
+      const bought = pending.bought[index] ?? 0;
       if (ledger) {
         ledger.unmetDemand = round2(
           ledger.unmetDemand + Math.max(0, round2(plan.effectiveDemand - bought)),
@@ -381,12 +539,10 @@ export function runInputPurchasing(
         log.push({
           tick,
           kind: 'market',
-          message: `${company.name} 未能足额采购 ${plan.goodId}（计划 ${plan.shortage.toFixed(0)}，有效需求 ${plan.effectiveDemand.toFixed(0)}，成交 ${bought.toFixed(0)}）。`,
+          message: `${pending.company.name} 未能足额采购 ${plan.goodId}（计划 ${plan.shortage.toFixed(0)}，有效需求 ${plan.effectiveDemand.toFixed(0)}，成交 ${bought.toFixed(0)}）。`,
         });
       }
-    }
-
-    void purchaseSpend;
+    });
   }
 }
 

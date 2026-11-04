@@ -31,7 +31,7 @@ import { allocateProportionally, clamp, round2 } from '../core/math';
 import { companyBookValue, companySharePrice, monthlyWageBill } from '../companies/company';
 import { cityMarketPrices } from '../markets/markets';
 import { householdBasicNeedCost } from '../population/household-finance';
-import { householdGroupsOfCity } from '../population/household-groups';
+import { cityInvestorEquity, householdGroupsOfCity } from '../population/household-groups';
 import { PRODUCTIVITY } from '../../data/demo-data';
 import {
   acceptFinancingOffer,
@@ -125,9 +125,89 @@ function investorCashOfCity(world: WorldState, cityId: string): number {
 }
 
 /**
- * v1.1 §2 账本口径：按份额归属本月股息。
+ * v1.2 §1：有效份额 = 历史投入份额 + 一次性“开局无主旧资产”起始份额。
+ * 股息返还、股息归属、报告占比全部以有效份额为权威口径（未初始化账本按 0）。
+ */
+export function effectiveInvestorShares(ledger: HouseholdInvestorLedger | undefined): number {
+  if (!ledger) return 0;
+  return round2(Math.max(0, ledger.shares) + Math.max(0, ledger.openingShares ?? 0));
+}
+
+/**
+ * v1.2 §1：把投资实体“开局已有净资产”一次性记为各群体的起始份额。
+ *
+ * 为什么需要：投资实体在 v1.1 之前就持有现金与股票，这部分权益不是本月新投入买来的。
+ * 若只按“新增投入份额”分配股息，首个出资者会无偿取得全部旧资产收益；因此首次结算时
+ * 按开局人口把 `本城投资实体净资产（现金 + 持股估值）− 已有投入份额` 记为各群体的
+ * openingShares（分币最大余数法，合计严格等于无主净资产）。之后新增投入仍按 1:1 累加，
+ * 该函数幂等：所有群体都已记录（含 0）后不再改动。
+ *
+ * 口径说明：只做权益归属记账，不产生现金、不追溯修改居民现金或既有统计；旧档读取时补齐。
+ */
+export function ensureInvestorOpeningShares(world: WorldState): void {
+  const cities = [...world.cities].sort((a, b) => a.id.localeCompare(b.id));
+  for (const city of cities) {
+    const groups = householdGroupsOfCity(world, city.id);
+    if (groups.length === 0) continue;
+    // 已初始化（哪怕只有一个群体有值）后不再重算，避免把后续新增投入再算成“无主资产”。
+    const anyInitialized = groups.some(
+      (group) => group.investorLedger?.openingShares !== undefined,
+    );
+    if (anyInitialized) {
+      for (const group of groups) {
+        const ledger = ensureInvestorLedger(group);
+        if (ledger.openingShares === undefined) ledger.openingShares = 0;
+      }
+      continue;
+    }
+    const contributedShares = round2(
+      groups.reduce((sum, group) => sum + Math.max(0, group.investorLedger?.shares ?? 0), 0),
+    );
+    const equity = round2(cityInvestorEquity(world, city.id));
+    const unowned = round2(Math.max(0, equity - contributedShares));
+    // 按开局人口（基本生活费户数口径的人口权重）分摊；allocateMoney 保证合计不差分币。
+    const weights = groups.map((group) => Math.max(0, group.people));
+    const opening = allocateMoneyExact(unowned, weights);
+    groups.forEach((group, index) => {
+      ensureInvestorLedger(group).openingShares = opening[index] ?? 0;
+    });
+  }
+}
+
+/**
+ * v1.2 §1：把投资实体“实际返还居民”的月度股息按有效份额分给各居民群体。
+ *
+ * 与 finance.investorDistributionByCity 对接：该总额已由 distributeDividend 从实体现金
+ * 扣除（返还部分不入实体留存），这里只负责按权威份额账本落地到群体，不重复扣款/造币；
+ * 账本尚未建立（例如手工构造的世界）时按人口兜底，保证返还款不会凭空消失。
+ */
+export function allocateResidentDividendReturns(
+  world: WorldState,
+  cityId: string,
+  amount: number,
+): Map<string, number> {
+  const result = new Map<string, number>();
+  const target = round2(Math.max(0, amount));
+  if (target <= 0) return result;
+  const groups = householdGroupsOfCity(world, cityId);
+  if (groups.length === 0) return result;
+  ensureInvestorOpeningShares(world);
+  const weights = groups.map((group) => effectiveInvestorShares(group.investorLedger));
+  const totalShares = round2(weights.reduce((sum, value) => sum + value, 0));
+  const basis = totalShares > 0 ? weights : groups.map((group) => Math.max(0, group.people));
+  const shares = allocateMoneyExact(target, basis);
+  groups.forEach((group, index) => {
+    const value = shares[index] ?? 0;
+    if (value > 0) result.set(group.id, value);
+  });
+  return result;
+}
+
+/**
+ * v1.2 §1 账本口径：按有效份额归属本月股息。
  * 只记账、不划现金（现金仍由投资实体统一托管，返还居民部分按既有规则由实体扣除）；
  * 合计严格等于实体本月收到的股息（分币尾差给最后一个份额持有人）；同一 tick 幂等。
+ * 有效份额 = 历史投入份额 + 开局无主旧资产起始份额，与返还现金的分摊口径一致。
  */
 function attributeInvestorDividends(
   world: WorldState,
@@ -135,29 +215,83 @@ function attributeInvestorDividends(
   householdGroups: HouseholdGroup[],
   tick: number,
 ): void {
+  ensureInvestorOpeningShares(world);
   const ledgers = householdGroups
     .map((group) => group.investorLedger)
     .filter(
       (ledger): ledger is HouseholdInvestorLedger =>
-        Boolean(ledger) && (ledger?.shares ?? 0) > 0,
+        Boolean(ledger) && effectiveInvestorShares(ledger) > 0,
     );
   if (ledgers.length === 0) return;
   // 同月幂等：本月已经归属过就不再累加。
   if (ledgers.some((ledger) => ledger.lastDividendTick === tick)) return;
   const dividends = round2(totalInvestorDividendsByCity(world)[cityId] ?? 0);
   if (dividends <= 0) return;
-  const totalShares = round2(ledgers.reduce((sum, ledger) => sum + ledger.shares, 0));
+  const totalShares = round2(
+    ledgers.reduce((sum, ledger) => sum + effectiveInvestorShares(ledger), 0),
+  );
   if (totalShares <= 0) return;
   let assigned = 0;
   ledgers.forEach((ledger, index) => {
     const isLast = index === ledgers.length - 1;
     const amount = isLast
       ? round2(Math.max(0, dividends - assigned))
-      : round2((dividends * ledger.shares) / totalShares);
+      : round2((dividends * effectiveInvestorShares(ledger)) / totalShares);
     ledger.dividends = round2(ledger.dividends + amount);
     ledger.lastDividendTick = tick;
     assigned = round2(assigned + amount);
   });
+}
+
+/**
+ * v1.2 §1：跨城迁移时居民投资份额守恒转移（只迁移“城 + 职业”群体上的账本，不产生现金）。
+ *
+ * 按“迁出人数 / 源群体人数”把该群体的累计投入、记账份额与开局起始份额一并拆给目的地
+ * 同职业群体（整群迁出则全部改挂），两城有效份额合计严格不变；本函数不读写任何现金、
+ * 不改变投资实体现金与持股。自然人口变化不搬份额（份额挂在群体上，只改变人均权益），
+ * 因此本函数只应由跨城迁移钩子调用。
+ */
+export function transferInvestorLedgerForMigration(
+  world: WorldState,
+  fromCityId: string,
+  toCityId: string,
+  people: number,
+  laborForceMoved: number = people,
+): { effectiveSharesMoved: number } {
+  const result = { effectiveSharesMoved: 0 };
+  if (people <= 0 || fromCityId === toCityId) return result;
+  const laborMoving = Math.max(0, Math.min(people, Math.round(laborForceMoved)));
+  const legs: { occupation: HouseholdGroup['occupation']; moving: number }[] = [
+    { occupation: 'unemployed', moving: laborMoving },
+    { occupation: 'nonLabor', moving: people - laborMoving },
+  ];
+  const fromGroups = householdGroupsOfCity(world, fromCityId);
+  const toGroups = householdGroupsOfCity(world, toCityId);
+  for (const leg of legs) {
+    if (leg.moving <= 0) continue;
+    const source = fromGroups.find((group) => group.occupation === leg.occupation);
+    const destination = toGroups.find((group) => group.occupation === leg.occupation);
+    if (!source || !destination || source.people <= 0) continue;
+    const moving = Math.min(leg.moving, source.people);
+    if (moving <= 0) continue;
+    const whole = moving >= source.people;
+    const share = whole ? 1 : moving / source.people;
+    const from = ensureInvestorLedger(source);
+    const to = ensureInvestorLedger(destination);
+    const split = (value: number): number =>
+      round2(whole ? Math.max(0, value) : Math.max(0, value) * share);
+    const contributed = split(from.contributed);
+    const shares = split(from.shares);
+    const opening = split(from.openingShares ?? 0);
+    from.contributed = round2(from.contributed - contributed);
+    from.shares = round2(from.shares - shares);
+    from.openingShares = round2((from.openingShares ?? 0) - opening);
+    to.contributed = round2(to.contributed + contributed);
+    to.shares = round2(to.shares + shares);
+    to.openingShares = round2((to.openingShares ?? 0) + opening);
+    result.effectiveSharesMoved = round2(result.effectiveSharesMoved + shares + opening);
+  }
+  return result;
 }
 
 /** 记录本月投资实体资金用途快照；同一 tick 重算时覆盖而不是重复追加。 */
@@ -265,6 +399,41 @@ export function groupsOfCity(world: WorldState, cityId: string): InvestorGroup[]
 }
 
 /** 按比例分配金额并保证合计严格相等（余数给最后一个）。 */
+/**
+ * 以 0.01 为单位按权重分配，保证合计严格等于 total（份额/股息口径需要精确到分）。
+ * 与 household-economy.allocateMoney 同算法；此处本地实现避免 investors ↔ household-economy
+ * 的循环依赖。
+ */
+function allocateMoneyExact(total: number, weights: number[]): number[] {
+  const target = round2(total);
+  if (weights.length === 0) return [];
+  const cents = Math.round(target * 100);
+  if (cents <= 0) return weights.map(() => 0);
+  const weightSum = weights.reduce((acc, value) => acc + Math.max(0, value), 0);
+  if (weightSum <= 0) {
+    const base = Math.floor(cents / weights.length);
+    const result = weights.map(() => base);
+    for (let i = 0; i < cents - base * weights.length; i += 1) {
+      result[i] = (result[i] ?? 0) + 1;
+    }
+    return result.map((value) => round2(value / 100));
+  }
+  const exact = weights.map((value) => (Math.max(0, value) / weightSum) * cents);
+  const floors = exact.map((value) => Math.floor(value));
+  let remaining = cents - floors.reduce((sum, value) => sum + value, 0);
+  const order = exact
+    .map((value, index) => ({ index, fraction: value - Math.floor(value) }))
+    .sort((a, b) => b.fraction - a.fraction || a.index - b.index);
+  const result = [...floors];
+  for (let i = 0; i < order.length && remaining > 0; i += 1) {
+    const entry = order[i];
+    if (!entry) continue;
+    result[entry.index] = (result[entry.index] ?? 0) + 1;
+    remaining -= 1;
+  }
+  return result.map((value) => round2(value / 100));
+}
+
 function allocateMoney(total: number, weights: number[]): number[] {
   const counts = allocateProportionally(100_000, weights);
   const result = counts.map((count) => round2((total * count) / 100_000));

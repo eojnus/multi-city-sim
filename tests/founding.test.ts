@@ -247,37 +247,39 @@ describe('每月创办数量与城市上限', () => {
     return world;
   }
 
-  it('每城每月最多 4 家（v1.1），同月重复调用不会超发', () => {
+  it('每城每月最多 100 家（v1.2），同月重复调用不会超发', () => {
     const world = demandRichWorld();
     const created = maybeFoundCompanies(world, DEMO_CONFIG, []);
     const lanportCreated = world.lifecycle.foundings.filter(
       (record) => record.cityId === 'lanport' && record.tick === world.time.tick,
     );
-    expect(DEMO_CONFIG.lifecycle.maxFoundingsPerCityMonth).toBe(4);
-    expect(lanportCreated.length).toBeLessThanOrEqual(4);
-    expect(lanportCreated.length).toBeGreaterThan(0);
+    expect(DEMO_CONFIG.lifecycle.maxFoundingsPerCityMonth).toBe(100);
+    const lanportCount = world.lifecycle.foundingMonth?.counts.lanport ?? 0;
+    expect(lanportCount).toBeLessThanOrEqual(100);
+    expect(lanportCount).toBeGreaterThan(0);
     expect(new Set(created).size).toBe(created.length);
 
     const secondCall = maybeFoundCompanies(world, DEMO_CONFIG, []);
     expect(secondCall).toHaveLength(0);
-    expect(
-      world.lifecycle.foundings.filter(
-        (record) => record.cityId === 'lanport' && record.tick === world.time.tick,
-      ),
-    ).toHaveLength(lanportCreated.length);
+    expect(world.lifecycle.foundingMonth?.counts.lanport ?? 0).toBe(lanportCount);
   });
 
   it('下个月可以继续创办（不受旧冷却参数影响）', () => {
     const world = demandRichWorld();
     maybeFoundCompanies(world, DEMO_CONFIG, []);
-    const firstMonthCount = world.lifecycle.foundings.length;
+    const firstMonthCount = world.companies.length;
     world.time.tick += 1;
+    // v1.2 首月会把可用的政府设备库存/出资人现金基本用尽；为了让“下月可继续创办”可验证，
+    // 这里补充一次性设备库存与出资人现金（仍走真实设备采购与真实出资）。
+    world.equipmentMarket.initialStock = { farm: 5_000, industry: 5_000, energy: 5_000 };
+    for (const group of world.investors) group.cash = 100_000_000;
+    for (const company of world.companies) company.cash = 50_000_000;
     const looseConfig = {
       ...DEMO_CONFIG,
       lifecycle: { ...DEMO_CONFIG.lifecycle, maxCompaniesPerInvestorGroup: 99 },
     } as unknown as typeof DEMO_CONFIG;
     maybeFoundCompanies(world, looseConfig, []);
-    expect(world.lifecycle.foundings.length).toBeGreaterThan(firstMonthCount);
+    expect(world.companies.length).toBeGreaterThan(firstMonthCount);
   });
 
   it('城市企业数达到上限时不再创办，倒闭释放名额后可再创办', () => {

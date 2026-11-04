@@ -16,6 +16,7 @@ import {
 } from '../src/simulation/corporate-governance/governance';
 import { foundCompany, liquidateCompany } from '../src/simulation/companies/lifecycle/lifecycle';
 import { parseSave, serializeSave } from '../src/simulation/core/save';
+import { RECIPES } from '../src/data/demo-data';
 import { checkInvariants } from '../src/simulation/core/invariants';
 import { settleCompanyFinance } from '../src/simulation/finance/finance';
 import { setCompanyEmployees } from '../src/simulation/companies/company';
@@ -141,6 +142,12 @@ describe('修复一：政府持股的分红与公司治理', () => {
       other.lastMonth.inputCost = 0;
       other.lastMonth.wagesPaid = 0;
       other.lastMonth.profit = 0;
+    }
+    // v1.2：分红前必须保留经营工作资金（config.company.dividendReserveWageMonths/
+    // dividendReserveMaterialMonths）。无生产计划时按 capacity×utilization 估算原料缺口，
+    // 这里按该企业实际配方把原料备足，使保留额只剩工资项（员工数 0），利润可正常分配。
+    for (const input of RECIPES[company.recipeOutput].inputs) {
+      company.inventory[input.good] = 1_000_000;
     }
     company.cash = 1_000_000;
     company.debt = 0;

@@ -588,6 +588,60 @@ function money(value: number): number {
   return rounded === 0 ? 0 : rounded;
 }
 
+/**
+ * 单笔贷款“下一期义务”（v1.2 §2 共享口径）。
+ *
+ * 银行月度还款（serviceLoan）与政府债券的企业购债储备（companyMonthlyDebtService）共用本函数，
+ * 避免两套公式漂移：储备必须覆盖真实应还本息，否则企业会把已到期未付的逾期本金当成可认购现金。
+ *
+ * 口径：
+ * - scheduledPrincipal：下一期按合同应还本金（末期=剩余未偿本金）；
+ * - interestDue：按结算前剩余未偿本金计的当期利息；
+ * - arrearsInterestDue：已到期未付利息（无论下期是否到期都计入现金义务）；
+ * - arrearsPrincipalDue：已到期未付本金，是 outstanding 的子集，**不**与 scheduledPrincipal 重复相加；
+ * - collectiblePrincipal：本期实际可收本金上限 = min(outstanding, arrearsPrincipal + scheduledPrincipal)，
+ *   与 serviceLoan 的收款顺序（先息后本）一致；
+ * - total：下一期需现金合计（利息 + 可收本金）；未到期时只计已逾期的欠息/欠本。
+ */
+export interface LoanObligation {
+  /** 下一期是否在本次/下一次月结到期（nextDueTick <= tick + 1）。 */
+  due: boolean;
+  scheduledPrincipal: number;
+  interestDue: number;
+  arrearsInterestDue: number;
+  arrearsPrincipalDue: number;
+  collectiblePrincipal: number;
+  total: number;
+}
+
+export function nextLoanObligation(loan: LoanContract, tick: number): LoanObligation {
+  const outstanding = money(Math.max(0, loan.outstanding));
+  const periodNumber = loan.nextDueTick - loan.startTick;
+  const isFinalPeriod = periodNumber >= loan.termMonths;
+  const scheduledPrincipal = money(
+    isFinalPeriod ? outstanding : Math.min(loan.monthlyPrincipal, outstanding),
+  );
+  const interestDue = money(outstanding * loan.rateMonthly);
+  const arrearsInterestDue = money(Math.max(0, loan.arrearsInterest));
+  const arrearsPrincipalDue = money(Math.max(0, Math.min(loan.arrearsPrincipal, outstanding)));
+  const collectiblePrincipal = money(
+    Math.min(outstanding, arrearsPrincipalDue + scheduledPrincipal),
+  );
+  const due = loan.nextDueTick <= tick + 1;
+  const total = due
+    ? money(arrearsInterestDue + interestDue + collectiblePrincipal)
+    : money(arrearsInterestDue + arrearsPrincipalDue);
+  return {
+    due,
+    scheduledPrincipal,
+    interestDue,
+    arrearsInterestDue,
+    arrearsPrincipalDue,
+    collectiblePrincipal,
+    total,
+  };
+}
+
 /** 计入本月的违约次数（月度统计）；由 serviceLoan 在状态迁移时调用。 */
 function bankingNewDefaults(world: WorldState): void {
   if (!world.banking) return;
@@ -626,24 +680,23 @@ function serviceLoan(
 ): LoanServiceResult {
   const result = zeroServiceResult();
 
-  // 按结算前剩余本金计当月利息（本月放款不计本月，nextDueTick 保证首期在下一月）。
-  const interestDue = money(loan.outstanding * loan.rateMonthly);
+  // 与政府债券购债储备共用同一“下一期义务”口径（v1.2 §2），避免两套公式漂移。
+  // 本月放款不计本月：nextDueTick 保证首期在下一月。
+  const obligation = nextLoanObligation(loan, tick);
+  const interestDue = obligation.interestDue;
+  const scheduledPrincipal = obligation.scheduledPrincipal;
   const periodNumber = loan.nextDueTick - loan.startTick;
   const isFinalPeriod = periodNumber >= loan.termMonths;
-  const scheduledPrincipal = isFinalPeriod
-    ? money(loan.outstanding)
-    : money(Math.min(loan.monthlyPrincipal, loan.outstanding));
 
   // 先息后本：本期利息 + 历史欠息一起收；付完利息再收本金（含逾期本金）。
-  const owedInterest = money(loan.arrearsInterest + interestDue);
+  const owedInterest = money(obligation.arrearsInterestDue + interestDue);
   const cash = ownerCash(world, loan.borrower);
   const interestPaid = money(Math.min(cash, owedInterest));
   if (interestPaid > 0) debitOwnerCash(world, loan.borrower, interestPaid);
   const cashAfterInterest = money(cash - interestPaid);
 
-  const collectiblePrincipal = money(
-    Math.min(loan.outstanding, loan.arrearsPrincipal + scheduledPrincipal),
-  );
+  // 可收本金上限与 nextLoanObligation 同口径：逾期本金是未偿本金的子集，不重复相加。
+  const collectiblePrincipal = obligation.collectiblePrincipal;
   const principalPaid = money(Math.min(cashAfterInterest, collectiblePrincipal));
   if (principalPaid > 0) debitOwnerCash(world, loan.borrower, principalPaid);
 

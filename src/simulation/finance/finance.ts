@@ -1,5 +1,6 @@
 import type { Company, LogEntry, WorldState } from '../contracts/types';
 import type { DemoConfig } from '../../data/config';
+import { RECIPES } from '../../data/demo-data';
 import { clamp, round2 } from '../core/math';
 import { monthlyWageBill } from '../companies/company';
 import { serviceCompanyLoans } from '../banking/banking';
@@ -69,6 +70,43 @@ function estimateNextMonthDebtService(world: WorldState, company: Company): numb
     );
   }
   return total;
+}
+
+/**
+ * v1.2：企业分红前必须保留的经营工作资金。
+ *
+ * 口径（与 v1.1 §4 新创企业周转金原则一致，扩大到所有存续企业的分红环节）：
+ * - 工资：dividendReserveWageMonths × 月基础工资（monthlyWageBill，含岗位工资倍数，不含奖金）；
+ * - 原料：dividendReserveMaterialMonths × 按生产计划 plannedOutput 与现有库存缺口的计划原料采购额
+ *   （本城市场价估算，不把已有库存重复计入）。无生产计划时按 capacity×utilization 估算。
+ * 该函数只读、不改世界；分红上限 = min(利润×payoutRatio, cash − 本保留额)。
+ * 目的：修 v1.2 验收问题三定位到的“盈利企业 100% 分红后现金低于下月采购/工资所需，
+ * 有利润却买不起原料 → 停产 → 倒闭”的死锁；不产生现金，不影响利润/税收/持股。
+ */
+function companyDividendWorkingCapitalReserve(
+  world: WorldState,
+  config: DemoConfig,
+  company: Company,
+): number {
+  const wageMonths = Math.max(0, config.company.dividendReserveWageMonths);
+  const materialMonths = Math.max(0, config.company.dividendReserveMaterialMonths);
+  const wagePart = round2(monthlyWageBill(company, config) * wageMonths);
+  if (materialMonths <= 0) return wagePart;
+  const city = world.cities.find((entry) => entry.id === company.cityId);
+  const recipe = RECIPES[company.recipeOutput];
+  if (!city || !recipe || recipe.inputs.length === 0) return wagePart;
+  const plannedOutput =
+    company.productionPlan?.plannedOutput ?? company.capacity * company.utilization;
+  if (!(plannedOutput > 0)) return wagePart;
+  let materialNeed = 0;
+  for (const input of recipe.inputs) {
+    const required = round2(plannedOutput * input.qty);
+    const inStock = company.inventory[input.good] ?? 0;
+    const shortage = Math.max(0, round2(required - inStock));
+    if (shortage <= 0) continue;
+    materialNeed += shortage * (city.market[input.good]?.price ?? 1);
+  }
+  return round2(wagePart + round2(materialNeed) * materialMonths);
 }
 
 /**
@@ -147,11 +185,18 @@ export function settleCompanyFinance(
         lastDecisionTick: world.time.tick,
       };
     }
-    company.ai.lossMonths = stats.profit < 0 ? company.ai.lossMonths + 1 : 0;
+    // v1.2：欠薪是真实负债。若只看“已付工资”的账面利润，长期欠薪企业 profit 恒为 0，
+    // 永远不累计亏损月数，也就永远不会触发破产退出，形成冻结员工与设备、拖住产业的僵尸企业。
+    // 因此经营亏损按“账面利润 − 本月新增欠薪”判定（不改变利润/税收/分红的会计口径，只影响经营状态）。
+    const economicLoss = round2(stats.profit - stats.wageArrears);
+    company.ai.lossMonths = economicLoss < 0 ? company.ai.lossMonths + 1 : 0;
 
     const payoutRatio = clamp(company.dividendPayoutRatio, 0, 1);
     const dividendOwed = stats.profit > 0 ? round2(stats.profit * payoutRatio) : 0;
-    const reserve = monthlyWageBill(company, config) * 0.5;
+    // v1.2：分红前保留经营工作资金（见 config.company.dividendReserve*）。
+    // 旧口径只留 0.5 个月工资，导致盈利企业分红后现金低于下月采购/工资所需，
+    // 食品链因此在 t12–t13 出现“有利润却买不起原料 → 停产 → 倒闭”的死锁。
+    const reserve = companyDividendWorkingCapitalReserve(world, config, company);
     const dividendPaid = round2(
       Math.min(company.cash, dividendOwed, Math.max(0, company.cash - reserve)),
     );

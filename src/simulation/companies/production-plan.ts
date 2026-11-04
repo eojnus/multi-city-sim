@@ -491,7 +491,7 @@ export function recomputeProductionPlan(
   if (!Number.isFinite(intended)) intended = equipmentLimit;
   intended = Math.max(0, intended);
   const plannedOutput = round2(Math.max(0, Math.min(intended, laborLimit)));
-  const plannedJobs =
+  const rawPlannedJobs =
     laborLimit > 0 && company.employees > 0
       ? Math.max(
           0,
@@ -503,6 +503,19 @@ export function recomputeProductionPlan(
           0,
           Math.ceil(intended / outputPerEmployee(world, company, config)),
         );
+  // v1.2 §6：岗位需求必须被“设备产能可支撑的岗位数”封顶（设备产能 ÷ 人均产出）。
+  // 人均产出用劳动产能口径（含技术/技能/政策/1.08 系数），不得用 laborLimit / 现有员工数
+  // ——后者会随超额用工自我放大，让超编企业永远“需要”现有员工。超编只能按月度裁员率下降。
+  const equipmentJobCap =
+    equipmentLimit > 0.01
+      ? Math.max(
+          0,
+          Math.floor(
+            equipmentLimit / Math.max(0.01, outputPerEmployee(world, company, config)),
+          ),
+        )
+      : rawPlannedJobs;
+  const plannedJobs = Math.min(rawPlannedJobs, equipmentJobCap);
 
   // ---- 5b) 资源瓶颈判定与扩产评估（v1.0 首版） ----
   // 设备够却缺员工 → 优先招聘；员工够却缺原料 → 优先采购；只有设备是瓶颈且扩产
@@ -559,6 +572,11 @@ export function recomputeProductionPlan(
     );
   }
   reasons.push(...expansion.reasons);
+  if (rawPlannedJobs > equipmentJobCap) {
+    reasons.push(
+      `岗位需求受设备产能限制：设备产能 ${equipmentLimit.toFixed(2)} 最多支撑 ${equipmentJobCap} 人，计划岗位 ${plannedJobs} 人（原 ${rawPlannedJobs} 人），超编人员按月度裁员率下降`,
+    );
+  }
   if (stuck) reasons.push(`成品库存超过 ${planCfg.stuckInventoryMonths} 个月销量，紧急下调`);
   if (cashTight)
     reasons.push(

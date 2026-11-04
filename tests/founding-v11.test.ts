@@ -140,6 +140,7 @@ describe('v1.1 规模降档 4→2→1', () => {
   it('最小 1 台档也买不起资金时失败，零副作用并记录周转金/资本障碍', () => {
     const world = newWorld();
     seedGap(world, 'lanport', 'food');
+    // 2M 出资 + 授信同样不够 1 台最小可行档（约 24M）：零副作用失败。
     soloFounder(world, 2_000_000);
     const companiesBefore = world.companies.length;
     const cashBefore = totalOwnedCash(world);
@@ -240,8 +241,8 @@ describe('v1.1 创办失败回滚与守恒', () => {
   });
 });
 
-describe('v1.1 每城每月 4 家与 160 上限', () => {
-  it('每城每月最多 4 家，同月重复调用不再超发', () => {
+describe('v1.2 每城每月 100 家与 160 上限', () => {
+  it('每城每月最多 100 家，同月重复调用不再超发', () => {
     const world = newWorld();
     makeRich(world);
     for (const city of world.cities) {
@@ -250,13 +251,13 @@ describe('v1.1 每城每月 4 家与 160 上限', () => {
       seedGap(world, city.id, 'household');
     }
     const created = maybeFoundCompanies(world, DEMO_CONFIG, []);
-    expect(DEMO_CONFIG.lifecycle.maxFoundingsPerCityMonth).toBe(4);
-    expect(created).toHaveLength(12);
+    expect(DEMO_CONFIG.lifecycle.maxFoundingsPerCityMonth).toBe(100);
+    // 100 是上限不是目标：实际数量还受设备库存/资金/劳动力约束，但必须 > 0 且每城不超 100。
+    expect(created.length).toBeGreaterThan(0);
     for (const city of world.cities) {
-      const count = world.lifecycle.foundings.filter(
-        (record) => record.cityId === city.id && record.tick === world.time.tick,
-      ).length;
-      expect(count).toBe(4);
+      const count = world.lifecycle.foundingMonth?.counts[city.id] ?? 0;
+      expect(count).toBeGreaterThan(0);
+      expect(count).toBeLessThanOrEqual(100);
     }
     const second = maybeFoundCompanies(world, DEMO_CONFIG, []);
     expect(second).toHaveLength(0);
@@ -286,5 +287,35 @@ describe('v1.1 每城每月 4 家与 160 上限', () => {
     );
     expect(holdings.reduce((sum, holding) => sum + holding.shares, 0)).toBeCloseTo(1_000_000, 0);
     expect(checkInvariants(world)).toEqual([]);
+  });
+});
+
+describe('v1.2 成立后首月资金可持续（不被在营企业抽干）', () => {
+  it('自动创办不再用在营企业出资；新企业首月不欠薪、保留周转现金', () => {
+    const sim = Simulation.create(DEMO_CONFIG);
+    const world = sim.state;
+    makeRich(world);
+    for (const city of world.cities) seedGap(world, city.id, 'food');
+    const existing = [...world.companies];
+    const cashBefore = new Map(existing.map((company) => [company.id, company.cash]));
+    const created = maybeFoundCompanies(world, DEMO_CONFIG, []);
+    expect(created.length).toBeGreaterThan(0);
+    // 1) 在营企业的现金不能被本轮创办抽走（旧缺陷：把在营企业当出资人，整笔现金转给新企业）。
+    for (const company of existing) {
+      // 设备厂卖出设备会增加现金，但任何在营企业都不应因“被当作出资人”而减少现金。
+      expect(company.cash, company.id).toBeGreaterThanOrEqual(cashBefore.get(company.id)! - 0.01);
+    }
+    // 2) 新企业真实买到设备，且成立时保留周转金。
+    const newCompanies = created.map((id) => world.companies.find((company) => company.id === id)!);
+    for (const company of newCompanies) {
+      expect(company.equipmentCapacity, company.id).toBeGreaterThan(0);
+      expect(company.cash, company.id).toBeGreaterThan(0);
+    }
+    // 3) 完整跑一个月：新办企业不得出现工资欠薪，也不得首月工资支付超过其现金。
+    sim.tick();
+    for (const company of newCompanies) {
+      expect(company.lastMonth.wageArrears, company.id).toBe(0);
+      expect(company.cash, company.id).toBeGreaterThan(0);
+    }
   });
 });

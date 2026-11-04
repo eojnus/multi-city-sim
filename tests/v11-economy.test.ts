@@ -94,10 +94,11 @@ describe('v1.1 §9 横切：旧 v0.9 真实存档', () => {
     expect(checkInvariants(sim.state)).toEqual([]);
 
     // 旧档只能自然存续/创办，绝不能被重新执行新开局（每城 +16 家、人口 ×5）。
-    // v1.1 每城每月最多自动创办 4 家（3 城合计 ≤12），一个月最多新增 12 家，
-    // 远小于“重新执行开局”的 48 家；因此上限取 30 + 12。
+    // v1.2 每城每月自动创办上限已提升到 config.lifecycle.maxFoundingsPerCityMonth（默认 100），
+    // 单月新增上界为 3 城 × 月上限；人口不 ×5 与设备余量仍能识别“重新执行开局”。
+    const maxFoundingsPerMonth = 3 * DEMO_CONFIG.lifecycle.maxFoundingsPerCityMonth;
     expect(sim.state.companies.length).toBeGreaterThanOrEqual(before.companyCount);
-    expect(sim.state.companies.length).toBeLessThan(before.companyCount + 13);
+    expect(sim.state.companies.length).toBeLessThan(before.companyCount + maxFoundingsPerMonth + 1);
     for (const id of before.companyIds) {
       expect(sim.state.companies.some((company) => company.id === id), `${id} 丢失`).toBe(true);
     }

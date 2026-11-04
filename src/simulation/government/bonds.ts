@@ -32,6 +32,7 @@ import { RECIPES } from '../../data/demo-data';
 import { round2 } from '../core/math';
 import { monthlyWageBill } from '../companies/company';
 import { bankLoansOf, debitOwnerCash, ownerCash, ownerKey, sameOwner } from '../banking/credit';
+import { nextLoanObligation } from '../banking/banking';
 import { receiveTreasury, spendTreasury } from './treasury';
 import { applyBankAdvance } from './debt';
 
@@ -132,15 +133,16 @@ function holderLabel(world: WorldState, holder: BondHolder): string {
 }
 
 /**
- * v1.1 §5：企业购债前必须保留的三项已分配资金。
+ * v1.1 §5 / v1.2 §2：企业购债前必须保留的三项已分配资金。
  *
  * 口径（与生产/银行结算同源，避免占用已分配资金）：
  * - 工资储备：wageMonths × 月基础工资（monthlyWageBill，含岗位工资倍数，不含奖金）；
  * - 原料储备：materialMonths × 计划原料采购额。按生产计划 plannedOutput 与现有库存的
  *   缺口 × 本城市场价估算，不把已有库存重复计入采购额；
- * - 偿债储备：debtServiceMonths × 下一期已知应还贷款本息。只计入“下一月结到期”的分期
- *   （nextDueTick <= tick + 1），逾期欠息无论到期时点都计入；口径与 banking.serviceLoan
- *   的下一期本息一致（末期还剩余本金），避免用借来的钱购债。
+ * - 偿债储备：debtServiceMonths × 下一期已知应还贷款本息。与 banking.nextLoanObligation /
+ *   serviceLoan 共用同一口径：包含下一月结到期的分期本金与利息，也包含**已到期未付的逾期本金**
+ *   （arrearsPrincipal，outstanding 的子集，不重复相加）和逾期欠息；末期按剩余本金结清。
+ *   不得把已到期未付的债务资金当成可认购现金，也不得用贷款资金购债。
  */
 export interface CompanyBondReserveBreakdown {
   wages: number;
@@ -152,7 +154,7 @@ export interface CompanyBondReserveBreakdown {
   available: number;
 }
 
-/** 企业下一期已知应还贷款本息（含逾期欠息），与 banking.serviceLoan 的下一期口径一致。 */
+/** 企业下一期已知应还贷款本息（含逾期欠本/欠息），与 banking.serviceLoan 共用 nextLoanObligation 口径。 */
 function companyMonthlyDebtService(
   world: WorldState,
   companyId: string,
@@ -162,16 +164,9 @@ function companyMonthlyDebtService(
   for (const loan of bankLoansOf(world)) {
     if (loan.status !== 'active') continue;
     if (!sameOwner(loan.borrower, { kind: 'company', id: companyId })) continue;
-    // 逾期欠息是额外现金义务；逾期欠本已包含在 outstanding 的下一期本金里，不重复计。
-    total += loan.arrearsInterest;
-    if (loan.nextDueTick > tick + 1) continue;
-    const periodNumber = loan.nextDueTick - loan.startTick;
-    const isFinal = periodNumber >= loan.termMonths;
-    const interestDue = loan.outstanding * loan.rateMonthly;
-    const principalDue = isFinal
-      ? loan.outstanding
-      : Math.min(loan.monthlyPrincipal, loan.outstanding);
-    total += interestDue + principalDue;
+    // v1.2 §2：直接复用银行“下一期义务”口径——逾期本金（arrearsPrincipal，outstanding 的子集）
+    // 必须计入储备；不能只取 scheduledPrincipal，否则企业会把已到期未付的债务资金当成可认购现金。
+    total += nextLoanObligation(loan, tick).total;
   }
   return round2(total);
 }

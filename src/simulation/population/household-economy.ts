@@ -21,6 +21,7 @@ import { round2 } from '../core/math';
 import type { FinanceResult } from '../finance/finance';
 import { occupationWageRate } from '../companies/company';
 import { householdGroupsOfCity } from './household-groups';
+import { allocateResidentDividendReturns } from '../investors/investors';
 
 const WAGE_OCCUPATIONS: (keyof RoleAllocation)[] = ['management', 'production', 'sales', 'research'];
 
@@ -161,14 +162,28 @@ export function splitCityHouseholdIncome(
     if (nonLaborGroup) benefits.set(nonLaborGroup.id, nonLaborShare ?? 0);
   }
 
-  // 4. 股息返还：按群体人口比例归属。
+  // 4. 股息返还：v1.2 §1 权威口径 = 居民投资实体份额账本（历史投入份额 + 开局无主旧资产
+  //    起始份额），不再按人口比例。返还总额已由 distributeDividend 从实体现金扣除，
+  //    这里只按份额落地到群体（含尾差，合计严格等于返还额），不重复扣款、不造币。
   const residentDividends = finance.investorDistributionByCity[city.id] ?? 0;
   if (residentDividends > 0) {
-    const shares = allocateMoney(
-      residentDividends,
-      groups.map((group) => group.people),
-    );
-    groups.forEach((group, index) => dividends.set(group.id, shares[index] ?? 0));
+    const shares = allocateResidentDividendReturns(world, city.id, residentDividends);
+    let assigned = 0;
+    for (const group of groups) {
+      const amount = shares.get(group.id) ?? 0;
+      if (amount > 0) {
+        dividends.set(group.id, amount);
+        assigned = round2(assigned + amount);
+      }
+    }
+    // 防御：账本金额与总额出现分币级差异时，把尾差放到人口最多的群体，保证账目闭合。
+    const diff = round2(residentDividends - assigned);
+    if (Math.abs(diff) >= 0.01) {
+      const target = [...groups].sort(
+        (a, b) => b.people - a.people || a.id.localeCompare(b.id),
+      )[0];
+      if (target) dividends.set(target.id, round2((dividends.get(target.id) ?? 0) + diff));
+    }
   }
 
   // 5. 交通退款：优先按“实际购买群体”归属（跨城购买产生的退款），

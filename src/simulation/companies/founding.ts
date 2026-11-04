@@ -20,6 +20,7 @@ import { workforceSkillMultiplier } from '../labor/workforce';
 import { groupsOfCity } from '../investors/investors';
 import { startupSupportActive } from '../policies/query';
 import { payableShortageFromMarket } from './production-plan';
+import { monthlyWageBill } from './company';
 
 /**
  * 创业评估（v0.9 T3 起步，v1.0 task-27 扩展为“最小可行规模”）。
@@ -446,7 +447,10 @@ export function founderCapacityFor(
           record.founderType === 'company' &&
           record.investors.some((investor) => investor.id === company.id),
       );
-      return count < config.lifecycle.maxCompaniesPerCompany ? Math.max(0, company.cash) : 0;
+      if (count >= config.lifecycle.maxCompaniesPerCompany) return 0;
+      // v1.2：企业出资人只能用「扣掉 2 个月工资缓冲后的余钱」，避免抽干在营企业运转资金。
+      const reserve = monthlyWageBill(company, config) * 2;
+      return Math.max(0, round2(company.cash - reserve));
     }
     return companyFounderCapacity(world, config, city);
   }
@@ -477,6 +481,8 @@ function buildTier(
 ): FoundingScaleTier {
   const equipCost = round2(units * candidate.unitPrice);
   const capacity = units * candidate.unitCapacity;
+  // v1.2 量纲统一：岗位由“设备产能 ÷ 人均产出”推出，与 reconcileLabor / 生产计划的岗位口径一致；
+  // 计划产量、工资、首批原料、周转金、销量全部使用同一产出量纲。
   const outputQty = capacity * config.company.initialUtilization;
   const jobs = Math.max(1, Math.ceil(outputQty / economics.perEmployee));
   const monthlyWage = round2(jobs * config.labor.privateWageRate);
@@ -550,8 +556,7 @@ function buildTier(
       detail: `本档需要 ${jobs} 名员工，超过本城劳动力 ${city.population.laborForce}`,
     });
   }
-  const outputCapacity = capacity * config.company.initialUtilization;
-  const sales = Math.min(candidate.reachableSales, outputCapacity);
+  const sales = Math.min(candidate.reachableSales, outputQty);
   if (sales <= 0) {
     blockers.push({
       kind: 'demand',
@@ -598,6 +603,7 @@ export function retuneTierForCapacity(
   reachableSales: number,
   unitMargin: number,
   unitCapacity: number,
+  perEmployee?: number,
 ): FoundingScaleTier {
   const blockers = tier.blockers.filter(
     (blocker) =>
@@ -653,7 +659,12 @@ export function retuneTierForCapacity(
   if (tier.jobs > laborForce) {
     blockers.push({ kind: 'labor', detail: `本档需要 ${tier.jobs} 名员工，超过本城劳动力 ${laborForce}` });
   }
-  const outputQty = tier.units * unitCapacity * config.company.initialUtilization;
+  const theoreticalOutput = tier.units * unitCapacity * config.company.initialUtilization;
+  // 与 buildTier 同口径：实际产量受“可运营岗位 × 人均产出”约束，避免用设备理论产能高估销量/利润。
+  const outputQty =
+    typeof perEmployee === 'number' && perEmployee > 0
+      ? Math.min(theoreticalOutput, tier.jobs * perEmployee)
+      : theoreticalOutput;
   const sales = Math.min(reachableSales, outputQty);
   if (sales <= 0) {
     blockers.push({ kind: 'demand', detail: '当前没有可触达的订单' });
@@ -688,6 +699,7 @@ export function selectFoundingTier(
   const reachableSales = assessmentMetricsSales(assessment);
   const unitMargin = unitMarginOfAssessment(assessment);
   const unitCapacity = unitCapacityOfAssessment(assessment);
+  const perEmployee = perEmployeeOfAssessment(assessment);
   for (const tier of assessment.scaleTiers) {
     const retuned = retuneTierForCapacity(
       tier,
@@ -699,6 +711,7 @@ export function selectFoundingTier(
       reachableSales,
       unitMargin,
       unitCapacity,
+      perEmployee,
     );
     if (retuned.feasible) return retuned;
   }
@@ -712,6 +725,7 @@ export function retuneTierForAssessment(
   founderCapacity: number,
   config: DemoConfig,
   allowLoan = true,
+  laborLimit?: number,
 ): FoundingScaleTier {
   const retuned = retuneTierForCapacity(
     tier,
@@ -719,10 +733,11 @@ export function retuneTierForAssessment(
     assessment.requiredCapital,
     config,
     purchasableUnitsForAssessment(assessment),
-    laborForceOf(assessment),
+    laborLimit ?? laborForceOf(assessment),
     assessmentMetricsSales(assessment),
     unitMarginOfAssessment(assessment),
     unitCapacityOfAssessment(assessment),
+    perEmployeeOfAssessment(assessment),
   );
   if (allowLoan) return retuned;
   const product = config.banking.products.workingCapital;
@@ -765,6 +780,7 @@ interface FoundingAssessmentInternals {
   purchasableUnits: number;
   laborForce: number;
   reachableSales: number;
+  perEmployee: number;
 }
 
 type FoundingAssessmentWithInternals = FoundingAssessment & Partial<FoundingAssessmentInternals>;
@@ -787,6 +803,10 @@ function unitMarginOfAssessment(assessment: FoundingAssessment): number {
 
 function unitCapacityOfAssessment(assessment: FoundingAssessment): number {
   return (assessment as FoundingAssessmentWithInternals).unitCapacityForTier ?? 1;
+}
+
+function perEmployeeOfAssessment(assessment: FoundingAssessment): number {
+  return (assessment as FoundingAssessmentWithInternals).perEmployee ?? 0;
 }
 
 // ---------------------------------------------------------------- v0.9 兼容的七维评分（供既有 API 使用）
@@ -1181,6 +1201,7 @@ export function assessFounding(
     purchasableUnits: purchasable,
     laborForce: city.population.laborForce,
     reachableSales: candidate.reachableSales,
+    perEmployee: economics.perEmployee,
   };
   return assessment;
 }
