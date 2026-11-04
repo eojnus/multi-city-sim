@@ -3,7 +3,7 @@ import type { DemoConfig } from '../../data/config';
 import { round2 } from '../core/math';
 import { companyStyleLabel, planCompanyDecision } from './ai/strategy';
 import { expandCompanyCapacity } from './lifecycle/lifecycle';
-import { recomputeProductionPlan, assessExpansion } from './production-plan';
+import { recomputeProductionPlan, assessExpansion, cityShortageFor } from './production-plan';
 import { currentStyle } from '../management/manager-pool';
 import { planPlayerOperatedCompany } from '../management/operations';
 import { legalWorkingCapitalRoom } from '../management/financing';
@@ -54,11 +54,17 @@ export function planCompanies(
     // 保留 2 月工资 + 近期偿债后仍有资金）；不满足时不执行设备投资，只记录原因。
     // 玩家经营企业的扩产走玩家授权/提案，不受这条自动判定约束。
     if (decision.investment >= config.companyAi.capacityCostPerUnit) {
+      // v1.1 §6：缺货驱动的恢复——存在真实有效缺货时放宽“上月利用率不足”的限制，
+      // 仍然保留库存、本月计划利用率与“保留 2 月工资 + 近期偿债”的资金约束。
+      const expansionCity = world.cities.find((candidate) => candidate.id === company.cityId);
       const expansion = assessExpansion(world, company, config, {
         plannedOutput: productionPlan.plannedOutput,
         equipmentLimit: productionPlan.equipmentLimit,
         salesReference: productionPlan.salesReference,
         laborLimit: productionPlan.laborLimit,
+        cityShortage: expansionCity
+          ? cityShortageFor(world, expansionCity, company.recipeOutput)
+          : 0,
       });
       if (!expansion.eligible) {
         decision.investment = 0;

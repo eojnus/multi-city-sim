@@ -21,9 +21,18 @@ function setup(companyCash = 5_000) {
   const company = world.companies.find((entry) => entry.cityId === city.id);
   if (!company) throw new Error('缺少测试企业');
   company.cash = companyCash;
-  company.previousMonth.wagesPaid = 0;
-  company.previousMonth.interestPaid = 0;
+  // v1.1 §5：购债可用现金 = 现金 −（2 个月工资 + 1 个月计划原料 + 1 个月已知偿债）。
+  // 本组验收只验证“认购只用自有资金、不得触发贷款”，故把三项储备清零，使可用现金=现金。
+  company.employees = 0;
+  company.roles = { management: 0, production: 0, sales: 0, research: 0 };
+  company.productionPlan = null;
+  company.utilization = 0;
   company.lastMonth.wageArrears = 0;
+  if (world.banking) {
+    world.banking.loans = world.banking.loans.filter(
+      (loan) => !(loan.borrower.kind === 'company' && loan.borrower.id === company.id),
+    );
+  }
   const issuance = issueGovernmentBond(world, city, CONFIG, 10, 0).issuance!;
   return { world, city, company, issuance };
 }

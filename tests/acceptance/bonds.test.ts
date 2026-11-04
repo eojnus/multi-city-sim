@@ -151,11 +151,15 @@ describe('AC-B04 多主体认购归属', () => {
     const company = world.companies.find((entry) => entry.cityId === city.id)!;
     investor.cash = 3_000;
     company.cash = 1_000;
-    company.previousMonth.wagesPaid = 0;
-    company.previousMonth.interestPaid = 0;
-    company.lastMonth.wageArrears = 0;
-
+    // v1.1 §5：购债可用现金 = 现金 −（2 个月工资 + 1 个月计划原料 + 1 个月已知偿债）。
+    // 本用例只验证多主体归属，因此不修改企业员工（会破坏就业守恒不变量），
+    // 而是给足现金，只买 1 份（面额 1,000）。
     const issuance = issue(world, city, 10).issuance!;
+    // v1.1 §5：购债可用现金 = 现金 −（2 个月工资 + 1 个月计划原料 + 1 个月已知偿债）。
+    // 不把员工清零（会破坏“雇主员工合计 == 就业人口”不变量），改为给足现金，
+    // 只买 1 份（面额 1,000），并断言现金相应减少。
+    company.cash = 1_000_000_000;
+    const companyCashBefore = company.cash;
     expect(
       subscribeGovernmentBond(world, CONFIG, issuance.id, PLAYER, 2, 0).units,
     ).toBe(2);
@@ -183,7 +187,8 @@ describe('AC-B04 多主体认购归属', () => {
 
     expect(world.player.cash).toBe(0);
     expect(investor.cash).toBe(0);
-    expect(company.cash).toBe(0);
+    // 企业仅认购 1 份（1,000），现金只减少该面额，其余作为经营储备保留。
+    expect(company.cash).toBeCloseTo(companyCashBefore - 1_000, 6);
     const holdings = holdingsOf(world, issuance.id);
     expect(holdings).toHaveLength(3);
     const unitsByKind = new Map(holdings.map((holding) => [holding.holder.kind, holding.units]));

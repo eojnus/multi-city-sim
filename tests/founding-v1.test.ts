@@ -48,10 +48,10 @@ function makeRich(world: WorldState): void {
   for (const city of world.cities) {
     city.treasury = 200_000_000;
     for (const group of world.investors) {
-      if (group.cityId === city.id) group.cash = 200_000_000;
+      if (group.cityId === city.id) group.cash = 2_000_000_000;
     }
     for (const company of world.companies) {
-      if (company.cityId === city.id) company.cash = 100_000_000;
+      if (company.cityId === city.id) company.cash = 1_000_000_000;
     }
   }
 }
@@ -121,16 +121,17 @@ describe('v1.0 创业评估：最小可行规模档位', () => {
       assessment.equipmentKind,
       DEMO_CONFIG,
     );
+    const byUnits = new Map(assessment.scaleTiers.map((tier) => [tier.units, tier]));
     for (const tier of assessment.scaleTiers) {
       expect(tier.equipmentCost).toBeCloseTo(unitPrice * tier.units, 2);
       expect(tier.jobs).toBeGreaterThan(0);
       expect(tier.firstBatchInputCost).toBeGreaterThan(0);
       expect(tier.workingCapital).toBeGreaterThan(0);
     }
-    // 员工数随设备台数成比例（同一行业、同一城市生产率）。
-    const first = assessment.scaleTiers[0]!;
-    const second = assessment.scaleTiers[1]!;
-    const fourth = assessment.scaleTiers[2]!;
+    // v1.1：档位按 4→2→1 降档；员工数仍随设备台数成比例（同一行业、同一城市生产率）。
+    const first = byUnits.get(1)!;
+    const second = byUnits.get(2)!;
+    const fourth = byUnits.get(4)!;
     expect(second.jobs).toBeGreaterThanOrEqual(first.jobs * 2 - 1);
     expect(second.jobs).toBeLessThanOrEqual(first.jobs * 2);
     expect(fourth.jobs).toBeGreaterThanOrEqual(first.jobs * 4 - 2);
@@ -206,13 +207,16 @@ describe('v1.0 创办失败：设备/资本/授信障碍', () => {
     expect(attempt.outcome).toBe('rejected');
     expect(
       attempt.obstacles.some(
-        (obstacle) => obstacle.kind === 'capital' || obstacle.kind === 'credit',
+        (obstacle) =>
+          obstacle.kind === 'capital' ||
+          obstacle.kind === 'credit' ||
+          obstacle.kind === 'workingCapital',
       ),
     ).toBe(true);
     expect(attempt.note).toContain('创办被拒绝');
   });
 
-  it('启动资金缺口超过银行授信时记录 credit 障碍', () => {
+  it('启动资金缺口超过银行授信时记录资金/周转金障碍', () => {
     const world = newWorld();
     seedGap(world, 'lanport', 'food');
     const group = world.investors
@@ -231,7 +235,11 @@ describe('v1.0 创办失败：设备/资本/授信障碍', () => {
     expect(result.ok).toBe(false);
     const attempt = foundingAttempts(world).at(-1)!;
     expect(attempt.outcome).toBe('rejected');
-    expect(attempt.obstacles.some((obstacle) => obstacle.kind === 'credit')).toBe(true);
+    expect(
+      attempt.obstacles.some(
+        (obstacle) => obstacle.kind === 'workingCapital' || obstacle.kind === 'capital',
+      ),
+    ).toBe(true);
     expect(group.cash).toBe(8_500_000);
     expect(world.companies.every((company) => company.id !== result.companyId)).toBe(true);
   });
@@ -263,7 +271,8 @@ describe('v1.0 创办成功：真实设备、出资、贷款与守恒', () => {
     const attempt = foundingAttempts(world).at(-1)!;
     expect(attempt.outcome).toBe('founded');
     expect(attempt.companyId).toBe(company.id);
-    expect(attempt.tierUnits).toBe(1);
+    // v1.1：资金充足时按 4→2→1 优先选择最大可行档（4 台），降档逻辑见 founding-v11.test.ts。
+    expect(attempt.tierUnits).toBe(4);
     expect(attempt.loan).toBe(0);
     expect(world.lifecycle.foundings).toHaveLength(1);
     const record = world.lifecycle.foundings[0]!;
@@ -310,8 +319,8 @@ describe('v1.0 创办成功：真实设备、出资、贷款与守恒', () => {
       .filter((entry) => entry.cityId === 'lanport')
       .sort((a, b) => b.cash - a.cash);
     for (const group of groups) group.cash = 0;
-    // 出资能力介于“最低资本”与“启动成本”之间 → 需要贷款才能达到最小可行档。
-    groups[0]!.cash = 10_000_000;
+    // 出资能力介于“最低资本”与“完整启动成本”之间 → 需要贷款才能达到 1 台最小可行档。
+    groups[0]!.cash = 18_000_000;
     for (const company of world.companies) company.cash = 0;
     cityOf(world, 'lanport').treasury = 0;
 
@@ -325,13 +334,13 @@ describe('v1.0 创办成功：真实设备、出资、贷款与守恒', () => {
     const attempt = foundingAttempts(world).at(-1)!;
     expect(attempt.loan).toBeGreaterThan(0);
     expect(company.debt).toBeCloseTo(attempt.loan, 2);
-    const creditLimit = (10_000_000 + 300_000) * DEMO_CONFIG.banking.creditLimitRate;
+    const creditLimit = (18_000_000 + 300_000) * DEMO_CONFIG.banking.creditLimitRate;
     expect(attempt.loan).toBeLessThanOrEqual(creditLimit + 0.01);
   });
 });
 
 describe('v1.0 创办数量与经营权限约束', () => {
-  it('每城每月最多 2 家，重复调用同 tick 不再增设；初始 65 家不变', () => {
+  it('每城每月最多 4 家（v1.1），重复调用同 tick 不再增设；初始 65 家不变', () => {
     const world = newWorld();
     expect(world.companies).toHaveLength(65);
     expect(world.lifecycle.foundings).toHaveLength(0);
@@ -340,12 +349,12 @@ describe('v1.0 创办数量与经营权限约束', () => {
       seedGap(world, city.id, output);
     }
     const first = maybeFoundCompanies(world, DEMO_CONFIG, []);
-    expect(first.length).toBe(6);
+    expect(first.length).toBe(12);
     for (const city of world.cities) {
       const count = world.lifecycle.foundings.filter(
         (record) => record.cityId === city.id && record.tick === world.time.tick,
       ).length;
-      expect(count).toBeLessThanOrEqual(2);
+      expect(count).toBeLessThanOrEqual(4);
     }
     const second = maybeFoundCompanies(world, DEMO_CONFIG, []);
     expect(second).toHaveLength(0);

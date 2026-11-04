@@ -38,7 +38,7 @@ describe('v0.9 开局人口与企业数量', () => {
     expect(world.companies.length).toBe(COMPANY_SEEDS.length + OPENING_COMPANIES.length);
     expect(world.companies.length).toBe(65);
     expect(DEMO_CONFIG.lifecycle.maxCompaniesPerCity).toBe(160);
-    expect(DEMO_CONFIG.lifecycle.maxFoundingsPerCityMonth).toBe(2);
+    expect(DEMO_CONFIG.lifecycle.maxFoundingsPerCityMonth).toBe(4);
   });
 
   it('每家企业有与行业匹配的设备资产，设备产能 = 缓存产能', () => {

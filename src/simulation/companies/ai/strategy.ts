@@ -9,7 +9,7 @@ import type { DemoConfig } from '../../../data/config';
 import { PRODUCTIVITY } from '../../../data/demo-data';
 import { clamp, round2 } from '../../core/math';
 import { monthlyWageBill } from '../company';
-import { recomputeProductionPlan } from '../production-plan';
+import { recomputeProductionPlan, cityShortageFor } from '../production-plan';
 import { effectiveWageRate, hiringSubsidyPerHire, retentionSubsidyPerEmployee } from '../../policies/query';
 import { workforceSkillMultiplier } from '../../labor/workforce';
 
@@ -88,7 +88,8 @@ export function planCompanyDecision(
   );
   reasons.push(...productionPlan.reasons.slice(0, 6));
 
-  const unmet = city.market[output]?.unmetDemand ?? 0;
+  // v1.1：缺货信号与生产计划同口径（有效需求 − 已成交 − 跨城进口，且不把资金不足当缺货）。
+  const unmet = cityShortageFor(world, city, output);
   if (unmet > 0 && !productionPlan.emergency) {
     reasons.push(`市场需求未满足 ${unmet.toFixed(0)}，按生产计划扩大招聘/投资`);
   }

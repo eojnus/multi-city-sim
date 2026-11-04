@@ -400,12 +400,15 @@ function computeGroupDemand(
   group.desiredCost = round2(desiredCost);
   // 非基本需求只能用日常预算扣掉“基本需求现金保障”之后的剩余部分，避免靠贷款突破预算、耗尽积蓄。
   const nonBasicBudget = round2(Math.max(0, group.dailyBudget - group.essentialCashCap));
+  // v1.1 §8：effective 是“可支付的有效需求”，非基本需求不得突破日常预算。
+  // 此前用 minAffordability 下限抬高比例，会让有效需求成本超过预算，缺口随后被消费贷融资，
+  // 既违反“非基本消费受预算约束”，也违反“贷款只补真实缺口”的支付顺序。
   const nonBasicAffordability =
     nonBasicDesiredCost <= 0
       ? 1
       : nonBasicBudget <= 0
         ? 0
-        : clamp(nonBasicBudget / nonBasicDesiredCost, config.consumer.minAffordability, 1);
+        : clamp(nonBasicBudget / nonBasicDesiredCost, 0, 1);
   group.affordability =
     group.desiredCost <= 0 ? 1 : clamp(group.dailyBudget / group.desiredCost, 0, 1);
   for (const good of CONSUMER_GOODS) {

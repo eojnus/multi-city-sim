@@ -107,6 +107,8 @@ export const DEMO_CONFIG = {
     employedNeedFactor: 1.0,
     unemployedNeedFactor: 0.72,
     nonLaborNeedFactor: 0.6,
+    // v1.1 §8 起非基本有效需求不再用此值抬升下限（effective 必须是可支付需求），
+    // 字段保留以兼容旧配置/存档读取；消费贷阶段不得为超出日常预算的非基本需求放贷。
     minAffordability: 0.15,
   },
   market: {
@@ -200,9 +202,9 @@ export const DEMO_CONFIG = {
     maxCompaniesPerInvestorGroup: 3,
     maxCompaniesPerCompany: 1,
     maxGovernmentCompaniesPerCity: 1,
-    /** v0.9【已确认】：为适配 5 倍人口与 160 家上限，每城每月最多自动创办 2 家。 */
-    maxFoundingsPerCityMonth: 2,
-    /** v0.9：旧冷却已与“每城每月最多 2 家”冲突，改为不额外限制（由月度上限控制节奏）。 */
+    /** v1.1【已确认】：小规模真实创业，每城每月最多自动创办 4 家（原 2 家）；160 在营上限不变。 */
+    maxFoundingsPerCityMonth: 4,
+    /** v0.9：旧冷却已与月度创办上限冲突，改为不额外限制（由月度上限控制节奏）。 */
     foundingCooldownMonths: 0,
     /** 每个居民投资实体对应的居民人数（仅用于资格判断，不新增人口）。 */
     populationPerInvestorGroup: 60_000,
@@ -341,7 +343,13 @@ export const DEMO_CONFIG = {
     maxInvestmentCapacityGain: 0.15,
     initialInventoryMonths: 1.2,
     initialOutputMonths: 0.55,
-    initialCashWageMonths: 1.6,
+    /**
+     * v1.1 §4：开局流动资金（月工资倍数）。
+     * 任务书要求买完启动设备后至少保留“2 个月基础工资 + 1 个月计划原料采购额”；
+     * 原料采购额由 initializer 按首月目标产量 × 配方用量 × 城市市场价单独计入，
+     * 因此这里只列工资部分（原 1.6，v1.1 调整为 2）。个别种子（如设备厂）可覆盖更高值。
+     */
+    initialCashWageMonths: 2,
     /** 演示：企业可获得最多 3 个月工资额的营运资金信贷，月息 1%。 */
     creditLimitWageMonths: 6,
     creditInterestRate: 0.005,
@@ -759,15 +767,17 @@ export const DEMO_CONFIG = {
       couponGuaranteedByBank: false,
     },
     /**
-     * v1.4 #23/#37：企业认购国债的流动性保留口径（数值岗：各留 1 个月）。
-     * 可用于购债上限 = 企业现金 − 上月实发工资 × wageMonths − 上月应付利息 × interestMonths；低于 0 不可认购。
+     * v1.1 §5：企业认购国债的流动性保留口径（替换 v1.4 #23/#37 的“1 个月工资 + 1 个月利息”）。
+     * 可用于购债上限 = 企业现金 −（工资储备 + 原料储备 + 偿债储备），低于 0 不可认购：
+     * - wageMonths 个月基础工资（monthlyWageBill，含岗位工资倍数，不含奖金）；
+     * - materialMonths 个月计划原料采购额（按生产计划 plannedOutput 与现有库存缺口 × 本城市场价，不双计库存）；
+     * - debtServiceMonths 个月已知应还贷款本息（下一期本息 + 逾期欠息，与 serviceLoan 同口径）。
+     * 只有扣除这些已分配资金后的剩余自有现金才能购债；不得用贷款资金认购。
      */
     companyPurchaseReserve: {
-      // v0.7 既有规则：企业自动认购国债前保留 1 个月实发工资 + 1 个月利息。
-      // v1.0 排查记录：该储备偏薄，企业会把大部分经营现金换成国债（单城单月可达 3347 万），
-      // 是流动性冲击源之一；本轮未擅自调整（属既有规则），已在交付报告中列为待决策事项。
-      wageMonths: 1,
-      interestMonths: 1,
+      wageMonths: 2,
+      materialMonths: 1,
+      debtServiceMonths: 1,
     },
     /** 政府普通银行贷款（沿用现有银行规则：等额本金、次月起还、月利率计提）。 */
     loan: {

@@ -23,11 +23,14 @@ import type {
   BondIssuance,
   BondPayment,
   City,
+  Company,
   LogEntry,
   WorldState,
 } from '../contracts/types';
 import type { DemoConfig } from '../../data/config';
+import { RECIPES } from '../../data/demo-data';
 import { round2 } from '../core/math';
+import { monthlyWageBill } from '../companies/company';
 import { bankLoansOf, debitOwnerCash, ownerCash, ownerKey, sameOwner } from '../banking/credit';
 import { receiveTreasury, spendTreasury } from './treasury';
 import { applyBankAdvance } from './debt';
@@ -128,15 +131,100 @@ function holderLabel(world: WorldState, holder: BondHolder): string {
   return company ? `企业 · ${company.name}` : `企业 · ${holder.id}`;
 }
 
-/** 企业上月应付利息（用于购债流动性保留口径 #23：按银行贷款未偿本金估算当月应付利息）。 */
-function companyMonthlyInterestDue(world: WorldState, companyId: string): number {
-  let interest = 0;
+/**
+ * v1.1 §5：企业购债前必须保留的三项已分配资金。
+ *
+ * 口径（与生产/银行结算同源，避免占用已分配资金）：
+ * - 工资储备：wageMonths × 月基础工资（monthlyWageBill，含岗位工资倍数，不含奖金）；
+ * - 原料储备：materialMonths × 计划原料采购额。按生产计划 plannedOutput 与现有库存的
+ *   缺口 × 本城市场价估算，不把已有库存重复计入采购额；
+ * - 偿债储备：debtServiceMonths × 下一期已知应还贷款本息。只计入“下一月结到期”的分期
+ *   （nextDueTick <= tick + 1），逾期欠息无论到期时点都计入；口径与 banking.serviceLoan
+ *   的下一期本息一致（末期还剩余本金），避免用借来的钱购债。
+ */
+export interface CompanyBondReserveBreakdown {
+  wages: number;
+  materials: number;
+  debtService: number;
+  /** 三项合计（企业购债前必须保留的现金）。 */
+  reserved: number;
+  /** 扣除储备后的可认购现金（≥0）。 */
+  available: number;
+}
+
+/** 企业下一期已知应还贷款本息（含逾期欠息），与 banking.serviceLoan 的下一期口径一致。 */
+function companyMonthlyDebtService(
+  world: WorldState,
+  companyId: string,
+  tick: number,
+): number {
+  let total = 0;
   for (const loan of bankLoansOf(world)) {
     if (loan.status !== 'active') continue;
     if (!sameOwner(loan.borrower, { kind: 'company', id: companyId })) continue;
-    interest += loan.outstanding * loan.rateMonthly;
+    // 逾期欠息是额外现金义务；逾期欠本已包含在 outstanding 的下一期本金里，不重复计。
+    total += loan.arrearsInterest;
+    if (loan.nextDueTick > tick + 1) continue;
+    const periodNumber = loan.nextDueTick - loan.startTick;
+    const isFinal = periodNumber >= loan.termMonths;
+    const interestDue = loan.outstanding * loan.rateMonthly;
+    const principalDue = isFinal
+      ? loan.outstanding
+      : Math.min(loan.monthlyPrincipal, loan.outstanding);
+    total += interestDue + principalDue;
   }
-  return round2(interest);
+  return round2(total);
+}
+
+/** 企业一个月计划原料采购额：按计划产量与现有库存缺口 × 本城市场价估算（不双计库存）。 */
+function companyPlannedMaterialPurchases(
+  world: WorldState,
+  company: Company,
+): number {
+  const city = world.cities.find((entry) => entry.id === company.cityId);
+  if (!city) return 0;
+  const recipe = RECIPES[company.recipeOutput];
+  if (!recipe || recipe.inputs.length === 0) return 0;
+  const plannedOutput =
+    company.productionPlan?.plannedOutput ?? company.capacity * company.utilization;
+  if (!(plannedOutput > 0)) return 0;
+  let total = 0;
+  for (const input of recipe.inputs) {
+    const required = round2(plannedOutput * input.qty);
+    const inStock = company.inventory[input.good] ?? 0;
+    const shortage = Math.max(0, round2(required - inStock));
+    if (shortage <= 0) continue;
+    const price = city.market[input.good]?.price ?? 1;
+    total += shortage * price;
+  }
+  return round2(total);
+}
+
+/** 企业购债储备明细（供 UI/测试核对；不修改世界状态）。 */
+export function companyBondReserve(
+  world: WorldState,
+  config: DemoConfig,
+  companyId: string,
+): CompanyBondReserveBreakdown | null {
+  const company = world.companies.find((entry) => entry.id === companyId);
+  if (!company) return null;
+  const reserve = config.government.companyPurchaseReserve;
+  const wages = round2(monthlyWageBill(company, config) * Math.max(0, reserve.wageMonths));
+  const materials = round2(
+    companyPlannedMaterialPurchases(world, company) * Math.max(0, reserve.materialMonths),
+  );
+  const debtService = round2(
+    companyMonthlyDebtService(world, companyId, world.time.tick) *
+      Math.max(0, reserve.debtServiceMonths),
+  );
+  const reserved = round2(wages + materials + debtService);
+  return {
+    wages,
+    materials,
+    debtService,
+    reserved,
+    available: round2(Math.max(0, company.cash - reserved)),
+  };
 }
 
 /**
@@ -162,9 +250,9 @@ export function companySubscriptionBlockReason(
 
 /**
  * 债券持有人的真实可用现金（用于认购上限）：
- * 玩家=现金；居民投资实体=现金；企业=现金 − 上月实发工资×wageMonths − 上月应付利息×interestMonths
- * （#23/#37 流动性保留，剩余零钱保留、不强制凑整）。
- * 被禁止认购的企业返回 0；任何主体都不会因认购触发贷款。
+ * 玩家=现金；居民投资实体=现金；企业=现金 −（工资储备 + 原料储备 + 偿债储备），
+ * 见 companyBondReserve / config.government.companyPurchaseReserve（v1.1 §5）。
+ * 剩余零钱保留、不强制凑整；被禁止认购的企业返回 0；任何主体都不会因认购触发贷款。
  */
 export function bondHolderAvailableCash(
   world: WorldState,
@@ -176,19 +264,9 @@ export function bondHolderAvailableCash(
     return round2(Math.max(0, ownerCash(world, holder)));
   }
   if (companySubscriptionBlockReason(world, holder.id) !== null) return 0;
-  const company = world.companies.find((entry) => entry.id === holder.id);
-  if (!company) return 0;
-  const reserve = config.government.companyPurchaseReserve;
-  const wages =
-    company.previousMonth.wagesPaid > 0
-      ? company.previousMonth.wagesPaid
-      : company.lastMonth.wagesPaid;
-  const interestBase =
-    company.previousMonth.interestPaid > 0
-      ? company.previousMonth.interestPaid
-      : companyMonthlyInterestDue(world, company.id);
-  const reserved = round2(wages * reserve.wageMonths + interestBase * reserve.interestMonths);
-  return round2(Math.max(0, company.cash - reserved));
+  const breakdown = companyBondReserve(world, config, holder.id);
+  if (!breakdown) return 0;
+  return breakdown.available;
 }
 
 /** 确定性认购顺序：config.government.bondMarket.subscriptionOrder 展开为具体持有人。 */

@@ -1217,13 +1217,16 @@ export function distributeBankruptGovernmentShares(
           custody = true;
           targets = [{ holder: { type: 'trust', id: `trust-${company.id}` }, shares: totalShares }];
         } else {
-          const cents = Math.round(totalShares * 100);
-          const each = Math.floor(cents / holderList.length);
-          let remainder = cents - each * holderList.length;
+          // 股份必须保持整数：按“最大余数法”把整数股均分给持有人，
+          // 余数按确定性顺序（holderList 已按 holder key 排序）逐人 +1 股。
+          // 不能用 round2 到 0.01 股，否则持股合计与发行量不守恒（v1.1 回归修复）。
+          const wholeShares = Math.max(0, Math.round(totalShares));
+          const each = Math.floor(wholeShares / holderList.length);
+          let remainder = wholeShares - each * holderList.length;
           targets = holderList.map((entry) => {
             const bonus = remainder > 0 ? 1 : 0;
             if (remainder > 0) remainder -= 1;
-            return { holder: entry.holder, shares: round2((each + bonus) / 100) };
+            return { holder: entry.holder, shares: each + bonus };
           });
         }
       }

@@ -2,9 +2,12 @@
 // 普通居民不逐个建模；群体不是额外人口，populationShare 只用于分配居民收入。
 //
 // 暂定演示规则（待用户决定）：
-// - 每月按“居民闲钱”规则从居民群体手头现金转入投资实体（v1.0 第五节）：每个群体先保留
-//   3 个月基本生活需求资金，仅对保留额以上的闲置现金每月最多转入 0.5%；不提取存款、
-//   不借消费贷，群体现金不足（或无闲置）时不转，转入后现金不会为负。
+// - 每月按“居民闲钱”规则从居民群体手头现金转入投资实体（v1.1 §2）：每个群体先保留
+//   3 个月基本生活需求资金，仅对保留额以上的闲置现金每月最多转入 1%；取消“当月收入
+//   为零则不能投资”——收入为零但仍有闲钱时按闲钱上限转入。不提取存款、不借消费贷，
+//   群体现金不足（或无闲置）时不转，转入后现金不会为负。
+// - 每笔转入与每月股息归属记入可审计的简化份额账本（HouseholdGroup.investorLedger），
+//   现金仍由投资实体统一托管；账本记录“谁投入、多少份额、应归属多少股息”，不重复计收入。
 // - 实体收到的股息按 dividendDistributionRate 返还居民收入，其余留存投资。
 // - 自动投资规则可替换：投票权与仅分红两类股份都参与买卖打分；投票权接近持股上限时
 //   只排除投票权买入，仅分红类别按股息收益率、折价、趋势与风险偏好独立评估；
@@ -15,7 +18,10 @@ import type {
   Company,
   HolderRef,
   HouseholdGroup,
+  HouseholdInvestorLedger,
+  InvestorFundingEntry,
   InvestorGroup,
+  InvestorUsageEntry,
   LogEntry,
   ShareClass,
   WorldState,
@@ -42,12 +48,15 @@ import { latestStockPrice, stockHistoryFor } from '../securities/history';
 const GROUP_NAME_SUFFIX = ['储蓄互助会', '工薪投资者联盟', '城市养老基金'];
 
 /**
- * v1.0 第五节“居民闲钱投资实体”首版口径（config 未设键，先以模块常量固定）：
- * 群体先保留 3 个月基本生活需求资金；超出部分为闲置现金，每月最多转入 0.5%。
+ * v1.1 §2“居民闲钱投资实体”首版口径（config 未设键，先以模块常量固定）：
+ * 群体先保留 3 个月基本生活需求资金；超出部分为闲置现金，每月最多转入 1%。
  * 后续若要调参，应迁移到 config.investors，而不是散落魔法数。
  */
 export const BASIC_NEED_RESERVE_MONTHS = 3;
-export const IDLE_CASH_MONTHLY_INVEST_SHARE = 0.005;
+export const IDLE_CASH_MONTHLY_INVEST_SHARE = 0.01;
+
+/** v1.1 §2：报告保留的月度转入/用途流水月数（72 月报告用；超出裁掉最旧记录）。 */
+export const INVESTOR_FUNDING_HISTORY_MONTHS = 72;
 
 /** 群体预计 3 个月基本生活需求保留额（基本需求 food 口径，见 household-finance）。 */
 export function householdBasicNeedReserve(
@@ -73,7 +82,141 @@ export function householdIdleCash(
 }
 
 /**
- * 把可投总额按各群体闲置现金比例分摊，且每组不超过自身闲置现金的 0.5%。
+ * 读取（必要时初始化）居民闲钱投资流水账本。
+ * v1.1 新字段，旧存档缺省视为空数组；不改动既有数据，保持存档 v9 兼容。
+ */
+function ensureInvestorFundingHistory(world: WorldState): InvestorFundingEntry[] {
+  if (!Array.isArray(world.households.investorFundingHistory)) {
+    world.households.investorFundingHistory = [];
+  }
+  return world.households.investorFundingHistory;
+}
+
+/** 读取（必要时初始化）每城每月投资实体资金用途快照（v1.1 可选字段，旧档兜底为空数组）。 */
+function ensureInvestorUsageHistory(world: WorldState): InvestorUsageEntry[] {
+  if (!Array.isArray(world.households.investorUsageHistory)) {
+    world.households.investorUsageHistory = [];
+  }
+  return world.households.investorUsageHistory;
+}
+
+/** 读取（必要时初始化）群体的投资份额账本；只记投入/份额/分红归属，不凭空造钱。 */
+function ensureInvestorLedger(group: HouseholdGroup): HouseholdInvestorLedger {
+  if (!group.investorLedger) {
+    group.investorLedger = {
+      contributed: 0,
+      shares: 0,
+      dividends: 0,
+      // 从未发生记为 -1（而不是 0）：tick 0 时也要能与“本月已记账”区分，避免幂等判断误挡。
+      lastContributionTick: -1,
+      lastDividendTick: -1,
+    };
+  }
+  return group.investorLedger;
+}
+
+/** 本城投资实体现金合计（用途快照与报告口径）。 */
+function investorCashOfCity(world: WorldState, cityId: string): number {
+  return round2(
+    world.investors
+      .filter((investor) => investor.cityId === cityId)
+      .reduce((sum, investor) => sum + investor.cash, 0),
+  );
+}
+
+/**
+ * v1.1 §2 账本口径：按份额归属本月股息。
+ * 只记账、不划现金（现金仍由投资实体统一托管，返还居民部分按既有规则由实体扣除）；
+ * 合计严格等于实体本月收到的股息（分币尾差给最后一个份额持有人）；同一 tick 幂等。
+ */
+function attributeInvestorDividends(
+  world: WorldState,
+  cityId: string,
+  householdGroups: HouseholdGroup[],
+  tick: number,
+): void {
+  const ledgers = householdGroups
+    .map((group) => group.investorLedger)
+    .filter(
+      (ledger): ledger is HouseholdInvestorLedger =>
+        Boolean(ledger) && (ledger?.shares ?? 0) > 0,
+    );
+  if (ledgers.length === 0) return;
+  // 同月幂等：本月已经归属过就不再累加。
+  if (ledgers.some((ledger) => ledger.lastDividendTick === tick)) return;
+  const dividends = round2(totalInvestorDividendsByCity(world)[cityId] ?? 0);
+  if (dividends <= 0) return;
+  const totalShares = round2(ledgers.reduce((sum, ledger) => sum + ledger.shares, 0));
+  if (totalShares <= 0) return;
+  let assigned = 0;
+  ledgers.forEach((ledger, index) => {
+    const isLast = index === ledgers.length - 1;
+    const amount = isLast
+      ? round2(Math.max(0, dividends - assigned))
+      : round2((dividends * ledger.shares) / totalShares);
+    ledger.dividends = round2(ledger.dividends + amount);
+    ledger.lastDividendTick = tick;
+    assigned = round2(assigned + amount);
+  });
+}
+
+/** 记录本月投资实体资金用途快照；同一 tick 重算时覆盖而不是重复追加。 */
+function recordInvestorUsage(
+  world: WorldState,
+  config: DemoConfig,
+  history: InvestorUsageEntry[],
+  cityId: string,
+  tick: number,
+  contributed: number,
+  dividends: number,
+): void {
+  const closingCash = investorCashOfCity(world, cityId);
+  const rate = clamp(config.investors.dividendDistributionRate, 0, 1);
+  const dividendsReturned = round2(dividends * rate);
+  const dividendsRetained = round2(dividends - dividendsReturned);
+  const previous = [...history]
+    .reverse()
+    .find((entry) => entry.cityId === cityId && entry.tick < tick);
+  const openingCash = previous
+    ? previous.closingCash
+    : round2(Math.max(0, closingCash - contributed - dividendsRetained));
+  // 用途估算：期初 + 本月流入 − 期末 = 本月用于投资（买股/创办/设备等）的现金。
+  const invested = round2(Math.max(0, openingCash + contributed + dividendsRetained - closingCash));
+  const entry: InvestorUsageEntry = {
+    tick,
+    cityId,
+    contributed,
+    dividendsReceived: dividends,
+    dividendsReturned,
+    dividendsRetained,
+    openingCash,
+    closingCash,
+    invested,
+  };
+  const existing = history.findIndex((item) => item.tick === tick && item.cityId === cityId);
+  if (existing >= 0) history[existing] = entry;
+  else history.push(entry);
+}
+
+/** 裁剪投资流水到最近 INVESTOR_FUNDING_HISTORY_MONTHS 月，避免存档无限增长。 */
+function pruneInvestorFundingHistory(
+  funding: InvestorFundingEntry[],
+  usage: InvestorUsageEntry[],
+  tick: number,
+): void {
+  const cutoff = tick - INVESTOR_FUNDING_HISTORY_MONTHS;
+  for (let index = funding.length - 1; index >= 0; index -= 1) {
+    const entry = funding[index];
+    if (!entry || entry.tick <= cutoff) funding.splice(index, 1);
+  }
+  for (let index = usage.length - 1; index >= 0; index -= 1) {
+    const entry = usage[index];
+    if (!entry || entry.tick <= cutoff) usage.splice(index, 1);
+  }
+}
+
+/**
+ * 把可投总额按各群体闲置现金比例分摊，且每组不超过自身闲置现金的 1%。
  * 尾差（分币级）按剩余容量从大到小补足，保证合计严格等于 target；确定性、无随机。
  */
 function allocateIdleSavings(idles: number[], target: number): number[] {
@@ -180,32 +323,41 @@ export function totalInvestorDividendsByCity(world: WorldState): Record<string, 
 }
 
 /**
- * 从居民闲钱转入投资实体。
+ * 从居民闲钱转入投资实体（v1.1 §2）。
  *
- * v1.0 第五节口径（config 暂未设键，首版以模块常量固定）：
+ * 口径（config 暂未设键，首版以模块常量固定）：
  * 1. 每个居民群体先保留 3 个月基本生活需求资金（householdBasicNeedCost 的 food 口径，
  *    人口 × 人均月需求 × 市场价），超出部分才是“闲置现金”；
- * 2. 每月最多把每群体闲置现金的 0.5% 转入投资实体（城市合计即闲置现金总额的 0.5%）；
- * 3. 只动 group.cash，不提取银行存款、不借消费贷，转入后现金不会为负；
- * 4. 转入额只是资金用途划分，不增加货币总量，也不计入居民收入（income/dividendIncome 不变）。
- *
- * 旧的“按收入 savingsRate 转账”意愿额保留为上限之一：实际转入 = min(收入意愿额, 闲钱上限)，
- * 这样既有规则被闲钱规则封顶，不会叠加成过度抽走消费资金；小额收入场景仍按 savingsRate 执行，
- * 与既有测试口径兼容。同一月重复调用时跳过（防重复扣款）。
+ * 2. 每月最多把每群体闲置现金的 1% 转入投资实体（城市合计即闲置现金总额的 1%）；
+ * 3. **取消“当月收入为零则不能投资”**：收入为零（失业/非劳动群体）只要仍有超过保留额的
+ *    闲钱，也按闲钱上限转入；有收入时仍与旧口径整合为 min(收入 × savingsRate, 闲钱上限)，
+ *    不会把两条规则叠加成两次扣款；
+ * 4. 只动 group.cash，不提取银行存款、不借消费贷，转入后现金不会为负；
+ * 5. 真实转账（居民现金减少 = 投资实体现金增加），不增加货币总量、不计入居民收入；
+ * 6. 每笔转入与每月股息归属写入可审计份额账本与月度流水（v1.1 §2），账本只记账不改现金。
+ * 同一月重复调用时跳过（防重复扣款）；流水按 (tick, 城) 去重，避免重算造成重复记录。
  */
 export function collectInvestableFunds(world: WorldState, config: DemoConfig, log: LogEntry[]): void {
+  const tick = world.time.tick;
+  const fundingHistory = ensureInvestorFundingHistory(world);
+  const usageHistory = ensureInvestorUsageHistory(world);
   for (const city of [...world.cities].sort((a, b) => a.id.localeCompare(b.id))) {
     const groups = groupsOfCity(world, city.id);
     if (groups.length === 0) continue;
-    // 同月幂等：本月已执行过（investableContribution>0）就不再扣第二次。
-    if (city.lastMonth.investableContribution > 0) continue;
+    const householdGroups = householdGroupsOfCity(world, city.id);
+    // 同月幂等：本月已执行过（investableContribution>0）就不再扣第二次；
+    // 股息归属按 tick 单独幂等，因此这里只补账、不重复转账。
+    if (city.lastMonth.investableContribution > 0) {
+      attributeInvestorDividends(world, city.id, householdGroups, tick);
+      continue;
+    }
     const income = Math.max(0, city.householdIncomeLastMonth);
     const incomeDesired = round2(income * config.investors.savingsRate);
-    const householdGroups = householdGroupsOfCity(world, city.id);
     const idles = householdGroups.map((group) => householdIdleCash(world, group, config));
     const idleTotal = round2(idles.reduce((sum, value) => sum + value, 0));
     const idleCap = round2(idleTotal * IDLE_CASH_MONTHLY_INVEST_SHARE);
-    const target = round2(Math.max(0, Math.min(incomeDesired, idleCap)));
+    // v1.1：收入为零不再阻止投资；有收入时仍取收入意愿额与闲钱上限的较小者。
+    const target = round2(income > 0 ? Math.min(incomeDesired, idleCap) : idleCap);
     const takes = allocateIdleSavings(idles, target);
     let contribution = 0;
     householdGroups.forEach((group, index) => {
@@ -215,6 +367,11 @@ export function collectInvestableFunds(world: WorldState, config: DemoConfig, lo
       group.cash = round2(group.cash - take);
       group.lastMonth.savingsContribution = round2(group.lastMonth.savingsContribution + take);
       group.lastMonth.netCashChange = round2(group.lastMonth.netCashChange - take);
+      // v1.1 §2：可审计账本——投入金额 1:1 记为份额，分红归属按份额占比分摊。
+      const ledger = ensureInvestorLedger(group);
+      ledger.contributed = round2(ledger.contributed + take);
+      ledger.shares = round2(ledger.shares + take);
+      ledger.lastContributionTick = tick;
       contribution = round2(contribution + take);
     });
     if (contribution > 0) {
@@ -222,24 +379,54 @@ export function collectInvestableFunds(world: WorldState, config: DemoConfig, lo
       groups.forEach((group, index) => {
         group.cash = round2(group.cash + (amounts[index] ?? 0));
       });
+      // 流水按 (tick, 城) 去重后重建，保证重复调用/测试重算不会重复记录。
+      for (let index = fundingHistory.length - 1; index >= 0; index -= 1) {
+        const entry = fundingHistory[index];
+        if (entry && entry.tick === tick && entry.cityId === city.id) {
+          fundingHistory.splice(index, 1);
+        }
+      }
+      householdGroups.forEach((group, index) => {
+        const take = takes[index] ?? 0;
+        if (take <= 0) return;
+        fundingHistory.push({
+          tick,
+          cityId: city.id,
+          householdGroupId: group.id,
+          amount: take,
+        });
+      });
     }
     city.householdIncomeLastMonth = round2(
       Math.max(0, city.householdIncomeLastMonth - contribution),
     );
     city.lastMonth.investableContribution = contribution;
-    city.lastMonth.investorDividends = totalInvestorDividendsByCity(world)[city.id] ?? 0;
+    const dividends = round2(totalInvestorDividendsByCity(world)[city.id] ?? 0);
+    city.lastMonth.investorDividends = dividends;
+    // 账本：按份额归属本月股息（只记账，不划现金）；再记本月资金用途快照。
+    attributeInvestorDividends(world, city.id, householdGroups, tick);
+    recordInvestorUsage(
+      world,
+      config,
+      usageHistory,
+      city.id,
+      tick,
+      contribution,
+      dividends,
+    );
     if (contribution > 0) {
       log.push({
-        tick: world.time.tick,
+        tick,
         kind: 'government',
         message: `${city.name} 居民闲钱投资：本月转入投资实体 ${contribution.toFixed(0)} 信用点（先保留 3 个月基本生活需求，闲置现金最多转 ${(IDLE_CASH_MONTHLY_INVEST_SHARE * 100).toFixed(1)}%）。`,
       });
     }
   }
+  pruneInvestorFundingHistory(fundingHistory, usageHistory, tick);
 }
 
 /**
- * 每月居民投资实体报告（任务书第五节第 5 条：来源、投资、持股、分红、可用现金）。
+ * 每月居民投资实体报告（任务书第五节第 5 条 + v1.1 §2 可审计要求）。
  * 只读聚合，不修改世界；金额与 household-groups 的权益口径一致（市值法）。
  */
 export interface InvestorGroupFundingReport {
@@ -256,6 +443,34 @@ export interface InvestorGroupFundingReport {
   dividendsReceived: number;
 }
 
+/** v1.1 §2：居民群体投资份额账本的可审计视图（投入/份额/归属股息）。 */
+export interface HouseholdFundingShare {
+  householdGroupId: string;
+  name: string;
+  occupation: string;
+  /** 累计从该群体转入投资实体的现金 */
+  contributed: number;
+  /** 账本份额（按累计转入 1:1 记账，仅作归属依据） */
+  shares: number;
+  /** 占本城居民投入份额的比例（0~1，四位小数） */
+  shareRatio: number;
+  /** 按份额归属给该群体的累计股息（只审计，不重复计收入） */
+  attributedDividends: number;
+}
+
+/** 本月投资实体资金用途快照（来源、股息返还/留存、期初期末现金、已用于投资的现金）。 */
+export interface InvestorUsageSummary {
+  tick: number;
+  contributed: number;
+  dividendsReceived: number;
+  dividendsReturned: number;
+  dividendsRetained: number;
+  openingCash: number;
+  closingCash: number;
+  /** 期初 + 本月流入 − 期末：本月用于买股/创办/设备等投资的现金估算 */
+  invested: number;
+}
+
 export interface CityInvestorFundingReport {
   cityId: string;
   cityName: string;
@@ -263,8 +478,25 @@ export interface CityInvestorFundingReport {
   householdContribution: number;
   investorCash: number;
   groups: InvestorGroupFundingReport[];
+  /** 本城最近一个月的资金用途快照；尚无记录时全为 0 */
+  usage: InvestorUsageSummary;
+  /** 本城每月实际转入金额（按 tick 升序，最多保留 INVESTOR_FUNDING_HISTORY_MONTHS 月） */
+  monthlyFunding: { tick: number; amount: number }[];
+  /** 居民群体投入/份额/归属股息账本（可审计） */
+  householdShares: HouseholdFundingShare[];
   note: string;
 }
+
+const EMPTY_INVESTOR_USAGE: InvestorUsageSummary = {
+  tick: 0,
+  contributed: 0,
+  dividendsReceived: 0,
+  dividendsReturned: 0,
+  dividendsRetained: 0,
+  openingCash: 0,
+  closingCash: 0,
+  invested: 0,
+};
 
 export function investorFundingReport(world: WorldState): CityInvestorFundingReport[] {
   const companyById = new Map(world.companies.map((company) => [company.id, company]));
@@ -294,13 +526,66 @@ export function investorFundingReport(world: WorldState): CityInvestorFundingRep
           dividendsReceived: round2(group.dividendsReceived),
         };
       });
+      // 本月实际转入流水：同一 tick 聚合，按 tick 升序（旧档缺省为空）。
+      const fundingByTick = new Map<number, number>();
+      for (const entry of world.households.investorFundingHistory ?? []) {
+        if (entry.cityId !== city.id) continue;
+        fundingByTick.set(entry.tick, round2((fundingByTick.get(entry.tick) ?? 0) + entry.amount));
+      }
+      const monthlyFunding = [...fundingByTick.entries()]
+        .map(([tick, amount]) => ({ tick, amount: round2(amount) }))
+        .sort((left, right) => left.tick - right.tick);
+      // 最近一个月用途快照。
+      let latestUsage: InvestorUsageEntry | undefined;
+      for (const entry of world.households.investorUsageHistory ?? []) {
+        if (entry.cityId !== city.id) continue;
+        if (!latestUsage || entry.tick > latestUsage.tick) latestUsage = entry;
+      }
+      const usage: InvestorUsageSummary = latestUsage
+        ? {
+            tick: latestUsage.tick,
+            contributed: round2(latestUsage.contributed),
+            dividendsReceived: round2(latestUsage.dividendsReceived),
+            dividendsReturned: round2(latestUsage.dividendsReturned),
+            dividendsRetained: round2(latestUsage.dividendsRetained),
+            openingCash: round2(latestUsage.openingCash),
+            closingCash: round2(latestUsage.closingCash),
+            invested: round2(latestUsage.invested),
+          }
+        : { ...EMPTY_INVESTOR_USAGE };
+      // 居民群体账本：份额 1:1 对应累计投入，按本城合计份额算归属比例。
+      const residents = householdGroupsOfCity(world, city.id);
+      const totalShares = round2(
+        residents.reduce((sum, group) => sum + (group.investorLedger?.shares ?? 0), 0),
+      );
+      const householdShares = residents
+        .filter((group) => {
+          const ledger = group.investorLedger;
+          return Boolean(ledger) && ((ledger?.contributed ?? 0) > 0 || (ledger?.shares ?? 0) > 0);
+        })
+        .map((group) => {
+          const ledger = group.investorLedger;
+          const shares = round2(ledger?.shares ?? 0);
+          return {
+            householdGroupId: group.id,
+            name: group.name,
+            occupation: group.occupation,
+            contributed: round2(ledger?.contributed ?? 0),
+            shares,
+            shareRatio: totalShares > 0 ? Math.round((shares / totalShares) * 10_000) / 10_000 : 0,
+            attributedDividends: round2(ledger?.dividends ?? 0),
+          };
+        });
       return {
         cityId: city.id,
         cityName: city.name,
         householdContribution: round2(city.lastMonth.investableContribution),
         investorCash: round2(groups.reduce((sum, group) => sum + group.cash, 0)),
         groups,
-        note: '居民闲钱投资：先保留 3 个月基本生活需求，闲置现金每月最多转入 0.5%；不提取存款、不借消费贷。',
+        usage,
+        monthlyFunding,
+        householdShares,
+        note: '居民闲钱投资：先保留 3 个月基本生活需求，闲置现金每月最多转入 1%；不提取存款、不借消费贷；账本记录各群体投入、份额与归属股息。',
       };
     });
 }

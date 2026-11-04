@@ -216,7 +216,8 @@ describe('v0.9 真实旧档（f942cc9）读取兼容', () => {
     expect(simulation.state.time.tick).toBe(RAW_WORLD.time.tick + 1);
     // 一个月内新增企业属于正常经营/创办，但与“重新开局追加 48 家”完全不同。
     expect(simulation.state.companies.length).toBeGreaterThanOrEqual(RAW_WORLD.companies.length);
-    expect(simulation.state.companies.length).toBeLessThan(RAW_WORLD.companies.length + 10);
+    // v1.1 每城每月最多自动创办 4 家（3 城合计 ≤12），且旧档不得重新执行开局（+48 家）。
+    expect(simulation.state.companies.length).toBeLessThan(RAW_WORLD.companies.length + 13);
 
     for (const company of simulation.state.companies) {
       expect(company.capacity).toBeCloseTo(company.equipmentCapacity, 2);

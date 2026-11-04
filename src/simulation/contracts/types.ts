@@ -3,7 +3,7 @@
 // v0.2 新增证券/治理/居民投资/协议/通知数据；旧 v1 存档由 core/save.ts 迁移。
 
 export const SAVE_FORMAT_VERSION = 9;
-export const GAME_VERSION = '1.0.0';
+export const GAME_VERSION = '1.1.0';
 
 export type GoodId =
   | 'grain'
@@ -1224,6 +1224,55 @@ export interface HouseholdMonthlyStats {
   depositWithdrawn?: number;
 }
 
+/**
+ * v1.1 §2：居民群体投入本城居民投资实体的可审计简化份额账本。
+ *
+ * 记账口径（首版演示）：现金仍由城市投资实体统一托管；"份额"按累计真实转入额 1:1
+ * 记账，群体之间的分红归属按 `shares / 本城居民群体 shares 合计` 分摊。账本只用于
+ * 审计与报告，不重复计入居民收入、也不改变实体现金与既有"按持股返还"规则。
+ * 该字段为可选字段：旧存档或从未投入过的群体没有账本，读取时按 0 处理。
+ */
+export interface HouseholdInvestorLedger {
+  /** 累计真实转入居民投资实体的现金（信用点，>= 0）。 */
+  contributed: number;
+  /** 累计记账份额（1 信用点投入 = 1 份；分红归属按份额占比分摊）。 */
+  shares: number;
+  /** 累计按份额归属的投资实体股息（记账口径，不代表现金已划给该群体）。 */
+  dividends: number;
+  /** 最近一次投入记账的 tick（从未投入为 -1）。 */
+  lastContributionTick: number;
+  /** 最近一次股息归属记账的 tick（从未记账为 -1）。 */
+  lastDividendTick: number;
+}
+
+/** v1.1 §2：某群体某月真实转入投资实体的流水（报告与审计用；可选字段）。 */
+export interface InvestorFundingEntry {
+  tick: number;
+  cityId: string;
+  householdGroupId: string;
+  amount: number;
+}
+
+/** v1.1 §2：每城每月的投资实体资金用途快照（报告用；可选字段）。 */
+export interface InvestorUsageEntry {
+  tick: number;
+  cityId: string;
+  /** 本月居民群体真实转入投资实体的现金。 */
+  contributed: number;
+  /** 本月投资实体收到的股息（实体侧记账口径，已扣股息税）。 */
+  dividendsReceived: number;
+  /** 其中返还居民的部分（按既有 dividendDistributionRate 估算）。 */
+  dividendsReturned: number;
+  /** 其中留存投资实体的部分（计入可用现金）。 */
+  dividendsRetained: number;
+  /** 期初可用现金（上一次快照的期末现金；首次快照按倒推口径）。 */
+  openingCash: number;
+  /** 期末可用现金（本城投资实体现金合计）。 */
+  closingCash: number;
+  /** 本期用于投资（买股/创办/设备等）的支出估算：期初 + 转入 + 留存股息 − 期末。 */
+  invested: number;
+}
+
 export interface HouseholdGroup {
   id: string;
   cityId: string;
@@ -1235,6 +1284,8 @@ export interface HouseholdGroup {
   cash: number;
   lastMonth: HouseholdMonthlyStats;
   note: string;
+  /** v1.1 §2：可审计的投资份额账本（可选；旧存档或从未投资过时缺省）。 */
+  investorLedger?: HouseholdInvestorLedger;
 }
 
 /** 每城财富阶层统计快照（展示用；人口合计等于城市总人口）。 */
@@ -1268,6 +1319,13 @@ export interface HouseholdWealthStats {
 export interface HouseholdState {
   groups: HouseholdGroup[];
   lastStats: HouseholdWealthStats[];
+  /**
+   * v1.1 §2：居民闲钱投资转入流水（每笔 = 某群体某月真实转入实体的金额）。
+   * 可选字段：旧存档缺省；业务代码读取时应兜底为空数组。用于 72 月报告与审计。
+   */
+  investorFundingHistory?: InvestorFundingEntry[];
+  /** v1.1 §2：每城每月的投资实体资金用途快照（可选字段；旧存档缺省）。 */
+  investorUsageHistory?: InvestorUsageEntry[];
 }
 
 // ---------------------------------------------------------------- 经营者、人才市场与选任

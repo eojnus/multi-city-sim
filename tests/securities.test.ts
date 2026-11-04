@@ -466,6 +466,9 @@ describe('证券与股权', () => {
 
   it('企业融资会向玩家发出可接受的要约，资金进入企业并取得有投票权股份', () => {
     const world = newWorld();
+    // v1.1 §4 提高开局周转金后，默认企业现金充足、不会触发融资；
+    // 本用例聚焦要约接受路径，因此先构造一家现金短缺企业。
+    world.companies[0]!.cash = 0;
     maybeCreateCompanyFinancing(world, DEMO_CONFIG, 1, []);
     const offer = world.securities.offers.find(
       (entry) => entry.status === 'open' && entry.investor.type === 'player',

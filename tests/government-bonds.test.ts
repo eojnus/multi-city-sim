@@ -10,6 +10,7 @@ import {
   bondHolderAvailableCash,
   bondSubscriptionOrder,
   closeGovernmentBondSubscription,
+  companyBondReserve,
   issueGovernmentBond,
   payBondCoupon,
   settleBondBankruptcyRedemption,
@@ -167,7 +168,7 @@ describe('政府债券：发行与整数份认购', () => {
     expect(checkInvariants(world)).toEqual([]);
   });
 
-  it('企业购债保留工资与利息，且禁止贷款购债；欠薪企业禁止认购', () => {
+  it('企业购债保留工资/原料/偿债储备，且禁止贷款购债；欠薪企业禁止认购', () => {
     const world = newWorld();
     const city = mainCity(world);
     const market = CONFIG.government.bondMarket;
@@ -175,11 +176,15 @@ describe('政府债券：发行与整数份认购', () => {
     if (!company) throw new Error('缺少测试企业');
     const issuance = issueGovernmentBond(world, city, CONFIG, 10, 0).issuance!;
 
-    const reserve = CONFIG.government.companyPurchaseReserve;
-    company.cash = 3_000 + 1_000 * reserve.wageMonths + 500 * reserve.interestMonths;
-    company.previousMonth.wagesPaid = 1_000;
-    company.previousMonth.interestPaid = 500;
+    // v1.1 §5：储备 = 2 个月基础工资 + 1 个月计划原料采购额 + 1 个月已知应还贷款本息。
     company.lastMonth.wageArrears = 0;
+    const breakdown = companyBondReserve(world, CONFIG, company.id)!;
+    expect(breakdown.wages).toBeGreaterThan(0);
+    expect(breakdown.reserved).toBeCloseTo(
+      breakdown.wages + breakdown.materials + breakdown.debtService,
+      2,
+    );
+    company.cash = 3_000 + breakdown.reserved;
     const available = bondHolderAvailableCash(world, CONFIG, { kind: 'company', id: company.id });
     expect(available).toBe(3_000);
 
@@ -192,8 +197,8 @@ describe('政府债券：发行与整数份认购', () => {
       0,
     );
     expect(bought.units).toBe(1);
-    // 保留 3,000 可支配现金不动，额外买入 1 份 1,000。
-    expect(company.cash).toBe(3_000 + 1_000 * reserve.wageMonths + 500 * reserve.interestMonths - 1_000);
+    // 保留储备不动，额外买入 1 份 1,000。
+    expect(company.cash).toBe(3_000 + breakdown.reserved - 1_000);
 
     // 欠薪企业禁止认购，且不扣款。
     const cashBefore = company.cash;

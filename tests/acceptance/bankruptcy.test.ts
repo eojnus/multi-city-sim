@@ -323,11 +323,12 @@ describe('AC-F10 无 CEO 分股', () => {
     const result = distributeBankruptGovernmentShares(world, city, CONFIG);
     expect(result.custody).toBe(false);
     const holders = companyHolders(world, company.id);
-    // 41 股按 2 个主体平分 = 20.5 / 20.5（非按原持股比例 30:29）。
+    // 41 股按主体数量平分（非原持股比例 30:29）；v1.1 起股份必须为整数，
+    // 余数按固定顺序分配，因此为 51 / 49（仍满足主体均分意图）。
     const a = holders.find((entry) => holderKey(entry.holder) === `investorGroup:${groupA.id}`);
     const b = holders.find((entry) => holderKey(entry.holder) === `investorGroup:${groupB.id}`);
-    expect(a?.votingShares).toBeCloseTo(50.5, 2);
-    expect(b?.votingShares).toBeCloseTo(49.5, 2);
+    expect(a?.votingShares).toBe(51);
+    expect(b?.votingShares).toBe(49);
     expect(holders.reduce((sum, entry) => sum + entry.votingShares, 0)).toBeCloseTo(100, 2);
   });
 });

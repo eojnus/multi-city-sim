@@ -247,13 +247,14 @@ describe('每月创办数量与城市上限', () => {
     return world;
   }
 
-  it('每城每月最多 2 家，同月重复调用不会超发', () => {
+  it('每城每月最多 4 家（v1.1），同月重复调用不会超发', () => {
     const world = demandRichWorld();
     const created = maybeFoundCompanies(world, DEMO_CONFIG, []);
     const lanportCreated = world.lifecycle.foundings.filter(
       (record) => record.cityId === 'lanport' && record.tick === world.time.tick,
     );
-    expect(lanportCreated.length).toBeLessThanOrEqual(2);
+    expect(DEMO_CONFIG.lifecycle.maxFoundingsPerCityMonth).toBe(4);
+    expect(lanportCreated.length).toBeLessThanOrEqual(4);
     expect(lanportCreated.length).toBeGreaterThan(0);
     expect(new Set(created).size).toBe(created.length);
 

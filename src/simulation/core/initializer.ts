@@ -284,8 +284,20 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
     setCompanyEmployees(company, seed.employees);
     const wage = monthlyWageBill(company, config);
     company.baseWageBill = wage;
+    // v1.1 §4：开局流动资金 = 工资储备（默认 2 个月）+ 1 个月计划原料采购额。
+    // 原料额按首月目标产量 target × 配方用量 × 城市市场价估算，保证企业买到设备后
+    // 仍能支付工资并采购首批原料等待真实销售回款；这是初始化的一次性资产，
+    // 运行中不会对亏损企业无条件注资。
+    const monthlyMaterialCost = round2(
+      recipe.inputs.reduce(
+        (total, input) =>
+          total + target * input.qty * (city.market[input.good]?.price ?? 0),
+        0,
+      ),
+    );
     company.cash = round2(
-      wage * (seed.initialCashWageMonths ?? config.company.initialCashWageMonths),
+      wage * (seed.initialCashWageMonths ?? config.company.initialCashWageMonths) +
+        monthlyMaterialCost,
     );
     return company;
   });

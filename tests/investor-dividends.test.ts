@@ -152,7 +152,7 @@ describe('居民股息资金流（不得重复计入）', () => {
 
     const budgetBeforeSavings = city.householdIncomeLastMonth;
     expect(budgetBeforeSavings).toBeGreaterThan(0);
-    // v1.0 闲钱投资规则：先保留 3 个月基本生活需求，只把超出的闲置现金每月最多转 0.5%；
+    // v1.0 闲钱投资规则：先保留 3 个月基本生活需求，只把超出的闲置现金每月最多转 1%；
     // 收入意愿额（收入 × savingsRate）与闲钱上限取小，二者相同时才按旧口径全额转出。
     const idleCap = round2(
       householdGroupsOfCity(world, city.id).reduce(

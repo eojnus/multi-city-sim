@@ -19,6 +19,7 @@ import {
 import { workforceSkillMultiplier } from '../labor/workforce';
 import { groupsOfCity } from '../investors/investors';
 import { startupSupportActive } from '../policies/query';
+import { payableShortageFromMarket } from './production-plan';
 
 /**
  * 创业评估（v0.9 T3 起步，v1.0 task-27 扩展为“最小可行规模”）。
@@ -30,18 +31,26 @@ import { startupSupportActive } from '../policies/query';
  *
  * 评估本身只读取世界、不修改状态；真正的出资、贷款与设备采购在 lifecycle。
  *
- * v1.0 关键口径：
- * - 每个行业按 1 / 2 / 4 台设备给出规模档位；每个档位都由设备产能 + 配置里的生产率动态推出
- *   员工数、首批原料、周转金与利息（设备厂口径：初始员工 60、1 台设备、现金约 4 个月工资，
- *   但这里不硬编码 60，全部从 config.equipment / config.labor / demo-data 推导）；
- * - 首档必须覆盖“首批原料 + 周转金”，资本不足时先降档，最小档仍不够则失败并记录结构化障碍；
+ * v1.1 关键口径：
+ * - 创业规模按 4 → 2 → 1 台设备“由大到小”尝试：先按需求评估出的最大规模测算，资金/设备/劳动/利润
+ *   不足时自动降档；每个档位都由设备产能 + 配置里的生产率动态推出员工数、首批原料、周转金与利息。
+ * - 周转金下限：2 个月基础工资 + 1 个月计划原料采购额（月度工资与原料均按该档设备满负荷计划产量计算）；
+ *   设备、首批原料、周转金都纳入启动资本，资金不足时先降档，最小档仍不够则失败并记录结构化障碍。
+ * - 需求信号与生产计划同口径：只使用“有支付能力的需求”（effective demand − 本地成交 −
+ *   跨城进口，并与 market.unmetDemand 取较大值），不使用 producerRequired / unmetFunding；
  * - 设备可获得性只统计“本城设备企业库存 + 政府库存”，其他城市库存无法在创办时直接购买。
  */
 
 export const FOUNDING_MIN_SCORE = 20;
 
-/** 每个档位可买设备台数（行业最小可行规模的候选档）。 */
-export const FOUNDING_SCALE_UNITS = [1, 2, 4] as const;
+/** 每档设备台数的尝试顺序：先大盘 4 台，资金/设备不足时依次降档到 2 台、1 台。 */
+export const FOUNDING_SCALE_UNITS = [4, 2, 1] as const;
+
+/** 周转金下限：至少保留 2 个月基础工资。 */
+export const FOUNDING_MIN_WAGE_RESERVE_MONTHS = 2;
+
+/** 周转金下限：至少保留 1 个月计划原料采购额。 */
+export const FOUNDING_MIN_MATERIAL_RESERVE_MONTHS = 1;
 
 /** 分项评分（每项已 clamp，total 为七项之和）。 */
 export interface FoundingScoreBreakdown {
@@ -90,6 +99,7 @@ export type FoundingObstacleKind =
   | 'labor'
   | 'profit'
   | 'demand'
+  | 'workingCapital'
   | 'policy';
 
 /** 结构化失败障碍：供日志、UI 与验收报告统计“缺口可见但被什么挡住”。 */
@@ -233,8 +243,8 @@ function cityOf(world: WorldState, cityId: string): City | undefined {
 function productionShare(output: GoodId, city: City): number {
   const market = city.market[output];
   const demand = Math.max(0, market?.demand ?? 0);
-  const unmet = Math.max(0, market?.unmetDemand ?? 0);
-  const sold = Math.max(0, market?.sold ?? 0);
+  // v1.1：与生产计划同口径（有效需求 − 成交 − 跨城进口；不含资金不足的 unmetFunding）。
+  const unmet = payableShortageFromMarket(market, output);
   if (demand + unmet <= 0) return 0;
   return clamp(unmet / (demand + unmet), 0, 1);
 }
@@ -471,9 +481,17 @@ function buildTier(
   const jobs = Math.max(1, Math.ceil(outputQty / economics.perEmployee));
   const monthlyWage = round2(jobs * config.labor.privateWageRate);
   const firstBatchInputCost = round2(economics.inputCostPerUnit * outputQty);
-  const materialSafetyMonths = Math.max(0, config.production.plan?.targetInventoryMonths ?? 0.5);
+  const wageReserveMonths = Math.max(
+    FOUNDING_MIN_WAGE_RESERVE_MONTHS,
+    config.company.wageReserveMonths,
+  );
+  const materialReserveMonths = Math.max(
+    FOUNDING_MIN_MATERIAL_RESERVE_MONTHS,
+    config.production.plan?.targetInventoryMonths ?? FOUNDING_MIN_MATERIAL_RESERVE_MONTHS,
+  );
+  // v1.1：买完设备后至少保留“2 个月基础工资 + 1 个月计划原料采购额”。
   const workingCapital = round2(
-    monthlyWage * config.company.wageReserveMonths + firstBatchInputCost * materialSafetyMonths,
+    monthlyWage * wageReserveMonths + firstBatchInputCost * materialReserveMonths,
   );
   const upfront = round2(equipCost + firstBatchInputCost + workingCapital);
   let founderEquity: number;
@@ -490,12 +508,31 @@ function buildTier(
   const loanNeeded = Math.max(0, round2(upfront - founderEquity));
   const loanAvailable = loanCapacityFor(founderEquity, config);
   const loanPrincipal = round2(Math.min(loanNeeded, loanAvailable));
-  if (loanNeeded - loanPrincipal > 0.01) {
+  // 资金分段：能买设备+首批原料 → 资本不足；能买但保不住周转金 → 周转金不足。
+  const equipmentAndInputs = round2(equipCost + firstBatchInputCost);
+  const availableFunding = round2(founderEquity + loanAvailable);
+  if (availableFunding + 1e-6 < equipCost) {
     blockers.push({
-      kind: 'credit',
-      detail: `设备与启动周转需 ${upfront.toFixed(0)}，创办人可出资 ${founderEquity.toFixed(0)}，尚有 ${(
-        loanNeeded - loanPrincipal
-      ).toFixed(0)} 缺口超出银行授信 ${loanAvailable.toFixed(0)}`,
+      kind: 'capital',
+      detail: `可动用资金 ${availableFunding.toFixed(0)}（出资 ${founderEquity.toFixed(
+        0,
+      )} + 授信 ${loanAvailable.toFixed(0)}）不足以购买 ${units} 台设备（约 ${equipCost.toFixed(0)}）`,
+    });
+  } else if (availableFunding + 1e-6 < equipmentAndInputs) {
+    blockers.push({
+      kind: 'capital',
+      detail: `可动用资金 ${availableFunding.toFixed(0)} 不足以覆盖设备与首批原料（${equipmentAndInputs.toFixed(
+        0,
+      )}）`,
+    });
+  } else if (availableFunding + 1e-6 < upfront) {
+    blockers.push({
+      kind: 'workingCapital',
+      detail: `可购买设备与首批原料，但启动后周转金不足 ${round2(upfront - availableFunding).toFixed(
+        0,
+      )}（需保留 ${wageReserveMonths} 个月工资 ${monthlyWage.toFixed(0)} + ${materialReserveMonths} 个月原料 ${firstBatchInputCost.toFixed(
+        0,
+      )}）`,
     });
   }
   const product = config.banking.products.workingCapital;
@@ -564,7 +601,9 @@ export function retuneTierForCapacity(
 ): FoundingScaleTier {
   const blockers = tier.blockers.filter(
     (blocker) =>
-      !['capital', 'credit', 'equipment', 'labor', 'demand', 'profit'].includes(blocker.kind),
+      !['capital', 'credit', 'equipment', 'labor', 'demand', 'profit', 'workingCapital'].includes(
+        blocker.kind,
+      ),
   );
   const equipCost = tier.equipmentCost;
   const upfront = round2(equipCost + tier.firstBatchInputCost + tier.workingCapital);
@@ -581,10 +620,28 @@ export function retuneTierForCapacity(
   const loanNeeded = Math.max(0, round2(upfront - founderEquity));
   const loanAvailable = loanCapacityFor(founderEquity, config);
   const loanPrincipal = round2(Math.min(loanNeeded, loanAvailable));
-  if (loanNeeded - loanPrincipal > 0.01) {
+  const equipmentAndInputs = round2(equipCost + tier.firstBatchInputCost);
+  const availableFunding = round2(founderEquity + loanAvailable);
+  if (availableFunding + 1e-6 < equipCost) {
     blockers.push({
-      kind: 'credit',
-      detail: `启动资金缺口 ${(loanNeeded - loanPrincipal).toFixed(0)}，超出银行可授信额度 ${loanAvailable.toFixed(0)}`,
+      kind: 'capital',
+      detail: `可动用资金 ${availableFunding.toFixed(0)} 不足以购买 ${tier.units} 台设备（约 ${equipCost.toFixed(
+        0,
+      )}）`,
+    });
+  } else if (availableFunding + 1e-6 < equipmentAndInputs) {
+    blockers.push({
+      kind: 'capital',
+      detail: `可动用资金 ${availableFunding.toFixed(0)} 不足以覆盖设备与首批原料（${equipmentAndInputs.toFixed(
+        0,
+      )}）`,
+    });
+  } else if (availableFunding + 1e-6 < upfront) {
+    blockers.push({
+      kind: 'workingCapital',
+      detail: `可购买设备与首批原料，但启动后周转金不足 ${round2(upfront - availableFunding).toFixed(
+        0,
+      )}（需保留 ${tier.workingCapital.toFixed(0)}）`,
     });
   }
   if (purchasable < tier.units) {
@@ -620,7 +677,7 @@ export function retuneTierForCapacity(
   };
 }
 
-/** 用给定出资能力选择第一个可行档（按 1/2/4 台顺序）。 */
+/** 用给定出资能力按 4→2→1 台顺序降档，返回第一个可行档。 */
 export function selectFoundingTier(
   assessment: FoundingAssessment,
   founderCapacity: number,
@@ -670,11 +727,21 @@ export function retuneTierForAssessment(
   if (allowLoan) return retuned;
   const product = config.banking.products.workingCapital;
   const upfront = round2(retuned.equipmentCost + retuned.firstBatchInputCost + retuned.workingCapital);
-  const blockers = retuned.blockers.filter((blocker) => blocker.kind !== 'credit');
-  if (founderCapacity + 1e-6 < upfront) {
+  const equipmentAndInputs = round2(retuned.equipmentCost + retuned.firstBatchInputCost);
+  const blockers = retuned.blockers.filter(
+    (blocker) => !['capital', 'credit', 'workingCapital'].includes(blocker.kind),
+  );
+  if (founderCapacity + 1e-6 < equipmentAndInputs) {
     blockers.push({
-      kind: 'credit',
-      detail: `不接受贷款时启动资金缺口 ${(upfront - founderCapacity).toFixed(0)}`,
+      kind: 'capital',
+      detail: `不接受贷款时启动资金缺口 ${(equipmentAndInputs - founderCapacity).toFixed(0)}（设备与首批原料）`,
+    });
+  } else if (founderCapacity + 1e-6 < upfront) {
+    blockers.push({
+      kind: 'workingCapital',
+      detail: `不接受贷款时周转金缺口 ${(upfront - founderCapacity).toFixed(0)}（需保留 ${retuned.workingCapital.toFixed(
+        0,
+      )}）`,
     });
   }
   const expectedMonthlyProfit = round2(
@@ -736,7 +803,8 @@ function evaluateOutput(
   const trend = market?.lastPriceChangePct ?? 0;
   const demand = Math.max(0, market?.demand ?? 0);
   const sold = Math.max(0, market?.sold ?? 0);
-  const unmet = Math.max(0, market?.unmetDemand ?? 0);
+  // v1.1：缺货口径与生产计划一致（有支付能力的需求 − 已成交 − 跨城进口，不含资金不足）。
+  const unmet = payableShortageFromMarket(market, output);
 
   const sector = sectorForOutput(output);
   const equipmentKind = equipmentKindForSector(sector, config);
@@ -967,10 +1035,14 @@ function recentSales3m(world: WorldState, cityId: string, output: GoodId): numbe
 }
 
 function obstaclesOfTiers(tiers: FoundingScaleTier[]): FoundingObstacle[] {
-  const first = tiers[0];
-  if (!first) return [{ kind: 'demand', detail: '没有可用的创业评估档位' }];
-  const map = new Map<string, FoundingObstacle>();
-  for (const blocker of first.blockers) map.set(`${blocker.kind}:${blocker.detail}`, blocker);
+  if (!tiers.length) return [{ kind: 'demand', detail: '没有可用的创业评估档位' }];
+  // 按障碍类别去重：4/2/1 台各档的同一类障碍只保留第一条，避免日志重复。
+  const map = new Map<FoundingObstacleKind, FoundingObstacle>();
+  for (const tier of tiers) {
+    for (const blocker of tier.blockers) {
+      if (!map.has(blocker.kind)) map.set(blocker.kind, blocker);
+    }
+  }
   return [...map.values()];
 }
 
@@ -990,7 +1062,8 @@ export function assessFounding(
   const market = city.market[output];
   const price = economics.price;
   const trend = market?.lastPriceChangePct ?? 0;
-  const payableUnmetDemand = Math.max(0, market?.unmetDemand ?? 0);
+  // v1.1：缺货口径与生产计划一致；unmetFunding 只用于说明资金缺口，不参与缺货计数。
+  const payableUnmetDemand = payableShortageFromMarket(market, output);
   const unmetFunding = Math.max(0, market?.unmetFunding ?? 0);
   const supply = availableEquipment(world, config, city.id, equipmentKind);
   // 实际可购买：同城设备企业库存 + 政府库存；其他城市库存不能直接用于本城创办。
@@ -1026,10 +1099,11 @@ export function assessFounding(
     ? city.population.unemployed / city.population.laborForce
     : 0;
   const firstTier = tiers[0]!;
-  const financingNeed = firstTier.totalCapital;
+  const referenceTier = feasibleTier ?? firstTier;
+  const financingNeed = referenceTier.totalCapital;
   const financingCoverage =
     financingNeed > 0
-      ? (firstTier.founderEquity + firstTier.loanPrincipal) / financingNeed
+      ? (referenceTier.founderEquity + referenceTier.loanPrincipal) / financingNeed
       : 1;
   const maxMarkup = Math.max(1e-9, config.intercity.maxMarkup);
 
@@ -1049,12 +1123,17 @@ export function assessFounding(
 
   const reasons = [...candidate.reasons];
   if (feasibleTier) {
+    if (feasibleTier.units < firstTier.units) {
+      reasons.push(
+        `${firstTier.units} 台大盘档位资金/设备/劳动条件不足，已按 4→2→1 降档至 ${feasibleTier.units} 台适用设备`,
+      );
+    }
     reasons.push(
-      `最小可行档 ${feasibleTier.units} 台设备：员工 ${feasibleTier.jobs}、设备 ${feasibleTier.equipmentCost.toFixed(
+      `选定档位 ${feasibleTier.units} 台设备：员工 ${feasibleTier.jobs}、设备 ${feasibleTier.equipmentCost.toFixed(
         0,
       )}、首批原料 ${feasibleTier.firstBatchInputCost.toFixed(0)}、周转金 ${feasibleTier.workingCapital.toFixed(
         0,
-      )}、启动总资本 ${feasibleTier.totalCapital.toFixed(0)}（创办人出资 ${feasibleTier.founderEquity.toFixed(
+      )}（2 个月基础工资 + 1 个月计划原料）、启动总资本 ${feasibleTier.totalCapital.toFixed(0)}（创办人出资 ${feasibleTier.founderEquity.toFixed(
         0,
       )} + 贷款 ${feasibleTier.loanPrincipal.toFixed(0)}，利息 ${feasibleTier.interestCost.toFixed(0)}），预计月利润 ${feasibleTier.expectedMonthlyProfit.toFixed(0)}`,
     );
@@ -1083,12 +1162,14 @@ export function assessFounding(
       expectedInputCost: round2(economics.inputCostPerUnit),
       expectedWageCost: round2(economics.wagePerUnit),
       expectedTransportCost: round2(economics.transportCostPerUnit),
-      expectedInterest: round2(firstTier.interestCost),
+      expectedInterest: round2(referenceTier.interestCost),
       startupCost: round2(financingNeed),
-      expectedMonthlyProfit: firstTier.expectedMonthlyProfit,
-      founderEquity: firstTier.founderEquity,
-      loanAvailable: loanCapacityFor(firstTier.founderEquity, config),
-      financingGap: round2(Math.max(0, firstTier.totalCapital - firstTier.founderEquity - firstTier.loanPrincipal)),
+      expectedMonthlyProfit: referenceTier.expectedMonthlyProfit,
+      founderEquity: referenceTier.founderEquity,
+      loanAvailable: loanCapacityFor(referenceTier.founderEquity, config),
+      financingGap: round2(
+        Math.max(0, referenceTier.totalCapital - referenceTier.founderEquity - referenceTier.loanPrincipal),
+      ),
     },
     scaleTiers: tiers,
     feasibleTier,

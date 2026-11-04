@@ -1,4 +1,10 @@
-import type { Company, CompanyProductionPlan, WorldState } from '../contracts/types';
+import type {
+  Company,
+  CompanyProductionPlan,
+  GoodId,
+  MarketState,
+  WorldState,
+} from '../contracts/types';
 import type { DemoConfig } from '../../data/config';
 import { GOODS, PRODUCTIVITY, RECIPES } from '../../data/demo-data';
 import { clamp, round2 } from '../core/math';
@@ -20,6 +26,10 @@ import { retentionSubsidyPerEmployee } from '../policies/query';
  *    然后按月 ±20% 平滑；库存积压/现金不足/原料资金不足时可紧急下调
  *    （下限见 config.production.plan.emergencyDownAdjust）；
  *    再取 min(计划, 设备产能, 原料可支持产量, 劳动产能)。
+ *    v1.1 修正缺货口径：有效需求用 consumerDemand / producerDemand，扣除本地成交与
+ *    跨城进口后与 unmetDemand 取较大值；producerRequired / unmetFunding（资金不足）
+ *    不再被当成缺货。过去零销量但存在真实有效缺货时，计划按缺货信号恢复，不被历史
+ *    零销量锁死（见 recomputeProductionPlan 的 recoveringFromZeroSales）。
  * 4. 实际产量：仍由 production.ts 在生产时按 min(计划, 设备, 劳动, 原料) 校验，不得超计划。
  *
  * 平滑口径：以上一期计划产量为基准做 ±20% 限幅；没有上期计划（新企业/旧档）时优先用
@@ -131,24 +141,43 @@ function meanSalesFor(company: Company, lookbackMonths: number): number {
 }
 
 /**
+ * 市场账本口径的“有支付能力但缺货”缺口（v1.1 修正）。
+ *
+ * - 有效需求：消费品取 consumerDemand，中间品取 producerDemand。producerRequired 含
+ *   因资金不足根本没形成的部分，不能当作缺货；unmetFunding 同样只是资金缺口，不参与计算。
+ * - 已满足量 = 本地成交 sold + 跨城进口 intercityImported。跨城成交已计入买方城市的
+ *   有效需求，不能重复计入缺口（旧口径 producerRequired − sold 会把它重复算一遍）。
+ * - 缺口 = max(0, 有效需求 − 已满足量)，再与账本 unmetDemand 取较大值：后者是逐笔
+ *   “有效需求 − 实际成交（含跨城）”的累计口径，正常情况下两者一致；取较大值兼容
+ *   旧档/手工构造只填其一的场景，也不会把资金不足误判为缺货。
+ */
+export function payableShortageFromMarket(
+  market: MarketState | undefined,
+  goodId: GoodId,
+): number {
+  if (!market) return 0;
+  const good = GOODS.find((entry) => entry.id === goodId);
+  const payableDemand =
+    good?.category === 'consumer' ? market.consumerDemand : market.producerDemand;
+  const filled = (market.sold ?? 0) + (market.intercityImported ?? 0);
+  const unfilled = Math.max(0, (payableDemand ?? 0) - filled);
+  const recorded = Math.max(0, market.unmetDemand ?? 0);
+  return round2(Math.max(unfilled, recorded));
+}
+
+/**
  * 城市该商品“有支付能力但缺货”的未满足需求（上一完整月市场口径）。
  *
- * - 消费品取 consumerDemand − sold，中间品取 producerRequired − sold（v1.0 首版口径）；
- * - 再与市场 ledger 已记录的 unmetDemand（有效需求中因缺货未成交的部分）取较大值，
- *   避免把“资金不足”误判为缺货，也避免 sold 含跨城/外部销售时把缺口算小；
- * - 该信号是“全城可触达缺口”，由 companyDemandShare 再按企业份额分摊，禁止每家重复计入。
+ * v1.1：改为有效需求口径（见 payableShortageFromMarket），不再用 producerRequired；
+ * 该信号是“全城可触达缺口”，由 companyDemandShare 再按企业份额分摊，禁止每家重复计入。
  */
 export function cityShortageFor(
   world: WorldState,
   city: WorldState['cities'][number],
   goodId: Company['recipeOutput'],
 ): number {
-  const market = city.market[goodId];
-  if (!market) return 0;
-  const good = GOODS.find((entry) => entry.id === goodId);
-  const demand = good?.category === 'consumer' ? market.consumerDemand : market.producerRequired;
-  const gap = Math.max(0, (demand ?? 0) - (market.sold ?? 0));
-  return round2(Math.max(gap, market.unmetDemand ?? 0));
+  void world;
+  return payableShortageFromMarket(city.market[goodId], goodId);
 }
 
 export interface DemandShareSignal {
@@ -229,6 +258,12 @@ export interface ExpansionInput {
   equipmentLimit: number;
   salesReference: number;
   laborLimit?: number;
+  /**
+   * v1.1：全城“有支付能力但缺货”的有效需求。用于缺货驱动的扩产恢复：
+   * 当月计划利用率已达阈值、库存与资金条件满足时，即使上月因停产/缺料导致利用率
+   * 不足，也允许评估购买设备（仍然保留保留 2 月工资 + 近期偿债的资金约束）。
+   */
+  cityShortage?: number;
 }
 
 export interface ExpansionAssessment {
@@ -251,6 +286,8 @@ export interface ExpansionAssessment {
  * “连续 2 个月”首版取“上一完整月实际利用率”与“本月计划利用率”同时达标
  * （本模块每月重算计划，因此这两个月口径可比）；近期月偿债用剩余债务 / expansionDebtMonths
  * 加上月利息支出近似。设备够而缺员工/原料时明确优先招聘或采购，避免把问题都当成买设备。
+ * v1.1 §6：真实有效缺货存在时放宽“上月利用率”这一条（见 ExpansionInput.cityShortage），
+ * 否则停产恢复期的企业会因历史利用率不足而永远无法扩产；资金/库存/本月计划利用率约束保留。
  */
 export function assessExpansion(
   world: WorldState,
@@ -285,15 +322,21 @@ export function assessExpansion(
   const utilizationOk =
     lastUtilization >= planCfg.expansionUtilizationThreshold &&
     plannedUtilization >= planCfg.expansionUtilizationThreshold;
+  // v1.1 §6：真实有效缺货时允许“缺货驱动恢复”——本月计划利用率达标、库存与资金
+  // 条件满足即可评估扩产；上月利用率不足可能只是停产/缺料造成的，不应锁死恢复。
+  const shortage = Math.max(0, input.cityShortage ?? 0);
+  const shortageDriven = shortage > 0.01;
+  const shortageRecovery = shortageDriven && plannedUtilization >= planCfg.expansionUtilizationThreshold;
+  const effectiveUtilizationOk = utilizationOk || shortageRecovery;
   const inventoryOk = inventoryMonths <= planCfg.expansionInventoryMonths;
   const cashOk = cashAfterReserve > 0;
-  const eligible = equipmentLimit > 0.01 && utilizationOk && inventoryOk && cashOk;
+  const eligible = equipmentLimit > 0.01 && effectiveUtilizationOk && inventoryOk && cashOk;
 
   const reasons: string[] = [];
   const thresholdPct = (planCfg.expansionUtilizationThreshold * 100).toFixed(0);
   if (equipmentLimit <= 0.01) {
     reasons.push('扩产判定：没有设备资产，优先购买设备/创办设备企业');
-  } else if (!utilizationOk) {
+  } else if (!effectiveUtilizationOk) {
     reasons.push(
       `扩产条件未满足：上月设备利用率 ${(lastUtilization * 100).toFixed(1)}%、本月计划 ${(plannedUtilization * 100).toFixed(1)}%，未连续 ${planCfg.expansionUtilizationMonths} 个月达到 ${thresholdPct}%`,
     );
@@ -304,6 +347,10 @@ export function assessExpansion(
   } else if (!cashOk) {
     reasons.push(
       `扩产条件未满足：保留 ${planCfg.expansionReserveWageMonths} 个月工资与近期偿债（${debtService.toFixed(2)}）后资金为 ${cashAfterReserve.toFixed(2)}`,
+    );
+  } else if (shortageRecovery && !utilizationOk) {
+    reasons.push(
+      `缺货驱动扩产条件满足：上月设备利用率 ${(lastUtilization * 100).toFixed(1)}% 未达 ${thresholdPct}%（可能因停产/缺料），但本月计划利用率 ${(plannedUtilization * 100).toFixed(1)}% 已达标，且有 ${shortage.toFixed(2)} 的有效缺货，库存与资金条件满足，可评估购买设备`,
     );
   } else {
     reasons.push(
@@ -374,13 +421,17 @@ export function recomputeProductionPlan(
     0,
     salesReferenceFor(world, company, config, equipmentLimit),
   );
-  const targetInventory = round2(salesReference * planCfg.targetInventoryMonths);
   const outputId = company.recipeOutput;
   const stock = Math.max(0, company.inventory[outputId] ?? 0);
   // v1.0：有支付能力但缺货的未满足需求 → 按本企业可触达份额吸收 20% 进计划。
+  // v1.1：改为有效需求口径（不使用 producerRequired / unmetFunding）。
   const demandSignal = city
     ? companyDemandShare(world, company, config)
     : { cityShortage: 0, share: 0, absorbed: 0, extraDemand: 0, capacityShare: 0, salesShare: 0, peers: 0 };
+  // v1.1：过去零销量但存在真实有效缺货时，目标库存也要参考缺货需求，
+  // 否则 salesReference=0 → targetInventory=0，计划会被“历史零销量”锁死在低位。
+  const demandReference = round2(Math.max(salesReference, demandSignal.extraDemand));
+  const targetInventory = round2(demandReference * planCfg.targetInventoryMonths);
   let desired = round2(salesReference + demandSignal.absorbed + (targetInventory - stock));
 
   const laborLimit = city ? laborCapacity(company, city, config, world) : 0;
@@ -415,10 +466,15 @@ export function recomputeProductionPlan(
         ? previousOutput
         : capacityBase;
   let smoothed: number;
+  // v1.1：过去零销量但存在真实有效缺货时，不因“历史销量为零”强制继续下调；
+  // 允许回到由缺货吸收 + 目标库存推出的 desired（仍受 +maxUpAdjust 上限约束），
+  // 这与持续下跌的市场（有历史成交、真实需求消失）区分开。
+  const recoveringFromZeroSales = salesReference <= 0.01 && demandSignal.extraDemand > 0.01;
   if (base > 0) {
     const lower = base * (1 - (emergency ? planCfg.emergencyDownAdjust : planCfg.maxDownAdjust));
     const upper = base * (1 + planCfg.maxUpAdjust);
-    smoothed = clamp(desired, lower, upper);
+    const floor = recoveringFromZeroSales ? Math.min(lower, desired) : lower;
+    smoothed = clamp(desired, floor, upper);
   } else {
     smoothed = desired;
   }
@@ -467,6 +523,7 @@ export function recomputeProductionPlan(
     equipmentLimit,
     salesReference,
     laborLimit,
+    cityShortage: demandSignal.cityShortage,
   });
 
   // ---- 6) 原因说明（供 AI 决策/界面读取） ----
@@ -481,6 +538,11 @@ export function recomputeProductionPlan(
   if (demandSignal.cityShortage > 0.01) {
     reasons.push(
       `城市缺货 ${demandSignal.cityShortage.toFixed(2)}（同城同产出 ${demandSignal.peers} 家，本企业份额 ${(demandSignal.share * 100).toFixed(1)}%），本月吸收 ${demandSignal.absorbed.toFixed(2)}（${(planCfg.unmetDemandAbsorption * 100).toFixed(0)}%）`,
+    );
+  }
+  if (recoveringFromZeroSales) {
+    reasons.push(
+      `近 ${historyMonths} 月无实际成交，但存在 ${demandSignal.extraDemand.toFixed(2)} 的有效缺货份额：按缺货信号恢复计划，不因历史零销量锁死（上限仍为 +${(planCfg.maxUpAdjust * 100).toFixed(0)}%）`,
     );
   }
   if (bottleneck === 'labor') {

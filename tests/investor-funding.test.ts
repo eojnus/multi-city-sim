@@ -2,7 +2,7 @@
 //
 // 口径（任务书第五节）：
 // - 居民群体现金 → 投资实体现金是真实转账，不凭空补钱；
-// - 先保留 3 个月基本生活需求，仅对保留额以上的闲置现金每月最多转入 0.5%；
+// - 先保留 3 个月基本生活需求，仅对保留额以上的闲置现金每月最多转入 1%；
 // - 不提取存款、不借消费贷；失业/现金不足群体优先保障基本生活，不足不转；
 // - 转入不得重复计入居民收入、旧持股或新增资产；权益按人口折算，不重复计价。
 import { describe, expect, it } from 'vitest';
@@ -73,7 +73,7 @@ describe('居民闲钱投资实体（v1.0 第五节）', () => {
   it('转入是真实转账：居民现金减少、投资实体同额增加，货币总量不变', () => {
     const world = createWorld();
     const city = cityOf(world);
-    // 放大收入，让“0.5% 闲钱上限”成为约束（否则收入意愿额会更小）。
+    // 放大收入，让“1% 闲钱上限”成为约束（否则收入意愿额会更小）。
     city.householdIncomeLastMonth = 1_000_000_000;
     const groups = householdGroups(world);
     const investors = investorGroups(world);
@@ -105,7 +105,7 @@ describe('居民闲钱投资实体（v1.0 第五节）', () => {
     expect(checkInvariants(world)).toEqual([]);
   });
 
-  it('0.5% 上限：每群体不超过自身闲置现金 0.5%，合计等于闲置池 0.5%', () => {
+  it('1% 上限：每群体不超过自身闲置现金 1%，合计等于闲置池 1%', () => {
     const world = createWorld();
     cityOf(world).householdIncomeLastMonth = 1_000_000_000;
     const idles = householdGroups(world).map((group) => householdIdleCash(world, group, DEMO_CONFIG));
@@ -325,7 +325,7 @@ describe('居民闲钱投资实体（v1.0 第五节）', () => {
         expect(groupReport.holdingsValue).toBeGreaterThanOrEqual(0);
         expect(groupReport.dividendsReceived).toBeGreaterThanOrEqual(0);
       }
-      expect(cityReport.note).toContain('0.5%');
+      expect(cityReport.note).toContain('1%');
     }
     const lanportReport = report.find((entry) => entry.cityId === CITY_ID);
     expect(lanportReport?.householdContribution).toBeCloseTo(contribution, 2);

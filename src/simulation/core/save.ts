@@ -2179,6 +2179,56 @@ function validateHouseholds(value: unknown, cityIds: Set<string>): string | null
       if (!isFiniteNumber(stats[key])) return `居民群体 ${group.id}.lastMonth.${key} 无效`;
     }
   }
+  // v1.1 §2：投资份额账本与月度流水可选；出现时必须结构合法（旧存档缺省视为未投入）。
+  if (value.investorFundingHistory !== undefined) {
+    if (!Array.isArray(value.investorFundingHistory)) {
+      return 'households.investorFundingHistory 必须是数组';
+    }
+    for (let index = 0; index < value.investorFundingHistory.length; index++) {
+      const entry = value.investorFundingHistory[index];
+      if (!isRecord(entry)) return `households.investorFundingHistory[${index}] 不是对象`;
+      if (!isInteger(entry.tick) || entry.tick < 0) {
+        return `households.investorFundingHistory[${index}].tick 无效`;
+      }
+      if (typeof entry.cityId !== 'string' || !cityIds.has(entry.cityId)) {
+        return `households.investorFundingHistory[${index}] 引用了不存在的城市`;
+      }
+      if (typeof entry.householdGroupId !== 'string' || !ids.has(entry.householdGroupId)) {
+        return `households.investorFundingHistory[${index}] 引用了不存在的居民群体`;
+      }
+      if (!isFiniteNumber(entry.amount) || entry.amount < 0) {
+        return `households.investorFundingHistory[${index}].amount 无效`;
+      }
+    }
+  }
+  if (value.investorUsageHistory !== undefined) {
+    if (!Array.isArray(value.investorUsageHistory)) {
+      return 'households.investorUsageHistory 必须是数组';
+    }
+    for (let index = 0; index < value.investorUsageHistory.length; index++) {
+      const entry = value.investorUsageHistory[index];
+      if (!isRecord(entry)) return `households.investorUsageHistory[${index}] 不是对象`;
+      if (!isInteger(entry.tick) || entry.tick < 0) {
+        return `households.investorUsageHistory[${index}].tick 无效`;
+      }
+      if (typeof entry.cityId !== 'string' || !cityIds.has(entry.cityId)) {
+        return `households.investorUsageHistory[${index}] 引用了不存在的城市`;
+      }
+      for (const key of [
+        'contributed',
+        'dividendsReceived',
+        'dividendsReturned',
+        'dividendsRetained',
+        'openingCash',
+        'closingCash',
+        'invested',
+      ]) {
+        if (!isFiniteNumber(entry[key])) {
+          return `households.investorUsageHistory[${index}].${key} 无效`;
+        }
+      }
+    }
+  }
   for (let index = 0; index < value.lastStats.length; index++) {
     const stats = value.lastStats[index];
     if (!isRecord(stats)) return `households.lastStats[${index}] 不是对象`;
