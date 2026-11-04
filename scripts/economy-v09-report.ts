@@ -18,6 +18,7 @@ import {
 } from '../src/simulation/government/metrics';
 import { equipmentUnits } from '../src/simulation/equipment/equipment';
 import { GOODS } from '../src/data/demo-data';
+import { foundingAttempts } from '../src/simulation/companies/founding';
 
 function argNumber(flag: string, fallback: number): number {
   const raw = process.argv.find((arg) => arg.startsWith(`${flag}=`));
@@ -358,7 +359,78 @@ function describeCity(world: WorldState, city: City) {
   };
 }
 
+
+/** v1.1 §2：本月居民群体真实转入投资实体的现金（按城市）。 */
+function investorFundingThisTick(world: WorldState, cityId: string): { amount: number; groups: number } {
+  const tick = world.time.tick;
+  const rows = (world.households.investorFundingHistory ?? []).filter(
+    (entry) => entry.tick === tick && entry.cityId === cityId,
+  );
+  return { amount: rows.reduce((sum, entry) => sum + entry.amount, 0), groups: rows.length };
+}
+
+/** v1.1 §2：本月该城投资实体的资金用途快照。 */
+function investorUsageThisTick(
+  world: WorldState,
+  cityId: string,
+): { contributed: number; dividendsReceived: number; dividendsReturned: number; dividendsRetained: number; invested: number } | null {
+  const tick = world.time.tick;
+  const entry = (world.households.investorUsageHistory ?? []).find(
+    (row) => row.tick === tick && row.cityId === cityId,
+  );
+  return entry ?? null;
+}
+
+function investorCashInCity(world: WorldState, cityId: string): number {
+  return world.investors
+    .filter((investor) => investor.cityId === cityId)
+    .reduce((sum, investor) => sum + investor.cash, 0);
+}
+
+/** v1.1 §5：本月新认购政府债券（按持债首次购入 tick 统计；合并持仓可能低估）。 */
+function bondPurchasesThisTick(
+  world: WorldState,
+  cityId: string,
+): { units: number; amount: number; byKind: Record<string, number> } {
+  const tick = world.time.tick;
+  const rows = (world.bonds?.holdings ?? []).filter(
+    (holding) => holding.cityId === cityId && holding.purchasedTick === tick,
+  );
+  const byKind: Record<string, number> = {};
+  for (const holding of rows) {
+    byKind[holding.holder.kind] = (byKind[holding.holder.kind] ?? 0) + holding.principal;
+  }
+  return {
+    units: rows.reduce((sum, holding) => sum + holding.units, 0),
+    amount: rows.reduce((sum, holding) => sum + holding.principal, 0),
+    byKind,
+  };
+}
+
+/** v1.1 §3：本月该城的创业尝试与障碍。 */
+function foundingAttemptsThisTick(world: WorldState, cityId: string) {
+  const tick = world.time.tick;
+  return foundingAttempts(world).filter((attempt) => attempt.tick === tick && attempt.cityId === cityId);
+}
+
+/** 食品有效需求满足率：成交 / 消费端有效需求（居民+跨城居民在本地市场）。 */
+function foodSatisfaction(world: WorldState, city: City): { sold: number; demand: number; rate: number | null } {
+  const stats = city.market['food'];
+  if (!stats || stats.consumerDemand <= 0.01) return { sold: stats?.sold ?? 0, demand: 0, rate: null };
+  return { sold: stats.sold, demand: stats.consumerDemand, rate: stats.sold / stats.consumerDemand };
+}
+
+const initialEmployment = new Map<string, { employed: number; total: number }>();
+
 function printCheckpoint(world: WorldState) {
+  for (const city of world.cities) {
+    if (!initialEmployment.has(city.id)) {
+      initialEmployment.set(city.id, {
+        employed: city.population.employed,
+        total: city.population.total,
+      });
+    }
+  }
   console.log(`\n${'='.repeat(88)}`);
   console.log(`# 第 ${world.time.tick} 个月（${world.time.year}-${String(world.time.month).padStart(2, '0')}）`);
   console.log(`${'='.repeat(88)}`);
@@ -408,6 +480,38 @@ function printCheckpoint(world: WorldState) {
     );
     console.log(
       `居民现金 ${money(household.cash)}｜居民存款 ${money(household.deposits)}｜消费贷未偿 ${money(household.loanOutstanding)}（合同 ${household.loanCount} 笔，违约 ${household.defaulted} 笔，累计发放 ${money(household.borrowed)}）`,
+    );
+    const funding = investorFundingThisTick(world, city.id);
+    const usage = investorUsageThisTick(world, city.id);
+    const investorCash = investorCashInCity(world, city.id);
+    const bondBuy = bondPurchasesThisTick(world, city.id);
+    const attempts = foundingAttemptsThisTick(world, city.id);
+    const foundedNow = attempts.filter((attempt) => attempt.outcome === 'founded').length;
+    const rejectedNow = attempts.filter((attempt) => attempt.outcome === 'rejected');
+    const obstacleText = [
+      ...rejectedNow
+        .flatMap((attempt) => attempt.obstacles.map((obstacle) => obstacle.kind))
+        .reduce((map, kind) => map.set(kind, (map.get(kind) ?? 0) + 1), new Map<string, number>())
+        .entries(),
+    ]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 4)
+      .map(([kind, count]) => `${kind}×${count}`)
+      .join('/');
+    console.log(
+      `居民投资 本月转入 ${money(funding.amount)}（${funding.groups} 个群体）｜实体现金 ${money(investorCash)}｜用途 转入 ${money(usage?.contributed ?? 0)}/股息收 ${money(usage?.dividendsReceived ?? 0)}（返还 ${money(usage?.dividendsReturned ?? 0)}/留存 ${money(usage?.dividendsRetained ?? 0)}）/本期投资 ${money(usage?.invested ?? 0)}`,
+    );
+    console.log(
+      `企业购债 本月新认购 ${num(bondBuy.units)} 份 / ${money(bondBuy.amount)}（${Object.entries(bondBuy.byKind)
+        .map(([kind, amount]) => `${kind} ${money(amount)}`)
+        .join(' / ') || '无'}）`,
+    );
+    console.log(
+      `创业尝试 本月 ${attempts.length} 次（成立 ${foundedNow} / 被拒 ${rejectedNow.length}${obstacleText ? `；障碍 ${obstacleText}` : ''}）`,
+    );
+    const satisfaction = foodSatisfaction(world, city);
+    console.log(
+      `食品满足率 ${satisfaction.rate === null ? '无有效需求（n/a）' : pct(satisfaction.rate)}（成交 ${num(satisfaction.sold, 1)} / 有效需求 ${num(satisfaction.demand, 1)}）`,
     );
     console.log(
       `食品 ${describeGood('食品', marketStats(city, 'food'))}`,
@@ -473,6 +577,56 @@ function printSummary(world: WorldState) {
   }
   const investorCash = world.investors.reduce((sum, investor) => sum + investor.cash, 0);
   console.log(`投资实体现金合计 ${money(investorCash)}（${world.investors.length} 家）`);
+  const fundingHistory = world.households.investorFundingHistory ?? [];
+  const usageHistory = world.households.investorUsageHistory ?? [];
+  for (const city of world.cities) {
+    const funding = fundingHistory
+      .filter((entry) => entry.cityId === city.id)
+      .reduce((sum, entry) => sum + entry.amount, 0);
+    const usage = usageHistory.filter((entry) => entry.cityId === city.id);
+    const contributed = usage.reduce((sum, entry) => sum + entry.contributed, 0);
+    const dividendsIn = usage.reduce((sum, entry) => sum + entry.dividendsReceived, 0);
+    const returned = usage.reduce((sum, entry) => sum + entry.dividendsReturned, 0);
+    const retained = usage.reduce((sum, entry) => sum + entry.dividendsRetained, 0);
+    const invested = usage.reduce((sum, entry) => sum + entry.invested, 0);
+    console.log(
+      `${city.name} 居民→投资实体累计 转入 ${money(funding)}｜实体现金 ${money(investorCashInCity(world, city.id))}｜用途累计 转入 ${money(contributed)}/股息收 ${money(dividendsIn)}（返还 ${money(returned)}/留存 ${money(retained)}）/投资 ${money(invested)}`,
+    );
+  }
+  const companyBondTotal = (world.bonds?.holdings ?? [])
+    .filter((holding) => holding.holder.kind === 'company' && holding.status === 'active')
+    .reduce((sum, holding) => sum + holding.principal, 0);
+  const investorBondTotal = (world.bonds?.holdings ?? [])
+    .filter((holding) => holding.holder.kind === 'investorGroup' && holding.status === 'active')
+    .reduce((sum, holding) => sum + holding.principal, 0);
+  console.log(
+    `企业购债存量（active）：企业 ${money(companyBondTotal)} / 居民投资实体 ${money(investorBondTotal)}｜本月新认购见各 checkpoint`,
+  );
+  const attemptLog = foundingAttempts(world);
+  const rejected = attemptLog.filter((attempt) => attempt.outcome === 'rejected');
+  const obstacles = new Map<string, number>();
+  for (const attempt of rejected) {
+    for (const obstacle of attempt.obstacles) obstacles.set(obstacle.kind, (obstacles.get(obstacle.kind) ?? 0) + 1);
+  }
+  console.log(
+    `创业尝试累计 ${attemptLog.length} 次（成立 ${attemptLog.length - rejected.length} / 被拒 ${rejected.length}）｜障碍 ${[...obstacles.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([kind, count]) => `${kind}×${count}`)
+      .join(' / ') || '无'}`,
+  );
+  for (const city of world.cities) {
+    const satisfaction = foodSatisfaction(world, city);
+    const initial = initialEmployment.get(city.id);
+    // 失业率口径 = 失业 / 劳动力（就业+失业），与 checkpoint 的“失业率”一致。
+    const laborForce = city.population.employed + city.population.unemployed;
+    const rate = laborForce > 0 ? city.population.unemployed / laborForce : 0;
+    const initialLaborForce = initial ? initial.employed + (initial.total - initial.employed) : 0;
+    const initialRate = initial ? (initial.total - initial.employed) / initial.total : null;
+    const delta = initialRate === null ? '' : `｜失业率 ${pct(rate)}（较首个观察点 ${(rate - initialRate >= 0 ? '+' : '') + ((rate - initialRate) * 100).toFixed(1)}pp）`;
+    console.log(
+      `食品满足率 ${city.name}：${satisfaction.rate === null ? 'n/a（无有效需求）' : pct(satisfaction.rate)}（成交 ${num(satisfaction.sold, 1)} / 有效需求 ${num(satisfaction.demand, 1)}）${delta}`,
+    );
+  }
 
   const founded = world.lifecycle.foundings;
   const bySector = new Map<string, number>();

@@ -1,0 +1,69 @@
+{
+  "generatedAt": "2026-11-04T13:13:58.954Z",
+  "electron": "38.8.6",
+  "checks": [
+    {
+      "name": "启动进入区域视图，右栏 6 个城市标签可见",
+      "pass": true,
+      "detail": "{\"view\":\"region\",\"tabs\":6}"
+    },
+    {
+      "name": "开局人口 = 基线 ×5，非劳动 20%、劳动力 80%，就业+失业=劳动力",
+      "pass": true,
+      "detail": "[{\"id\":\"lanport\",\"name\":\"岚港\",\"population\":600000,\"nonLabor\":120000,\"laborForce\":480000,\"employed\":66480,\"unemployed\":413520,\"jobs\":null},{\"id\":\"ironvale\",\"name\":\"铁谷\",\"population\":430000,\"nonLabor\":86000,\"laborForce\":344000,\"employed\":55480,\"unemployed\":288520,\"jobs\":null},{\"id\":\"greenfield\",\"name\":\"青原\",\"population\":320000,\"nonLabor\":64000,\"laborForce\":256000,\"employed\":49380,\"unemployed\":206620,\"jobs\":null}]"
+    },
+    {
+      "name": "人口标签显示就业结构与「需求 vs 成交」，t0 成交显著低于需求",
+      "pass": true,
+      "detail": "{\"demand\":{\"desiredConsumption\":1238873294.6599998,\"consumption\":419887369.34999996,\"unmetFunding\":6.9399999999999995,\"budget\":505826893.64,\"loanFinancedConsumption\":0,\"depositWithdrawn\":13638544.76},\"population\":{\"total\":600145,\"employed\":65184,\"unemployed\":414932,\"nonLabor\":120029,\"laborForce\":480116}}"
+    },
+    {
+      "name": "企业「经营」显示设备表与生产计划（设备/劳动/计划/实际分离）",
+      "pass": true,
+      "detail": "{\"section\":true,\"plan\":true,\"rows\":[{\"kind\":\"farm\",\"units\":0,\"capacity\":0,\"marketPrice\":110580,\"governmentStock\":72},{\"kind\":\"industry\",\"units\":0,\"capacity\":0,\"marketPrice\":184300,\"governmentStock\":180},{\"kind\":\"energy\",\"units\":1,\"capacity\":337200.00000000006,\"marketPrice\":147440,\"governmentStock\":48}],\"planView\":{\"plannedOutput\":256272,\"equipmentLimit\":337200,\"laborLimit\":450121.54,\"reasons\":[\"销售参考 269760.00（近 1 月实际销量），目标库存 134880.00，现有库存 148368.00\",\"设备产能 337200.00，劳动产能 450121.54\",\"扩产条件未满足：上月设备利用率 0.0%、本月计划 76.0%，未连续 2 个月达到 80%\"]},\"salesHistory\":[],\"text\":\"设备 · 产能 · 生产计划 能源 设备产能33.7 万单位 / 月 劳动产能41.4 万单位 / 月 计划产量25.6 万T1 计划 上月产出25.6 万利用率 73.0% 员工 / 岗位1,104 / 684工资 531.1 万/月 成品库存40.5 万无销售参考 设备持有技术系数 ×1.12 设备 台数 单台产能 合计产能 目录价 / 市场价 可购（同城 / 储备） 农业设备 0 台 33.7 万 0 12.0 万 / 11.1 万 13 / 72 台 工业设备 0 台 33.7 万 0 20.0 万 / 18.4 万 8 / 180 台 能源设备 1 台 33.7 万 33.7 万 1\"}"
+    },
+    {
+      "name": "构造玩家经营三家岚港企业后，设备买卖权限在视图层生效",
+      "pass": true,
+      "detail": "{\"fixture\":{\"a\":true,\"b\":true,\"c\":true},\"canOperate\":true}"
+    },
+    {
+      "name": "界面买入 1 台能源设备：设备 +1、货源减少、企业付款=卖方收款（企业库存或政府储备）",
+      "pass": true,
+      "detail": "{\"buyBefore\":{\"cash\":6236680,\"treasury\":0,\"units\":1,\"stock\":48,\"price\":160000,\"marketPrice\":147440,\"stockMonths\":0,\"sellers\":[{\"id\":\"lp-energy-equipment\",\"cash\":1340933.6,\"inventory\":8.09}]},\"buyAfter\":{\"cash\":6089240,\"treasury\":0,\"units\":2,\"stock\":48,\"sellers\":[{\"id\":\"lp-food\",\"cash\":354921248.09,\"inventory\":0},{\"id\":\"lp-garment\",\"cash\":69093309.79,\"inventory\":0},{\"id\":\"lp-appliance\",\"cash\":58597037.48,\"inventory\":0},{\"id\":\"lp-energy\",\"cash\":6089240,\"inventory\":0},{\"id\":\"lp-textile\",\"cash\":18408042.8,\"inventory\":0},{\"id\":\"lp-food2\",\"cash\":56112941.32,\"inventory\":0},{\"id\":\"lp-food3\",\"cash\":53007585.8,\"inventory\":0},{\"id\":\"lp-food4\",\"cash\":37450707.04,\"inventory\":0},{\"id\":\"lp-grain2\",\"cash\":11009442.8,\"inventory\":0},{\"id\":\"lp-grain3\",\"cash\":10487572.8,\"inventory\":0},{\"id\":\"lp-grain4\",\"cash\":9816769.6,\"inventory\":0},{\"id\":\"lp-energy2\",\"cash\":4156790,\"inventory\":0},{\"id\":\"lp-energy3\",\"cash\":3444710,\"inventory\":0},{\"id\":\"lp-metal2\",\"cash\":5339610,\"inventory\":0},{\"id\":\"lp-farm-equipment\",\"cash\":1500092.8,\"inventory\":0},{\"id\":\"lp-industry-equipment\",\"cash\":1463871.2,\"inventory\":0},{\"id\":\"lp-energy-equipment\",\"cash\":1488373.6,\"inventory\":7.09},{\"id\":\"lp-fiber2\",\"cash\":6222083.2,\"inventory\":0},{\"id\":\"lp-textile3\",\"cash\":18750052.8,\"inventory\":0},{\"id\":\"lp-garment3\",\"cash\":27654248.8,\"inventory\":0},{\"id\":\"lp-appliance3\",\"cash\":13914050.65,\"inventory\":0}]},\"spent\":147440,\"received\":0,\"sellerDelta\":[{\"id\":\"lp-energy-equipment\",\"inventory\":1,\"cash\":147440}],\"path\":\"company\"}"
+    },
+    {
+      "name": "界面挂出 2 台二手设备：立即扣除设备、生成本城委托并显示在列表",
+      "pass": true,
+      "detail": "{\"sellSource\":{\"kind\":\"industry\",\"units\":12},\"offer\":{\"id\":\"used-1\",\"companyId\":\"lp-food\",\"kind\":\"industry\",\"units\":2,\"askPrice\":130000},\"unitsAfter\":10}"
+    },
+    {
+      "name": "界面买入二手设备：委托清空、买方设备 +2、买卖双方现金等额转移",
+      "pass": true,
+      "detail": "{\"usedBefore\":{\"buyerCash\":69093309.79,\"sellerCash\":354921248.09,\"buyerUnits\":1},\"usedAfter\":{\"buyerCash\":68833309.79,\"sellerCash\":355181248.09,\"buyerUnits\":3,\"offersLeft\":0},\"usedCost\":260000}"
+    },
+    {
+      "name": "股票市场大窗口仍可打开并显示行",
+      "pass": true,
+      "detail": "{\"window\":true,\"rows\":65,\"title\":\"STOCK MARKET\\n          股票市场\\n          有投票权股份\"}"
+    },
+    {
+      "name": "存读档保留设备/现金/人口/债券/设备储备/销售历史/生产计划且完全一致",
+      "pass": true,
+      "detail": "{\"saved\":true,\"loaded\":true,\"advanced\":\"2026 年 03 月\",\"toasts\":[\"已保存到 manual-1。\",\"已从manual-1恢复（保存于 2026/11/4 13:13:54）。\"],\"diffKeys\":[]}"
+    },
+    {
+      "name": "1100x700 无横向溢出且城市标签仍完整",
+      "pass": true,
+      "detail": "{\"overflowX\":false,\"tabs\":6,\"labels\":[\"概况\",\"人口\",\"企业\",\"市场\",\"政府\",\"交通\"],\"view\":\"region\",\"equipment\":true}"
+    },
+    {
+      "name": "全程无控制台错误（过滤 GPU/GL 噪声）",
+      "pass": true,
+      "detail": ""
+    }
+  ],
+  "passed": 12,
+  "total": 12,
+  "consoleErrors": []
+}
