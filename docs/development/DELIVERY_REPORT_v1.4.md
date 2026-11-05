@@ -213,6 +213,8 @@
   - `8226633` test(acceptance)：v1.4 报告脚本口径、AI 政府/初始设备/投资面板验收证据与回归测试
   - `3830894` docs(v1.4)：交付报告、README 与 1.4.0 版本标识
   - `0d6831a` fix(v1.4)：回退 create 时预写份额账本（保持 v1.2 股息归属语义），按 v1.4 实际耗时/初始设备行为校准慢测试超时与观察窗口
+  - `419168a` test(acceptance)：最终交付代码重跑桌面验收 15/15 并刷新 v1.4 证据
+  - 其后还有一次 docs 提交用于回填测试/推送状态（最终 HEAD 以 `git rev-parse HEAD` 为准）
 - 工作区：干净；未合并 main、未改写历史、未 force push。
 
 ### 13.2 完整测试套件（分块运行）
@@ -274,7 +276,7 @@
 
 ### 13.6 推送状态（未完成：缺凭据）
 
-- 本地提交链（`feature/stock-market-ui-tax`）：`fec99e4`（v1.3 基线）→ `fc9ab01` → `8226633` → `3830894` → `0d6831a`（本报告另有一次 docs 提交）。
+- 本地提交链（`feature/stock-market-ui-tax`）：`fec99e4`（v1.3 基线）→ `fc9ab01` → `8226633` → `3830894` → `0d6831a` → `419168a`（证据）→ 其后 docs 提交（本报告）。最终本地 HEAD 由最后一次 docs 提交构成，以 `git rev-parse HEAD` 为准。
 - 推送尝试：`git push origin feature/stock-market-ui-tax` → 失败 `fatal: could not read Username for 'https://github.com': terminal prompts disabled`（本环境无 GitHub 凭据，未提供 PAT）。
 - 因此：**远端功能分支仍为 `fec99e4a923f4bc95077525f7ea9c200215b6d8b`，`main` 仍为 `6c45000efc4c406d30e22c0a12bd066fc2df61f7`；本地提交待推送。**
 - 需要用户提供 GitHub PAT（建议仅作为环境变量 `GH_PUSH_TOKEN` 或临时 credential helper 使用，不写入仓库文件）；收到后执行 `git push origin feature/stock-market-ui-tax` 并在本节回填本地/远端完整 SHA。
