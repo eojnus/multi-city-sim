@@ -14,6 +14,7 @@ import { GOOD_IDS } from '../companies/company';
 import { offeredStock } from '../markets/markets';
 import { clamp, round2 } from '../core/math';
 import { corridorKey, recordIntercitySale } from '../transport/network';
+import { issueInventory, receiveInventory } from '../finance/inventory-cost';
 
 /**
  * 政府牵头的跨城多企业贸易协议（演示实现）。
@@ -546,11 +547,10 @@ export function executeAgreements(
         participantCityId(agreement, seller.id) ?? seller.cityId;
       const toCityId = participantCityId(agreement, buyer.id) ?? buyer.cityId;
 
-      seller.inventory[item.good] = round2(stock - qty);
-      if (seller.inventory[item.good] < 0 && seller.inventory[item.good] > -1e-6) {
-        seller.inventory[item.good] = 0;
-      }
-      buyer.inventory[item.good] = round2((buyer.inventory[item.good] ?? 0) + qty);
+      // v1.3：卖方按存货账面成本结转 COGS；买方按实付金额入账为存货资产。
+      const soldCost = issueInventory(seller, item.good, qty);
+      seller.lastMonth.cogs = round2((seller.lastMonth.cogs ?? 0) + soldCost);
+      receiveInventory(buyer, item.good, qty, value);
       buyer.cash = round2(buyer.cash - value);
       // 卖方所得在期末按运输容量统一结算（容量不足时少获得该笔收益）。
       recordIntercitySale(world, {

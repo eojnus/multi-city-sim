@@ -1,51 +1,24 @@
 // 验收 I 组补充：公开破产面板权限（交付分支 b85cc0f / 界面 e49079d）。
 // 口径（SUPPLEMENT_ARCHITECT_v1 §7 / DECISIONS #9）：破产事件公开——非市长可看到
 // 破产事实、银行垫付、已勾销、股份托管；但财政余额、流水、债务率、风险档仍仅市长可见。
+// v1.3 起真实 36 月序列不再破产，本文件用 tests/helpers/v13-bankruptcy 构造
+// 带真实债券兑付的破产场景，保留金额路径的权限断言。
 import { beforeAll, describe, expect, it } from 'vitest';
-import { GameStore } from '../../src/app/gameStore';
-import { Simulation } from '../../src/simulation/core/simulation';
-import type { SaveBridge } from '../../src/platform/saveBridge';
+import type { GameStore } from '../../src/app/gameStore';
+import { constructBankruptcy } from '../helpers/v13-bankruptcy';
 import { renderRightCity } from '../../src/ui/panels';
 
 const panelState = { showAllGoods: false, logCollapsed: false } as never;
-
-function createStore(): GameStore {
-  const bridge: SaveBridge = {
-    list: async () => ({ ok: true, slots: [] }),
-    read: async (slot: string) => ({ ok: false, slot, error: '存档不存在', code: 'not-found' }),
-    write: async (slot: string) => ({ ok: true, slot, savedAt: new Date().toISOString() }),
-    remove: async () => ({ ok: true }),
-    onMenuAction: () => () => undefined,
-  } as unknown as SaveBridge;
-  return new GameStore(Simulation.create(), bridge);
-}
-
-function isBankrupt(store: GameStore, cityId: string): boolean {
-  const city = store.world.cities.find((entry) => entry.id === cityId);
-  return (city?.government?.bankruptcy?.status ?? 'solvent') === 'bankrupt';
-}
 
 let store: GameStore;
 let bankruptCityId: string;
 let solventCityId: string;
 
 beforeAll(() => {
-  store = createStore();
-  // 真实 36 月序列里首个破产发生在岚港 t27（见矩阵 §1.6）；推进到出现破产城市为止。
-  for (let i = 0; i < 40; i += 1) {
-    const city = store.world.cities.find((entry) => isBankrupt(store, entry.id));
-    if (city) {
-      bankruptCityId = city.id;
-      break;
-    }
-    store.tick();
-  }
-  expect(bankruptCityId, '前置条件：36 月内应出现破产城市').toBeTruthy();
-  const solvent = (store.world.cities.find((entry) => !isBankrupt(store, entry.id))?.id ?? '');
-  solventCityId = solvent;
-  // 回到非市长身份（玩家默认不是市长；破产重选选的是 AI 市长）。
-  store.world.player.roles.mayorCityId = null;
-  store.emit();
+  const constructed = constructBankruptcy();
+  store = constructed.store;
+  bankruptCityId = constructed.bankruptCityId;
+  solventCityId = constructed.solventCityId;
 }, 180_000);
 
 describe('AC-I10 公开破产面板权限（非市长可见破产事实、不见财政细节）', () => {

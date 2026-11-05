@@ -11,6 +11,7 @@ import type { CityLedgers, PurchaseResult } from './markets';
 import { offeredStock } from './markets';
 import { clamp, round2 } from '../core/math';
 import { corridorKey, recordIntercitySale } from '../transport/network';
+import { issueInventory, receiveInventory } from '../finance/inventory-cost';
 
 function cityDistanceKm(a: City, b: City): number {
   const dx = a.region.x - b.region.x;
@@ -174,7 +175,10 @@ export function executeIntercityPurchase(
     if (buyer && buyer.cash < cost - 1e-6) continue;
 
     // ---- 原子提交 ----
-    seller.company.inventory[goodId] = round2(currentStock - qty);
+    // v1.3：卖方按账面成本结转 COGS（跨城售价含运输加成，收入在期末按运输容量结算）；
+    // 买方按实付金额（含跨城加价）把货物入账为存货资产。
+    const soldCost = issueInventory(seller.company, goodId, qty);
+    seller.company.lastMonth.cogs = round2((seller.company.lastMonth.cogs ?? 0) + soldCost);
     // 跨城成交：买方先付款取得货物；卖方所得在期末按运输容量统一结算
     // （容量不足时卖方少获得收益，不从卖方现金额外扣款）。
     const producedQty = goodId === seller.company.recipeOutput ? qty : 0;
@@ -182,7 +186,7 @@ export function executeIntercityPurchase(
 
     if (buyer) {
       buyer.cash = round2(buyer.cash - cost);
-      buyer.inventory[goodId] = round2((buyer.inventory[goodId] ?? 0) + qty);
+      receiveInventory(buyer, goodId, qty, cost);
       buyer.lastMonth.inputCost = round2(buyer.lastMonth.inputCost + cost);
     } else if (!options.consumer) {
       continue;

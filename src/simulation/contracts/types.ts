@@ -3,7 +3,7 @@
 // v0.2 新增证券/治理/居民投资/协议/通知数据；旧 v1 存档由 core/save.ts 迁移。
 
 export const SAVE_FORMAT_VERSION = 9;
-export const GAME_VERSION = '1.2.0';
+export const GAME_VERSION = '1.3.0';
 
 export type GoodId =
   | 'grain'
@@ -121,6 +121,20 @@ export interface CompanyMonthlyStats {
    * 可选：块1/数据块填充；未填充时报告用近似式并标注“近似”。
    */
   operatingCashFlow?: number;
+  /**
+   * v1.3：本月结转的销货成本（COGS）。
+   *
+   * 口径：采购支出先进入存货资产（Company.inventoryCost），生产消耗原料只把成本
+   * 转入成品存货，不直接计入费用；只有成交（本地/跨城/区域外/协议/设备商品）时
+   * 才按移动加权平均结转 COGS。利润 = 营收 − COGS − 期间费用（工资/利息/税等）。
+   * 可选：旧存档/旧测试夹具未填时按旧现金制回退（cogs 缺失视为 inputCost）。
+   */
+  cogs?: number;
+  /**
+   * v1.3：本月库存注销损失（按账面价值，仅破产清算/报废等场景），
+   * 不计入 COGS、不重复计成本；未填视为 0。
+   */
+  inventoryWriteOff?: number;
 }
 
 export interface Company {
@@ -143,6 +157,16 @@ export interface Company {
   wageRate: number;
   priceFactor: number;
   inventory: Record<GoodId, number>;
+  /**
+   * v1.3：库存账面成本（按商品记录移动加权平均的存货账面价值，合计 = 该商品单位成本 × 数量）。
+   *
+   * - 采购/调入：数量与成本同时增加（买家付多少记多少，含运费/跨城加价）；
+   * - 生产消耗原料：按账面平均单价把成本转入成品存货（不产生费用）；
+   * - 销售/调出：按账面平均单价结转 COGS 并减少账面价值；
+   * - 破产清算/报废：按剩余账面价值一次性注销（inventoryWriteOff）。
+   * 可选字段：旧 v9 存档缺失时由 save 读取路径按当期市场价补齐（标注为兼容估值）。
+   */
+  inventoryCost?: Record<GoodId, number>;
   /** 已发行股份合计（v0.2 起为各股份类别的缓存汇总，权威在 securities.classes）。 */
   totalShares: number;
   lastMonth: CompanyMonthlyStats;

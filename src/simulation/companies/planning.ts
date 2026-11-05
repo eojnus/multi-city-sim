@@ -3,6 +3,7 @@ import type { DemoConfig } from '../../data/config';
 import { round2 } from '../core/math';
 import { companyStyleLabel, planCompanyDecision } from './ai/strategy';
 import { expandCompanyCapacity } from './lifecycle/lifecycle';
+import { equipmentKindForSector, equipmentUnitPrice } from '../equipment/equipment';
 import { recomputeProductionPlan, assessExpansion, cityShortageFor } from './production-plan';
 import { currentStyle } from '../management/manager-pool';
 import { planPlayerOperatedCompany } from '../management/operations';
@@ -77,9 +78,12 @@ export function planCompanies(
     }
 
     // 投资计划只在实际资金范围内执行；失败时保留现金。
-    const unitCost = config.companyAi.capacityCostPerUnit;
+    // v1.3 §5：投资金额按“设备单价”换算成真实设备台数（原先用 capacityCostPerUnit 的
+    // 产能口径，导致 planning 给出的是产能单位、expandCompanyCapacity 又按台数折算，量纲错位）。
+    const expansionKind = equipmentKindForSector(company.sector, config);
+    const unitCost = equipmentUnitPrice(world, company.cityId, expansionKind, config);
     if (decision.investment >= unitCost) {
-      const units = Math.floor(decision.investment / unitCost);
+      const units = Math.max(1, Math.floor(decision.investment / unitCost));
       const result = expandCompanyCapacity(world, company, config, log, units);
       if (!result.ok) {
         decision.plan.investment = 0;

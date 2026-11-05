@@ -1,7 +1,7 @@
 // 验收 H08/H09：新档在到期月/破产月读档后，结算结果与不读档一致；重复读档不重复结算。
 // 只读 src/** 公开 API（save.parseSave/serializeSave、Simulation），不改产品代码。
-import { beforeAll, describe, expect, it } from 'vitest';
-import { DEMO_CONFIG } from '../../src/data/config';
+import { describe, expect, it } from 'vitest';
+import { DEMO_CONFIG, type DemoConfig } from '../../src/data/config';
 import { parseSave, serializeSave } from '../../src/simulation/core/save';
 import { Simulation } from '../../src/simulation/core/simulation';
 import type { BondHolder, WorldState } from '../../src/simulation/contracts/types';
@@ -10,6 +10,8 @@ import {
   subscribeGovernmentBond,
   closeGovernmentBondSubscription,
 } from '../../src/simulation/government/bonds';
+import { borrowForGovernment, settleCityGovernmentDebt } from '../../src/simulation/government/debt';
+import { ensureInvestorOpeningShares } from '../../src/simulation/investors/investors';
 import { cityById, newWorld } from './helpers';
 
 const STAMP = '2026-11-01T00:00:00.000Z';
@@ -68,93 +70,96 @@ describe('H08 到期月读档：结算结果与不读档一致', () => {
   });
 });
 
-/** 真实序列里首次政府破产的 tick（随数值调整自动发现，避免硬编码失效）。 */
-let bankruptTick = 0;
-beforeAll(() => {
-  const probe = Simulation.create();
-  for (let index = 0; index < 36; index += 1) {
-    probe.tick();
-    const ticks = probe.state.cities.flatMap((entry) =>
-      entry.government!.records.map((record) => record.tick),
-    );
-    if (ticks.length > 0) {
-      bankruptTick = Math.min(...ticks);
-      break;
-    }
-  }
-  expect(bankruptTick).toBeGreaterThan(0);
-}, 180_000);
+/**
+ * v1.3 起 36 月真实序列不再出现政府破产（负债率全程 <100%），因此 H09 改为
+ * “构造一个确定性破产场景”：压低 GDP 窗口 + 清空财政 + 借入 2,000 政府贷款，
+ * 使 debt/GDP ≥ 100%，再验证破产月读档/重复结算的幂等性。
+ * 该构造与 tests/acceptance/bankruptcy.test.ts 的 bankruptScenario 同口径。
+ */
+const NO_AI = {
+  ...DEMO_CONFIG,
+  government: {
+    ...DEMO_CONFIG.government,
+    aiGovernment: { ...DEMO_CONFIG.government.aiGovernment, enabled: false },
+  },
+} as unknown as DemoConfig;
 
-describe('H09 破产月读档：不重复结算/重复选举', () => {
+function bankruptcyScenario(): { world: WorldState; city: WorldState['cities'][number] } {
+  const world = newWorld();
+  const city = cityById(world, 'lanport');
+  // 把判定窗口压到 12×100，使 2,000 政府贷款即可触发 100% 破产。
+  city.gdpWindow = Array.from({ length: 12 }, (_, index) => ({
+    tick: -12 + index,
+    value: 100,
+    estimated: true,
+  }));
+  city.treasury = 0;
+  const borrowed = borrowForGovernment(world, city, NO_AI, 2_000, 0, []);
+  expect(borrowed.ok, borrowed.error).toBe(true);
+  // 保存前先补齐居民投资份额账本，保证读档路径不会额外规范化（存档往返逐字段一致）。
+  ensureInvestorOpeningShares(world);
+  world.time.tick = 1;
+  return { world, city };
+}
+
+describe('H09 破产月读档：不重复结算/重复选举（构造破产场景）', () => {
   it('破产前存档 → 读档推进，两路径一致且破产记录/选举各一次', () => {
-    const sim = Simulation.create();
-    for (let index = 0; index < bankruptTick - 1; index += 1) sim.tick();
-    expect(sim.state.time.tick).toBe(bankruptTick - 1);
+    const { world, city } = bankruptcyScenario();
+    const saveText = text(world);
 
-    const saveText = text(sim.state);
-    const continued = sim.tick();
-    expect(continued.ok).toBe(true);
-    const resumed = load(saveText);
-    expect(resumed.tick().ok).toBe(true);
-    expect(text(resumed.state)).toBe(text(sim.state));
-
-    // 首个破产城市：记录 1 条、同 tick 选举 1 次、不重复。
-    const bankruptCity = sim.state.cities.find(
-      (entry) => entry.government!.records.length > 0,
-    )!;
-    expect(bankruptCity.government!.records.map((record) => record.tick)).toEqual([bankruptTick]);
+    const settled = settleCityGovernmentDebt(world, city, NO_AI, []);
+    expect(settled.bankrupted).toBe(true);
+    const record = city.government!.records[0]!;
+    expect(record.tick).toBe(1);
+    expect(city.government!.records).toHaveLength(1);
     expect(
-      sim.state.politics!.elections.filter(
-        (entry) => entry.cityId === bankruptCity.id && entry.tick === bankruptTick,
+      world.politics!.elections.filter(
+        (entry) => entry.cityId === city.id && entry.tick === record.tick,
       ),
     ).toHaveLength(1);
-    // 同一份存档读两次再推进，结果仍一致（重复读档不重复结算）。
-    const repeat = load(saveText);
-    repeat.tick();
-    expect(text(repeat.state)).toBe(text(sim.state));
+
+    // 读档后在同一 tick 结算：逐字段一致（记录/选举/兑付/账目全部不重复）。
+    const loaded = load(saveText);
+    const loadedCity = cityById(loaded.state, 'lanport');
+    const resumed = settleCityGovernmentDebt(loaded.state, loadedCity, NO_AI, []);
+    expect(resumed.bankrupted).toBe(true);
+    expect(text(loaded.state)).toBe(text(world));
+    expect(loadedCity.government!.records).toHaveLength(1);
+    expect(loadedCity.government!.records[0]!.id).toBe(record.id);
+    expect(
+      loaded.state.politics!.elections.filter(
+        (entry) => entry.cityId === city.id && entry.tick === record.tick,
+      ),
+    ).toHaveLength(1);
+    // 不重复兑付：破产兑付流水条数 = 记录条数（本场景无未偿债券 → 0 条）。
+    expect(
+      loaded.state.bonds!.payments.filter(
+        (payment) => payment.kind === 'bankruptcyRedemption' && payment.tick === record.tick,
+      ),
+    ).toHaveLength(record.bondRedemptionCount);
   });
 
   it('破产后存档 → 读档推进，不重复兑付/不重复建垫付贷款', () => {
-    const sim = Simulation.create();
-    for (let index = 0; index < bankruptTick; index += 1) sim.tick();
-    const bankruptCity = sim.state.cities.find(
-      (entry) => entry.government!.records.length > 0,
-    )!;
-    const record = bankruptCity.government!.records[0]!;
-    expect(record.tick).toBe(bankruptTick);
-    expect(record.bankAdvanceCreated).toBeGreaterThan(0);
-    // 首个破产 tick 可能同时有多个城市破产（本序列 t16 为青原、t17 铁谷）：
-    // 这里只针对本城核对，避免把“下月另一个城市合法破产兑付”误判为重复结算。
-    const bankPaymentsAtTrigger = sim.state.bonds!.payments.filter(
-      (payment) =>
-        payment.kind === 'bankruptcyRedemption' &&
-        payment.tick === bankruptTick &&
-        payment.cityId === bankruptCity.id,
-    ).length;
+    const { world, city } = bankruptcyScenario();
+    settleCityGovernmentDebt(world, city, NO_AI, []);
+    const record = city.government!.records[0]!;
+    expect(record.tick).toBe(1);
+    const saveText = text(world);
 
-    const saveText = text(sim.state);
-    sim.tick();
-    const resumed = load(saveText);
-    resumed.tick();
-    expect(text(resumed.state)).toBe(text(sim.state));
+    const reloaded = load(saveText);
+    const reloadedCity = cityById(reloaded.state, 'lanport');
+    // 破产状态随存档持久化。
+    expect(reloadedCity.government!.bankruptcy.status).toBe('bankrupt');
+    expect(reloadedCity.government!.bankruptcy.recordId).toBe(record.id);
+    const paymentsBefore = reloaded.state.bonds!.payments.length;
+    const textBefore = text(reloaded.state);
 
-    // 读档后下一月不再重放破产兑付流水，也不新建同 tick 垫付贷款。
-    expect(
-      sim.state.bonds!.payments.filter(
-        (payment) =>
-          payment.kind === 'bankruptcyRedemption' &&
-          payment.tick === bankruptTick + 1 &&
-          payment.cityId === bankruptCity.id,
-      ),
-    ).toHaveLength(0);
-    expect(
-      sim.state.bonds!.payments.filter(
-        (payment) =>
-          payment.kind === 'bankruptcyRedemption' &&
-          payment.tick === bankruptTick &&
-          payment.cityId === bankruptCity.id,
-      ).length,
-    ).toBe(bankPaymentsAtTrigger);
-    expect(bankruptCity.government!.records).toHaveLength(1);
+    // 同一 tick 重复结算：settledTicks 已持久化 → 直接跳过，不重复兑付/建垫付贷款。
+    const repeated = settleCityGovernmentDebt(reloaded.state, reloadedCity, NO_AI, []);
+    expect(repeated.bankrupted).toBe(false);
+    expect(repeated.payablesCreated).toBe(0);
+    expect(reloadedCity.government!.records).toHaveLength(1);
+    expect(reloaded.state.bonds!.payments).toHaveLength(paymentsBefore);
+    expect(text(reloaded.state)).toBe(textBefore);
   });
 });

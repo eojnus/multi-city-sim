@@ -5,7 +5,6 @@ import type { CityLedgers } from './markets';
 import {
   applyConsumerDemand,
   executePurchase,
-  offeredStock,
   quoteLocalPurchase,
 } from './markets';
 import { executeIntercityPurchase, quoteIntercityPurchase } from './intercity';
@@ -23,6 +22,7 @@ import {
 } from '../population/household-finance';
 import { clamp, round2 } from '../core/math';
 import { taxAccrualOf } from '../government/taxes';
+import { emptyInventoryCost } from '../finance/inventory-cost';
 
 /** 单个居民群体的本月消费结果（四层口径：期望→资金有效→成交→缺口）。 */
 export interface ConsumerGroupResult {
@@ -70,16 +70,6 @@ function emptyGoodsRecord(): Record<GoodId, number> {
   return record;
 }
 
-/** 本城某商品当前可售（未预留生产投入）的库存数量。用于“先确认供给再放款”。 */
-function localAvailableQty(world: WorldState, city: City, goodId: GoodId): number {
-  let total = 0;
-  for (const company of world.companies) {
-    if (company.cityId !== city.id) continue;
-    total += offeredStock(company, goodId);
-  }
-  return round2(Math.max(0, total));
-}
-
 /**
  * 贷款补足成交前的城内市场快照（v0.7 验收问题 3：交易与放款必须原子一致）。
  * 记录所有可能被 executePurchase 改写的字段：卖方库存/现金/收入/销量、市场账本。
@@ -91,7 +81,10 @@ interface StagedSalesSnapshot {
     cash: number;
     revenue: number;
     sold: number;
+    cogs: number;
     inventory: Map<GoodId, number>;
+    /** v1.3：库存账面成本快照（与 inventory 同键），回滚时一并恢复。 */
+    inventoryCost: Map<GoodId, number>;
   }[];
   ledgers: {
     goodId: GoodId;
@@ -130,13 +123,19 @@ function captureStagedSales(
   // 以及现金/收入/销量（跨城成交不改卖方现金，但保留完整还原能力）。
   for (const company of world.companies) {
     const inventory = new Map<GoodId, number>();
-    for (const goodId of goodIds) inventory.set(goodId, company.inventory[goodId] ?? 0);
+    const inventoryCost = new Map<GoodId, number>();
+    for (const goodId of goodIds) {
+      inventory.set(goodId, company.inventory[goodId] ?? 0);
+      inventoryCost.set(goodId, company.inventoryCost?.[goodId] ?? 0);
+    }
     snapshot.companies.push({
       company,
       cash: company.cash,
       revenue: company.lastMonth.revenue,
       sold: company.lastMonth.sold,
+      cogs: company.lastMonth.cogs ?? 0,
       inventory,
+      inventoryCost,
     });
   }
   for (const goodId of goodIds) {
@@ -166,9 +165,15 @@ function restoreStagedSales(
 ): void {
   for (const entry of snapshot.companies) {
     for (const [goodId, qty] of entry.inventory) entry.company.inventory[goodId] = qty;
+    // v1.3：库存账面成本与本月 COGS 一并回滚，保证回滚后成本链仍守恒。
+    for (const [goodId, cost] of entry.inventoryCost) {
+      if (!entry.company.inventoryCost) entry.company.inventoryCost = emptyInventoryCost();
+      entry.company.inventoryCost[goodId] = cost;
+    }
     entry.company.cash = entry.cash;
     entry.company.lastMonth.revenue = entry.revenue;
     entry.company.lastMonth.sold = entry.sold;
+    entry.company.lastMonth.cogs = entry.cogs;
   }
   for (const entry of snapshot.ledgers) {
     const ledger = ledgers[entry.goodId];
@@ -207,7 +212,8 @@ function restoreStagedSales(
  * 2) effective（可支付有效需求）：基本需求不按预算缩放（预算不能阻挡基本需求支付），
  *    非基本需求按“日常预算 / 非基本期望成本”缩放；
  * 3) sold（真实成交）：A 阶段本地优先、B 阶段跨城补缺口；有效需求缩放 ≠ 资金上限；
- * 4) unmet（缺货）：供给/配送不足记 unmet，资金不足（含可借额度不足）记 unmetFunding。
+ * 4) unmet（缺货）：真实尝试过但没买到（供给/配送不足）记 unmet；因资金不足（含可借额度不足）
+ *    没有尝试购买的部分记 unmetFunding。两者之和恒等于 effective − bought，不重复记账。
  * 日常预算公式（v1.0）：min(手头现金, 上月可支配收入×0.8 + 现金×0.05)；基本需求可以突破它，
  * 但最多到“基本需求成本”或实际可用现金（含单月存款提取）上限。
  * 支付顺序：手头现金 → 提取存款 → 合规消费贷；仍有足够现金时不会先借贷。
@@ -276,6 +282,12 @@ interface GroupConsumptionState {
   recorded: Record<GoodId, number>;
   bought: Record<GoodId, number>;
   unmet: Record<GoodId, number>;
+  /**
+   * v1.3：每个商品“真实尝试过但未成交”的数量。
+   * B4 用它把缺口分成缺货（尝试过、没买到）与资金缺口（因资金不足没尝试/没报价），
+   * 避免“月末还有库存”这种间接推断把资金不足误记成缺货。
+   */
+  supplyShortfallQty: Record<GoodId, number>;
   /** A 阶段本地基本需求现金成交额。 */
   essentialSpend: number;
   /** A 阶段本地非基本需求现金成交额（受日常预算约束，不动积蓄）。 */
@@ -348,6 +360,7 @@ function createCityConsumptionState(
         recorded: emptyGoodsRecord(),
         bought: emptyGoodsRecord(),
         unmet: emptyGoodsRecord(),
+        supplyShortfallQty: emptyGoodsRecord(),
         essentialSpend: 0,
         nonEssentialSpend: 0,
         intercityEssentialSpend: 0,
@@ -493,6 +506,9 @@ function runLocalConsumptionPhase(
       const local = applyConsumerDemand(world, state.city, state.ledgers, good.id, qty, config);
       group.recorded[good.id] = round2((group.recorded[good.id] ?? 0) + qty);
       group.bought[good.id] = round2((group.bought[good.id] ?? 0) + local.qty);
+      group.supplyShortfallQty[good.id] = round2(
+        (group.supplyShortfallQty[good.id] ?? 0) + Math.max(0, qty - local.qty),
+      );
       group.essentialSpend = round2(group.essentialSpend + local.spend);
       essentialCapacity = round2(Math.max(0, essentialCapacity - local.spend));
     }
@@ -521,6 +537,9 @@ function runLocalConsumptionPhase(
       const local = applyConsumerDemand(world, state.city, state.ledgers, good.id, qty, config);
       group.recorded[good.id] = round2((group.recorded[good.id] ?? 0) + qty);
       group.bought[good.id] = round2((group.bought[good.id] ?? 0) + local.qty);
+      group.supplyShortfallQty[good.id] = round2(
+        (group.supplyShortfallQty[good.id] ?? 0) + Math.max(0, qty - local.qty),
+      );
       group.nonEssentialSpend = round2(group.nonEssentialSpend + local.spend);
       nonEssentialCapacity = round2(Math.max(0, nonEssentialCapacity - local.spend));
     }
@@ -587,6 +606,10 @@ function runIntercityConsumptionPhase(
         config,
       );
       group.bought[entry.goodId] = round2((group.bought[entry.goodId] ?? 0) + imported.qty);
+      group.supplyShortfallQty[entry.goodId] = round2(
+        (group.supplyShortfallQty[entry.goodId] ?? 0) +
+          Math.max(0, quote.qty - imported.qty),
+      );
       group.intercityEssentialSpend = round2(group.intercityEssentialSpend + imported.spend);
       essentialCapacity = round2(Math.max(0, essentialCapacity - imported.spend));
       recordAttempt(state.ledgers, group, entry.goodId, quote.qty, imported.qty);
@@ -628,6 +651,10 @@ function runIntercityConsumptionPhase(
         config,
       );
       group.bought[entry.goodId] = round2((group.bought[entry.goodId] ?? 0) + imported.qty);
+      group.supplyShortfallQty[entry.goodId] = round2(
+        (group.supplyShortfallQty[entry.goodId] ?? 0) +
+          Math.max(0, quote.qty - imported.qty),
+      );
       group.intercityNonEssentialSpend = round2(
         group.intercityNonEssentialSpend + imported.spend,
       );
@@ -655,7 +682,10 @@ function runIntercityConsumptionPhase(
     // B3) 现金与可提存款都用尽后，仍不足才申请消费贷（原子：放款+成交要么全成、要么全无）。
     runLoanFinancedPurchases(world, state, group, config);
 
-    // B4) 缺口按“现在还有没有本地供给”分账：有供给但没钱→资金缺口；没供给→供给缺口。
+    // B4) 缺口分账（v1.3 §6）：真实尝试过但没买到 → 缺货（unmet）；
+    // 因资金不足没尝试/没报价 → 资金缺口（unmetFunding）。
+    // 早期阶段失败、后续阶段补上的尝试仍计入缺货，作为“曾发生供应不足”的保守上限；
+    // 二者之和恒等于 effective − bought，不重复记账。
     let unmetFunding = 0;
     for (const good of CONSUMER_GOODS) {
       const price = state.city.market[good.id]?.price ?? good.basePrice;
@@ -665,9 +695,11 @@ function runIntercityConsumptionPhase(
         group.unmet[good.id] = 0;
         continue;
       }
-      const localQty = round2(Math.min(gapQty, localAvailableQty(world, state.city, good.id)));
-      group.unmet[good.id] = round2(gapQty - localQty);
-      unmetFunding = round2(unmetFunding + localQty * price);
+      const unserved = round2(
+        Math.min(gapQty, Math.max(0, group.supplyShortfallQty[good.id] ?? 0)),
+      );
+      group.unmet[good.id] = unserved;
+      unmetFunding = round2(unmetFunding + round2(Math.max(0, gapQty - unserved) * price));
     }
     group.unmetFunding = unmetFunding;
 
@@ -848,6 +880,10 @@ function runLoanFinancedPurchases(
       for (const entry of executed) {
         group.bought[entry.plan.goodId] = round2(
           (group.bought[entry.plan.goodId] ?? 0) + entry.qty,
+        );
+        group.supplyShortfallQty[entry.plan.goodId] = round2(
+          (group.supplyShortfallQty[entry.plan.goodId] ?? 0) +
+            Math.max(0, entry.plan.qty - entry.qty),
         );
         recordAttempt(state.ledgers, group, entry.plan.goodId, entry.plan.qty, entry.qty);
       }

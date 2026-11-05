@@ -19,6 +19,7 @@ import type { DemoConfig } from '../../../data/config';
 import { GOODS, PRODUCTIVITY } from '../../../data/demo-data';
 import { round2, allocateProportionally } from '../../core/math';
 import { createEmptyInventory, monthlyWageBill, setCompanyEmployees } from '../company';
+import { emptyInventoryCost, writeOffInventory } from '../../finance/inventory-cost';
 import {
   addShares,
   createShareStructure,
@@ -51,6 +52,7 @@ import {
   assessFoundingOpportunities,
   founderCapacityFor,
   foundingAttempts,
+  foundingAttemptSnapshot,
   foundingCandidateForOutput,
   pickFoundingCandidate,
   pickFoundingOpportunity,
@@ -109,8 +111,14 @@ declare module '../../contracts/types' {
     /**
      * v1.2：本 tick（月）各城自动创办计数。world.lifecycle.foundings 会按 maxHistory 裁剪，
      * 单月超过 60 家时无法再从历史数组反推当月数量；这里保留精确计数，保证同月重复调用不超发。
+     * v1.3：同时记录本 tick 已用作出资人的在营企业与新成立企业，跨多次 maybeFoundCompanies
+     * 调用仍生效，阻断同 tick A→B→C 连锁抽血。
      */
-    foundingMonth?: { tick: number; counts: Record<string, number> };
+    foundingMonth?: {
+      tick: number;
+      counts: Record<string, number>;
+      foundersUsed?: Record<string, string[]>;
+    };
   }
 }
 
@@ -135,6 +143,12 @@ export interface FoundCompanyOptions {
    * 重复使用同一批可用劳动力；玩家直接发起创办时不传（只按真实在岗/失业约束）。
    */
   reservedJobs?: number;
+  /**
+   * v1.3 §5：本 tick 内已被其他自动创办企业用作出资人的企业 id。
+   * 自动创办循环逐家累加：同一 tick 不允许同一在营企业连续出资（A→B→C 连锁抽血），
+   * 新成立的企业也不能立刻当出资人。玩家显式指定 founderId 时不使用该列表。
+   */
+  blockedCompanyFounders?: string[];
 }
 
 function foundingCount(world: WorldState, predicate: (record: FoundingRecord) => boolean): number {
@@ -173,7 +187,7 @@ export function foundCompany(
   request: FoundingRequest,
   config: DemoConfig,
   options?: FoundCompanyOptions,
-): ActionResult & { companyId?: string } {
+): ActionResult & { companyId?: string; founderId?: string } {
   const log = request.log ?? [];
   const city = world.cities.find((entry) => entry.id === request.cityId);
   if (!city) return { ok: false, error: '城市不存在' };
@@ -408,6 +422,7 @@ function buildFoundingCompany(
     wageRate: config.labor.privateWageRate,
     priceFactor: 1,
     inventory: createEmptyInventory(),
+    inventoryCost: emptyInventoryCost(),
     totalShares: 1_000_000,
     lastMonth: blankStats(),
     previousMonth: blankStats(),
@@ -531,21 +546,25 @@ function rejectFounding(
     capital: tier?.founderEquity ?? 0,
     loan: tier?.loanPrincipal ?? 0,
     note: `行业评分 ${assessment.score.toFixed(1)}，创办被拒绝：${detail}`,
+    ...foundingAttemptSnapshot(assessment, tier),
   });
   return { ok: false, error: `创业失败：${detail}` };
 }
 
-/** 同城可再创办、现金最多的企业出资人（AI 自动创办用）。 */
+/** 同城可再创办、缓冲后仍有出资余钱的企业出资人（AI 自动创办用）。 */
 function pickCompanyFounder(
   world: WorldState,
   config: DemoConfig,
   cityId: string,
+  blocked: Set<string>,
 ): string | undefined {
   return [...world.companies]
     .filter(
       (company) =>
         company.cityId === cityId &&
         company.cash > 0 &&
+        !blocked.has(company.id) &&
+        founderCapacityFor(world, config, cityId, 'company', company.id) > 0 &&
         foundingCount(
           world,
           (record) =>
@@ -567,7 +586,7 @@ function foundCompanyV1(
   config: DemoConfig,
   log: LogEntry[],
   options?: FoundCompanyOptions,
-): ActionResult & { companyId?: string } {
+): ActionResult & { companyId?: string; founderId?: string } {
   if (request.recipeOutput && !GOODS.some((good) => good.id === request.recipeOutput)) {
     return { ok: false, error: `未知商品 ${request.recipeOutput}` };
   }
@@ -580,12 +599,13 @@ function foundCompanyV1(
     0,
     city.population.laborForce - city.population.employed - Math.max(0, options?.reservedJobs ?? 0),
   );
-  // v1.2：AI 自动创办不再把「在营企业」当作出资人——那会把在营企业的周转现金整笔抽走，
-  // 造成原企业首月欠薪/停产（Lead 证据 co-lanport-243 等）。自动路径只使用居民投资群体
-  // 与政府财政；显式指定 founderType: 'company' 的调用仍保留（仅允许用缓冲后的余钱）。
+  // v1.3 §5：恢复「有能力的在营 AI 企业」作为创业主体，但只能用运营缓冲之外的余钱
+  // （2 个月工资 + 1 个月原料 + 已知本息），且同 tick 内同一企业只能出资一次、新企业不能立刻再出资，
+  // 由 blockedCompanyFounders 阻断 A→B→C 连锁抽血；显式 founderType 的调用保持原语义。
+  const blockedCompanyFounders = new Set(options?.blockedCompanyFounders ?? []);
   const founderOrder: FounderType[] = request.founderType
     ? [request.founderType]
-    : ['investorGroup', 'government'];
+    : ['investorGroup', 'company', 'government'];
   const tiers = options?.plan ? [options.plan] : assessment.scaleTiers;
   type ChosenFounder = {
     founderType: FounderType;
@@ -595,16 +615,25 @@ function foundCompanyV1(
   };
   let chosen: ChosenFounder | null = null;
   let founderError: string | null = null;
+  // v1.3 §5：记录最接近可行的档位障碍，避免“有档位但无出资人”时 attempt 障碍为空（unknown）。
+  let bestObstacles: FoundingObstacle[] = [];
+  let bestTier: FoundingScaleTier | null = null;
   for (const tier of tiers) {
     for (const founderType of founderOrder) {
       // AI 自动创办时没有指定企业出资人：在同城挑选一家仍有创办额度、现金最多的企业。
       const founderId =
         founderType === 'company' && !request.founderId
-          ? pickCompanyFounder(world, config, city.id)
+          ? pickCompanyFounder(world, config, city.id, blockedCompanyFounders)
           : request.founderId;
       const capacity = founderCapacityFor(world, config, city.id, founderType, founderId);
       const retuned = retuneTierForAssessment(assessment, tier, capacity, config, allowLoan, availableLabor);
-      if (!retuned.feasible) continue;
+      if (!retuned.feasible) {
+        if (retuned.blockers.length > bestObstacles.length) {
+          bestObstacles = retuned.blockers;
+          bestTier = retuned;
+        }
+        continue;
+      }
       const founderResult = collectFoundingInvestors(
         world,
         { ...request, founderId },
@@ -638,8 +667,12 @@ function foundCompanyV1(
       world,
       request,
       assessment,
-      assessment.scaleTiers[0] ?? null,
-      assessment.obstacles,
+      bestTier ?? assessment.scaleTiers[0] ?? null,
+      bestObstacles.length > 0
+        ? bestObstacles
+        : assessment.obstacles.length > 0
+          ? assessment.obstacles
+          : [{ kind: 'capital', detail: '没有可出资的出资人（居民/企业/政府资金均不足）' }],
       request.founderType ?? 'auto',
     );
   }
@@ -704,6 +737,9 @@ function foundCompanyV1(
 
   const purchase = buyNewEquipment(world, company, assessment.equipmentKind, chosen.tier.units, config, world.time.tick, {
     allowGovernmentStock: true,
+    // v1.3 §5：评估与实际采购同口径——新设企业只使用同城/政府库存，不走跨城运输；
+    // 存续企业扩产仍可跨城采购（见 expandCompanyCapacity）。
+    allowIntercity: false,
     reason: '创办设备采购',
     log,
   });
@@ -777,7 +813,10 @@ function foundCompanyV1(
     1,
     Math.min(chosen.tier.jobs, Math.ceil(bootstrapOutput / Math.max(1e-6, perEmployee))),
   );
-  company.jobDemand = Math.max(1, chosen.tier.jobs);
+  // v1.3 §5：首月岗位需求直接对齐 bootstrap 计划岗位，而不是“设备满负荷需要的岗位数”。
+  // 否则成立后的第一个 reconcileLabor 会在没有任何销量/收入时按满负荷招人，把周转金烧成欠薪。
+  // 后续月份由 production-plan 按真实销量/库存/现金平滑增长（±20%），不会锁死在维护性产出。
+  company.jobDemand = bootstrapJobs;
   company.productionPlan = {
     tick: world.time.tick,
     salesReference: 0,
@@ -877,6 +916,7 @@ function foundCompanyV1(
     capital: tier.founderEquity,
     loan: loanAmount,
     note: record.note,
+    ...foundingAttemptSnapshot(assessment, tier),
   });
   log.push({
     tick: world.time.tick,
@@ -885,7 +925,14 @@ function foundCompanyV1(
       loanAmount > 0 ? `，贷款 ${loanAmount.toFixed(0)}` : ''
     }${grant > 0 ? `，财政扶持 ${grant.toFixed(0)}` : ''}。`,
   });
-  return { ok: true, note: `${company.name} 已成立。`, amount: tier.founderEquity, companyId: company.id };
+  return {
+    ok: true,
+    note: `${company.name} 已成立。`,
+    amount: tier.founderEquity,
+    companyId: company.id,
+    // v1.3：自动创办循环据此把该企业加入本 tick 的 blockedCompanyFounders，阻断连锁抽血。
+    founderId: chosen.founderType === 'company' ? chosen.founderId : undefined,
+  };
 }
 
 /** v1.1 出资人真实扣款：全部成功才返回 true；由调用方在任何世界副作用之前校验。 */
@@ -979,6 +1026,7 @@ function blankStats(): Company['lastMonth'] {
   return {
     revenue: 0,
     inputCost: 0,
+    cogs: 0,
     wagesPaid: 0,
     wageArrears: 0,
     interestPaid: 0,
@@ -1019,13 +1067,16 @@ export function expandCompanyCapacity(
   const city = world.cities.find((entry) => entry.id === company.cityId);
   if (!city) return { ok: false, error: '企业城市不存在' };
   const kind = equipmentKindForSector(company.sector, config);
-  // 统一单位（task-23）：扩产按“本企业产出”的每台产能折算设备台数。
+  // v1.3 §5：requestedUnits 是“设备台数”（planning 已按设备单价换算），不是产能单位。
+  // 仍受 maxExpansionShare（单月产能扩张上限）约束：把 8% 产能折算成可购台数。
   const perUnit = Math.max(1, equipmentCapacityPerUnit(config, kind, company.recipeOutput));
+  const growthCapUnits = Math.max(
+    1,
+    Math.floor((company.capacity * config.companyAi.maxExpansionShare) / perUnit),
+  );
   const plannedUnits = Math.max(
     1,
-    Math.round(
-      Math.min(requestedUnits ?? company.capacity * config.companyAi.maxExpansionShare, company.capacity * config.companyAi.maxExpansionShare) / perUnit,
-    ),
+    Math.min(Math.floor(requestedUnits ?? growthCapUnits), growthCapUnits),
   );
   const catalog = config.equipment.catalog[kind];
   const policy = activePolicy(world, city.id, 'equipmentSubsidy');
@@ -1282,14 +1333,13 @@ export function liquidateCompany(
 
   const interestedStake = playerStakeOf(world, company.id);
   const prices = cityMarketPrices(city);
-  const inventoryWrittenOff = Object.entries(company.inventory)
-    .map(([good, qty]) => ({
-      good: good as Company['recipeOutput'],
-      qty: round2(Math.max(0, qty)),
-      bookValue: round2(Math.max(0, qty) * (prices[good as Company['recipeOutput']] ?? 0)),
-    }))
-    .filter((entry) => entry.qty > 0);
+  // v1.3：清算按存货账面成本注销（旧档无账面成本时按当期市场价估值），
+  // 注销额单独记 inventoryWriteOff，避免与正常销售的 COGS 重复。
+  const inventoryWrittenOff = writeOffInventory(company, (goodId) => prices[goodId] ?? 0);
   const inventoryBookValue = round2(inventoryWrittenOff.reduce((sum, entry) => sum + entry.bookValue, 0));
+  company.lastMonth.inventoryWriteOff = round2(
+    (company.lastMonth.inventoryWriteOff ?? 0) + inventoryBookValue,
+  );
 
   // v0.9：设备资产按真实买家处置（无人购买则移交政府设备库存，不按账面变现）。
   const equipmentSale = disposeCompanyEquipment(world, company, config, world.time.tick, log);
@@ -1684,6 +1734,7 @@ function recordFoundingStop(
     capital: 0,
     loan: 0,
     note: `本轮自动创办停止：${detail}`,
+    ...foundingAttemptSnapshot(probe, null),
   });
 }
 
@@ -1710,12 +1761,17 @@ export function maybeFoundCompanies(
   // 用持久化的本月计数保证同月重复调用 / 多城循环都按真实数量执行上限。
   const month = world.lifecycle.foundingMonth;
   if (!month || month.tick !== world.time.tick) {
-    world.lifecycle.foundingMonth = { tick: world.time.tick, counts: {} };
+    world.lifecycle.foundingMonth = { tick: world.time.tick, counts: {}, foundersUsed: {} };
   }
   const counts = world.lifecycle.foundingMonth!.counts;
+  const foundersUsed = world.lifecycle.foundingMonth!.foundersUsed ?? {};
 
   for (const city of [...world.cities].sort((a, b) => a.id.localeCompare(b.id))) {
     let foundThisTick = counts[city.id] ?? 0;
+    // v1.3 §5：本 tick 已用作出资人的在营企业 + 本 tick 新成立的企业。
+    // 同一企业每月只能出资一次，新企业不能立刻再出资，避免 A→B→C 连锁抽血；
+    // 该集合持久化到 foundingMonth，同 tick 多次调用也不会重置。
+    const blockedCompanyFounders = new Set<string>(foundersUsed[city.id] ?? []);
     for (let attempt = 0; attempt < monthlyLimit; attempt++) {
       // 160 在营上限：每次创办前按最新 world.companies 重新检查（口径与 foundCompany 一致）。
       if (cityCompanyCount(world, city.id) >= config.lifecycle.maxCompaniesPerCity) {
@@ -1754,11 +1810,17 @@ export function maybeFoundCompanies(
           world,
           { cityId: city.id, recipeOutput: assessment.output, log },
           config,
+          { blockedCompanyFounders: [...blockedCompanyFounders] },
         );
         if (result.ok && result.companyId) {
           created.push(result.companyId);
           foundThisTick += 1;
           counts[city.id] = foundThisTick;
+          // v1.3：本 tick 新企业不能当出资人；实际出资企业每月也只能出资一次。
+          blockedCompanyFounders.add(result.companyId);
+          if (result.founderId) blockedCompanyFounders.add(result.founderId);
+          foundersUsed[city.id] = [...blockedCompanyFounders];
+          world.lifecycle.foundingMonth!.foundersUsed = foundersUsed;
           // v1.2：成立时员工已计入 city.population.employed，下一次循环的劳动力上限
           // 直接读最新就业即可，不再额外预留 reservedJobs（否则会重复扣减同一批失业人口）。
           founded = true;

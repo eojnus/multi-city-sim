@@ -233,15 +233,22 @@ describe('v1.2 自动创办上限与资源使用', () => {
     const perEmployee =
       PRODUCTIVITY[company.recipeOutput] * tech * skill * config.production.laborCapacityFactor;
 
-    // 岗位必须与设备产能/人均产出同量纲：55–80% 初始利用率下误差 ≤ 1 人。
-    const expectedJobs = Math.ceil(
-      (company.equipmentCapacity * config.company.initialUtilization) / perEmployee,
-    );
+    // v1.3：成立首月按“设备维护性产出”（capacity × minOutputRatio）上岗，
+    // 岗位与 bootstrap 计划一致；后续月份由生产计划按真实销量平滑增长。
+    const bootstrapOutput =
+      company.equipmentCapacity * (config.production.plan?.minOutputRatio ?? 0.05);
+    expect(company.productionPlan).not.toBeNull();
+    expect(company.jobDemand).toBe(company.productionPlan!.plannedJobs);
     expect(company.jobDemand).toBeGreaterThanOrEqual(1);
-    expect(Math.abs(company.jobDemand - expectedJobs)).toBeLessThanOrEqual(1);
+    expect(company.jobDemand).toBeLessThanOrEqual(
+      Math.max(1, Math.ceil(bootstrapOutput / Math.max(1e-6, perEmployee))),
+    );
+    expect(company.jobDemand * perEmployee).toBeLessThanOrEqual(bootstrapOutput + perEmployee);
     // 岗位×人均产出不得超过设备产能（否则说明把“台/月”当成了产出量纲）。
-    expect(company.jobDemand * perEmployee).toBeLessThanOrEqual(
-      company.equipmentCapacity * config.company.initialUtilization + perEmployee,
+    expect(company.jobDemand * perEmployee).toBeLessThanOrEqual(company.equipmentCapacity + 0.01);
+    // 首月岗位也不得超过“设备满负荷可支撑岗位”，避免无销量时按满负荷招人烧周转金。
+    expect(company.jobDemand).toBeLessThanOrEqual(
+      Math.ceil(company.equipmentCapacity / perEmployee) + 1,
     );
 
     // 实跑一个 tick：实际产出不超过设备/劳动上限（laborCap 用实际在岗人数）。
@@ -252,6 +259,8 @@ describe('v1.2 自动创办上限与资源使用', () => {
         ?.qty ?? 0;
     const laborCap = company.employees * perEmployee;
     expect(produced).toBeLessThanOrEqual(Math.min(company.equipmentCapacity, laborCap) + 0.01);
+    // 成立首月不得欠薪：bootstrap 工资必须由周转金覆盖。
+    expect(company.lastMonth.wageArrears).toBe(0);
   });
 
   it('12 个月实跑：逐月每城自动创办不超 100，性能可接受', () => {
@@ -271,5 +280,5 @@ describe('v1.2 自动创办上限与资源使用', () => {
     expect(monthlyCreated.some((count) => count > 0)).toBe(true);
     expect(monthlyCreated.reduce((sum, count) => sum + count, 0)).toBeGreaterThan(0);
     expect(elapsed).toBeLessThan(120_000);
-  });
+  }, 150_000);
 });

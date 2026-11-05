@@ -2,6 +2,7 @@ import type {
   CompanyMonthlyStats,
   GoodId,
   InvestmentResult,
+  ProductionRecord,
   TickResult,
   WorldState,
   LogEntry,
@@ -80,6 +81,7 @@ function blankStats(): CompanyMonthlyStats {
   return {
     revenue: 0,
     inputCost: 0,
+    cogs: 0,
     wagesPaid: 0,
     wageArrears: 0,
     interestPaid: 0,
@@ -270,22 +272,43 @@ export class Simulation {
       // 7. 市场期初供应（在合同/协议改变企业库存之后计算）
       const ledgers = createWorldLedgers(this.state);
 
-      // 8. 生产资料采购：本地市场 + 区域市场补货（成交后才补足融资）
-      runInputPurchasing(this.state, ledgers, this.config, logs);
+      // 8. 月内分阶段采购与生产（v1.3 §4：固定两轮）。
+      // 第 1 轮用月初库存采购并生产；第 2 轮把本月新产出的原料重新投入市场成交，
+      // 再完成剩余计划的生产。两轮共用同一份月度计划/劳动/设备上限，只按“剩余量”推进，
+      // 因此不会重复消耗原料或重复使用产能；需求记账只在第 1 轮发生，第 2 轮成交
+      // 冲减已记录的 unmetDemand，避免同一需求被重复计入。
+      // 长期合同与政府协议只在第 1 轮之前执行一次（月度量不得重复履约），它们到货
+      // 仍在本月第一轮生产之前入账。
+      const productionRecords: ProductionRecord[] = [];
+      const PRODUCTION_ROUNDS = Math.min(
+        3,
+        Math.max(1, Math.floor(this.config.production.productionRounds ?? 2)),
+      );
+      for (let productionRound = 1; productionRound <= PRODUCTION_ROUNDS; productionRound += 1) {
+        // 8a. 生产资料采购：本地市场 + 区域市场补货（成交后才补足融资）
+        runInputPurchasing(this.state, ledgers, this.config, logs, { round: productionRound });
 
-      // 8b. 长期贸易合同与政府协议：在市场采购之后执行，避免合同（含补交欠量）先
-      // 抽干卖方库存、让本地/跨城市场采购看到 0 供给（v0.9 验收问题六：食品供应消失）。
-      // 市场优先、合同补足剩余，合同到货仍在本月生产之前入账，不影响当月生产。
-      const tradeFlows = executeTradeRoutes(this.state, this.config, logs);
-      this.state.lastTick.tradeFlows.push(...tradeFlows);
+        if (productionRound === 1) {
+          // 8b. 长期贸易合同与政府协议：在市场采购之后执行，避免合同（含补交欠量）先
+          // 抽干卖方库存、让本地/跨城市场采购看到 0 供给（v0.9 验收问题六：食品供应消失）。
+          // 市场优先、合同补足剩余，合同到货仍在本月生产之前入账，不影响当月生产。
+          const tradeFlows = executeTradeRoutes(this.state, this.config, logs);
+          this.state.lastTick.tradeFlows.push(...tradeFlows);
 
-      const agreementFlows = executeAgreements(this.state, this.config, this.state.time.tick, logs);
-      this.state.lastTick.tradeFlows.push(...agreementFlows);
-      maybeAutoProposeAgreements(this.state, this.config, this.state.time.tick, logs);
-      this.pruneAgreementHistory();
+          const agreementFlows = executeAgreements(
+            this.state,
+            this.config,
+            this.state.time.tick,
+            logs,
+          );
+          this.state.lastTick.tradeFlows.push(...agreementFlows);
+          maybeAutoProposeAgreements(this.state, this.config, this.state.time.tick, logs);
+          this.pruneAgreementHistory();
+        }
 
-      // 9. 生产：消耗库存、产出、记录增加值（受员工、技能、政策与产能限制）
-      const productionRecords = runProduction(this.state, ledgers, this.config);
+        // 9. 生产：消耗库存、产出、记录增加值（受员工、技能、政策与产能限制）
+        productionRecords.push(...runProduction(this.state, ledgers, this.config));
+      }
       this.state.lastTick.productionRecords = productionRecords;
 
       // 7. 居民消费（使用上一月已实现收入）

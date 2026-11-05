@@ -4,6 +4,7 @@ import { GOODS } from '../../data/demo-data';
 import type { CityLedgers } from '../markets/markets';
 import { offeredStock, sumCityStock } from '../markets/markets';
 import { round2 } from '../core/math';
+import { issueInventory } from '../finance/inventory-cost';
 
 /**
  * 区域外净出口（演示）：只吸收超出目标库存的消费品，价格按本城市场价的 90%。
@@ -56,7 +57,9 @@ export function runExternalDemand(
         if (qty > currentStock + 1e-6) continue;
 
         // ---- 原子提交 ----
-        producer.inventory[good.id] = round2(currentStock - qty);
+        // v1.3：区域外出口按存货账面成本结转 COGS（区域外付款、不进入本地市场）。
+        const soldCost = issueInventory(producer, good.id, qty);
+        producer.lastMonth.cogs = round2((producer.lastMonth.cogs ?? 0) + soldCost);
         producer.cash = round2(producer.cash + value);
         producer.lastMonth.revenue = round2(producer.lastMonth.revenue + value);
         producer.lastMonth.exported = round2(producer.lastMonth.exported + qty);

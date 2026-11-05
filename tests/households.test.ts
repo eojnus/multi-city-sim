@@ -23,6 +23,7 @@ import { checkInvariants } from '../src/simulation/core/invariants';
 import { deepClone, parseSave, serializeSave } from '../src/simulation/core/save';
 import { round2 } from '../src/simulation/core/math';
 import { DeterministicRng } from '../src/simulation/core/rng';
+import { splitInvestorEquity } from '../src/simulation/population/household-investment';
 import {
   OCCUPATIONS,
   cityHouseholdCash,
@@ -203,12 +204,13 @@ describe('居民群体：财富阶层统计', () => {
       );
 
       // 按 config 阈值独立复算每个群体应落入的阶层，人数必须与快照一致。
-      const equityPerPerson =
-        cityStats.totalPeople > 0 ? cityStats.totalEquity / cityStats.totalPeople : 0;
+      // v1.3 §2：权益按有效投资份额归属（与股息返还、授信同口径），不再按人口平均。
+      const groupEquities = splitInvestorEquity(groups, cityStats.totalEquity);
       const expectedPeople: Record<WealthTier, number> = { low: 0, middle: 0, high: 0 };
-      for (const group of groups) {
+      for (let index = 0; index < groups.length; index += 1) {
+        const group = groups[index]!;
         const deposits = groupDepositOf(world, group.id);
-        const groupEquity = round2(group.people * equityPerPerson);
+        const groupEquity = groupEquities[index] ?? 0;
         const wealth = round2(group.cash + deposits + groupEquity);
         const perCapita = group.people > 0 ? wealth / group.people : 0;
         expectedPeople[expectedTier(perCapita, DEMO_CONFIG)] += group.people;

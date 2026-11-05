@@ -8,6 +8,7 @@ import { bankLoansOf } from '../banking/credit';
 import { requestCompanyWorkingCapital } from '../management/financing';
 import { distributeDividend, playerTotalShares } from '../securities/securities';
 import { accrueDividendTax } from '../government/taxes';
+import { ensureInventoryCost } from './inventory-cost';
 
 export interface FinanceResult {
   /** 居民投资实体本次实际收到的股息总额（按城市）。 */
@@ -134,6 +135,10 @@ export function settleCompanyFinance(
     const city = world.cities.find((candidate) => candidate.id === company.cityId);
     if (!city) continue;
     const stats = company.lastMonth;
+    // v1.3：旧档/旧测试夹具可能没有存货成本账面；按本城市场价补齐，保证 COGS 与库存资产同源。
+    if (!company.inventoryCost) {
+      ensureInventoryCost(company, (goodId) => city.market[goodId]?.price ?? 0);
+    }
     const owedWages = monthlyWageBill(company, config);
     // v0.4：现金不足时按银行授信自动借入周转贷款（旧的无对手方信贷已停用）。
     // v0.4.1（验收问题 2）：玩家经营企业必须先过经营模式/授权，手动模式不得暗中举债；
@@ -162,7 +167,12 @@ export function settleCompanyFinance(
     stats.wageArrears = arrears;
     totalArrears += arrears;
 
-    const preTaxProfit = round2(stats.revenue - stats.inputCost - paidWages);
+    // v1.3 §3：利润按“权责发生制”口径——营收 − 已售存货成本（COGS）− 期间费用（工资）。
+    // 采购支出先进入存货资产（Company.inventoryCost），只有被销售的存货才结转 COGS；
+    // 未售成品留在期末存货，不再像旧口径那样把本月采购直接费用化（避免采购/消耗重复计成本）。
+    // 旧存档/旧夹具未记录 cogs 时回退到 inputCost，保持既有测试与旧档可读。
+    const periodCogs = stats.cogs ?? stats.inputCost;
+    const preTaxProfit = round2(stats.revenue - periodCogs - paidWages);
     // 使用企业所在城市的有效企业税率：政策调整只影响该城市企业。
     const corporateTaxRate = clamp(city.corporateTaxRate, 0, 1);
     const taxOwed = round2(Math.max(0, preTaxProfit) * corporateTaxRate);
@@ -313,6 +323,17 @@ export function settleCompanyFinance(
     }
     // 维护最近 bonusEveryMonths 个月税后利润（当前月最后入队），供下次季度评估与紧急裁员判定。
     company.recentProfits = [...company.recentProfits, stats.profit].slice(-bonusWindow);
+
+    // v1.3 §3：经营现金流与会计利润分开口径（纯现金收支，不含存货与应收应付的权责发生调整）：
+    // 销售回款 − 采购现金支出 − 实发工资（含奖金）− 利息 − 企业所得税。
+    // 采购支出在这里仍以 inputCost（现金制）出现，不进入利润；利润只扣 COGS。
+    stats.operatingCashFlow = round2(
+      stats.revenue -
+        stats.inputCost -
+        stats.wagesPaid -
+        stats.interestPaid -
+        stats.corporateTax,
+    );
 
     if (arrears > 0.01) {
       log.push({

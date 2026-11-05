@@ -178,7 +178,9 @@ describe('v0.9 真实旧档（f942cc9）读取兼容', () => {
     expect(entries[0]!.message).toContain('余量');
     expect(entries[0]!.message).toContain('设备');
     expect(entries[0]!.message).toContain('未改变');
-    expect(world.log).toHaveLength((RAW_WORLD.log as any[]).length + 1);
+    // v1.3 起读取旧档还会补一条库存账面成本/COGS 回退的兼容日志（见 normalizeInventoryCostWorld），
+    // 因此总日志条数为旧档 + 2；余量兼容日志仍只有 1 条（由 compatLogEntries 过滤）。
+    expect(world.log).toHaveLength((RAW_WORLD.log as any[]).length + 2);
 
     // 设备市场库存/委托与旧档一致；只补空的 pendingLedger，不生成可售设备。
     expect(world.equipmentMarket.initialStock).toEqual(RAW_WORLD.equipmentMarket.initialStock);

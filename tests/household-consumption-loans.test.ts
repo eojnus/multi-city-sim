@@ -96,7 +96,7 @@ describe('居民消费预算：四层口径（#39/#40/#26）', () => {
     expect(second.cashBudget).toBe(second.referenceSpend);
   });
 
-  it('供给不足不借多余资金：本地无货时借不到钱，缺口记供给缺口而非资金缺口', () => {
+  it('供给不足不借多余资金：本地无货时借不到钱，尝试过的需求记供给缺口、未尝试部分记资金缺口', () => {
     const world = newWorld();
     const city = cityAt(world);
     resetCityHouseholds(world, city);
@@ -109,10 +109,12 @@ describe('居民消费预算：四层口径（#39/#40/#26）', () => {
     expect(entry.spend).toBe(0);
     expect(entry.loanFinanced ?? 0).toBe(0);
     expect(world.householdFinance?.loans ?? []).toHaveLength(0);
-    expect(entry.unmetFunding ?? 0).toBe(0);
-    // 有效需求全部成为供给缺口。
+    // v1.3 §6 分账：真实尝试购买（现金只够支付一部分）但因无供给未成交 → 供给缺口；
+    // 因现金不足没有尝试购买的部分 → 资金缺口。两者合计恒等于有效需求。
     const unmetTotal = Object.values(entry.unmet).reduce((total, value) => total + value, 0);
     expect(unmetTotal).toBeGreaterThan(0);
+    expect(entry.unmetFunding ?? 0).toBeGreaterThan(0);
+    expect(entry.unmet.food ?? 0).toBeGreaterThan(0);
   });
 
   it('现金为 0 但有授信时：现金预算为 0，成交全部由消费贷融资，且贷款不计收入', () => {

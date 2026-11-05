@@ -1,42 +1,21 @@
 // 验收补充：财政日志的可见性（v0.7 验收问题 5）。
 // 口径：政府具体借款/垫付/勾销/兑付汇总/债务率仅该城市现任市长可见；
 // 破产事实与重选结果公开（不含金额）。渲染期按当前 mayorCityId 重新过滤。
+// v1.3 起真实 36 月序列不再破产，本文件用 tests/helpers/v13-bankruptcy 构造
+// 带真实债券兑付的破产场景，保留金额路径的可见性断言。
 import { beforeAll, describe, expect, it } from 'vitest';
-import { GameStore } from '../../src/app/gameStore';
-import { Simulation } from '../../src/simulation/core/simulation';
-import type { SaveBridge } from '../../src/platform/saveBridge';
-
-function createStore(): GameStore {
-  const bridge: SaveBridge = {
-    list: async () => ({ ok: true, slots: [] }),
-    read: async (slot: string) => ({ ok: false, slot, error: '存档不存在', code: 'not-found' }),
-    write: async (slot: string) => ({ ok: true, slot, savedAt: new Date().toISOString() }),
-    remove: async () => ({ ok: true }),
-    onMenuAction: () => () => undefined,
-  } as unknown as SaveBridge;
-  return new GameStore(Simulation.create(), bridge);
-}
+import type { GameStore } from '../../src/app/gameStore';
+import { constructBankruptcy } from '../helpers/v13-bankruptcy';
 
 let store: GameStore;
 let bankruptCityId: string;
 let otherCityId: string;
 
 beforeAll(() => {
-  store = createStore();
-  for (let i = 0; i < 40; i += 1) {
-    const city = store.world.cities.find(
-      (entry) => (entry.government?.bankruptcy?.status ?? 'solvent') === 'bankrupt',
-    );
-    if (city) {
-      bankruptCityId = city.id;
-      break;
-    }
-    store.tick();
-  }
-  expect(bankruptCityId, '前置条件：36 月内应出现破产城市').toBeTruthy();
-  otherCityId = store.world.cities.find((entry) => entry.id !== bankruptCityId)?.id ?? '';
-  store.world.player.roles.mayorCityId = null;
-  store.emit();
+  const constructed = constructBankruptcy();
+  store = constructed.store;
+  bankruptCityId = constructed.bankruptCityId;
+  otherCityId = constructed.solventCityId;
 }, 180_000);
 
 function messages(viewerMayorCityId: string | null): string[] {

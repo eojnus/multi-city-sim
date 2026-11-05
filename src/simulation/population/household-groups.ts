@@ -4,7 +4,7 @@
 // - 群体人数（people）不是独立人口权威：它由城市人口、公共部门与企业岗位角色派生，
 //   每期重算，保证“一个人只被统计一次”。
 // - 群体手头现金属于本模块；银行存款权威在 world.banking.deposits（owner.kind='household'），
-//   股票权益复用 world.securities 的居民投资实体持股，按人口比例归属。
+//   股票权益复用 world.securities 的居民投资实体持股，按有效投资份额（investorLedger）归属。
 // - 群体人口变化（招聘、裁员、自然变动、迁移）时按人均资产转移现金与存款，
 //   不凭空产生或丢失资金。
 
@@ -24,6 +24,13 @@ import { companySharePrice, occupationWageRate } from '../companies/company';
 import { cityMarketPrices } from '../markets/markets';
 import { depositAccountFor, ensureDepositAccount } from '../banking/banking';
 import { reallocateHouseholdDebtsForGroupChange } from './household-finance';
+import {
+  allocateMoneyExact,
+  effectiveInvestorShares,
+  ensureInvestorLedger,
+  investorEquityOfGroup,
+  splitInvestorEquity,
+} from './household-investment';
 import { ensureInvestorOpeningShares } from '../investors/investors';
 
 /** 职业类别的固定顺序（确定性遍历与展示顺序）。 */
@@ -330,6 +337,55 @@ export function syncHouseholdPeople(world: WorldState, config: DemoConfig): void
           addDepositBalance(world, entry.group.id, poolDeposit * share);
         }
       }
+
+      // v1.3 §2：投资权益随人口同步转移（与现金/存款同一“迁出人数占比”口径）。
+      // 减少群体按迁出比例拆出有效份额，汇总后按各接收群体新增人数权重分币级分配：
+      // 接收方记入 openingShares（随人承接的既有权益，不是新投入），账本合计严格守恒。
+      const ledgerMoves: { group: HouseholdGroup; moved: number; effective: number }[] = [];
+      for (const entry of decreases) {
+        const group = entry.group;
+        const leaving = Math.min(-entry.delta, group.people);
+        if (leaving <= 0 || group.people <= 0) continue;
+        const effective = effectiveInvestorShares(group.investorLedger);
+        if (effective <= 0) continue;
+        const whole = leaving >= group.people;
+        const moved = whole ? effective : round2(effective * (leaving / group.people));
+        if (moved <= 0) continue;
+        ledgerMoves.push({ group, moved, effective });
+      }
+      const poolShares = round2(ledgerMoves.reduce((total, entry) => total + entry.moved, 0));
+      if (poolShares > 0) {
+        const weights = increases.map((entry) => entry.delta);
+        const credits = allocateMoneyExact(poolShares, weights);
+        // 迁出人口的累计投入按同一比例随人转出，接收群体记账（只分配一次，避免重复累加）。
+        const contributedPool = round2(
+          ledgerMoves.reduce((total, entry) => {
+            if (entry.effective <= 0) return total;
+            return round2(total + ensureInvestorLedger(entry.group).contributed * (entry.moved / entry.effective));
+          }, 0),
+        );
+        const contributedCredits = allocateMoneyExact(contributedPool, weights);
+        for (const entry of ledgerMoves) {
+          const ledger = ensureInvestorLedger(entry.group);
+          const sharesOut = Math.min(Math.max(0, ledger.shares), entry.moved);
+          const openingOut = round2(Math.max(0, entry.moved - sharesOut));
+          const contributedOut =
+            entry.effective > 0
+              ? round2(ledger.contributed * (entry.moved / entry.effective))
+              : 0;
+          ledger.shares = round2(Math.max(0, ledger.shares - sharesOut));
+          ledger.openingShares = round2(Math.max(0, (ledger.openingShares ?? 0) - openingOut));
+          ledger.contributed = round2(Math.max(0, ledger.contributed - contributedOut));
+        }
+        increases.forEach((receiver, index) => {
+          const received = credits[index] ?? 0;
+          const contributed = contributedCredits[index] ?? 0;
+          if (received <= 0 && contributed <= 0) return;
+          const receiverLedger = ensureInvestorLedger(receiver.group);
+          receiverLedger.openingShares = round2((receiverLedger.openingShares ?? 0) + received);
+          receiverLedger.contributed = round2(receiverLedger.contributed + contributed);
+        });
+      }
     }
 
     // 人数统一按权威数据写回（资产转移只发生在有人数增加时）。
@@ -338,6 +394,35 @@ export function syncHouseholdPeople(world: WorldState, config: DemoConfig): void
     reallocateHouseholdDebtsForGroupChange(world, config, city.id, targets);
     for (const group of groups) {
       group.people = targets.get(group.occupation) ?? 0;
+    }
+
+    // v1.3 §2：群体人数归零时不得把投资份额留在空群体。
+    // 净迁出/无接收方场景下（上面的按人数转移不会触发），把空群体的有效份额按人口权重
+    // 转给同城仍有人口的群体（分币级），合计守恒；若同城已无人则保留账本等待后续处理。
+    const emptyGroups = groups.filter(
+      (group) => group.people <= 0 && effectiveInvestorShares(group.investorLedger) > 0,
+    );
+    const holders = groups.filter((group) => group.people > 0);
+    if (emptyGroups.length > 0 && holders.length > 0) {
+      const holderWeights = holders.map((group) => Math.max(0, group.people));
+      for (const group of emptyGroups) {
+        const ledger = ensureInvestorLedger(group);
+        const moved = effectiveInvestorShares(ledger);
+        if (moved <= 0) continue;
+        const credits = allocateMoneyExact(moved, holderWeights);
+        const contributedCredits = allocateMoneyExact(ledger.contributed, holderWeights);
+        ledger.shares = 0;
+        ledger.openingShares = 0;
+        ledger.contributed = 0;
+        holders.forEach((holder, index) => {
+          const received = credits[index] ?? 0;
+          const contributed = contributedCredits[index] ?? 0;
+          if (received <= 0 && contributed <= 0) return;
+          const holderLedger = ensureInvestorLedger(holder);
+          holderLedger.openingShares = round2((holderLedger.openingShares ?? 0) + received);
+          holderLedger.contributed = round2(holderLedger.contributed + contributed);
+        });
+      }
     }
   }
   // v1.2 §1：开局/旧档首次同步人口时，把投资实体已有净资产一次性记为各群体的起始份额
@@ -445,7 +530,7 @@ function tierOf(perCapitaWealth: number, config: DemoConfig): WealthTier {
   return 'low';
 }
 
-/** 每城财富阶层统计快照（人数合计 = 城市总人口；股票权益按人口比例归属）。 */
+/** 每城财富阶层统计快照（人数合计 = 城市总人口；股票权益按有效投资份额归属）。 */
 export function computeHouseholdWealthStats(
   world: WorldState,
   config: DemoConfig,
@@ -456,7 +541,8 @@ export function computeHouseholdWealthStats(
     const groups = householdGroupsOfCity(world, city.id);
     const totalPeople = groups.reduce((total, group) => total + group.people, 0);
     const equity = cityInvestorEquity(world, city.id);
-    const equityPerPerson = totalPeople > 0 ? equity / totalPeople : 0;
+    // v1.3 §2：权益按有效份额归属（与股息返还、居民授信同一口径），不再按人口平均。
+    const groupEquities = splitInvestorEquity(groups, equity);
 
     const buckets: Record<WealthTier, HouseholdTierStat> = {
       low: { tier: 'low', people: 0, share: 0, perCapitaWealth: 0, perCapitaIncome: 0, cash: 0, deposits: 0, equity: 0 },
@@ -467,9 +553,10 @@ export function computeHouseholdWealthStats(
     let totalCash = 0;
     let totalDeposits = 0;
     let totalIncome = 0;
-    for (const group of groups) {
+    for (let index = 0; index < groups.length; index += 1) {
+      const group = groups[index]!;
       const deposits = depositBalanceOf(world, group.id);
-      const groupEquity = round2(group.people * equityPerPerson);
+      const groupEquity = groupEquities[index] ?? 0;
       const wealth = round2(group.cash + deposits + groupEquity);
       const perCapita = group.people > 0 ? wealth / group.people : 0;
       const tier = tierOf(perCapita, config);
@@ -503,7 +590,7 @@ export function computeHouseholdWealthStats(
       totalEquity: equity,
       perCapitaIncome: totalPeople > 0 ? round2(totalIncome / totalPeople) : 0,
       perCapitaWealth: totalPeople > 0 ? round2(totalWealth / totalPeople) : 0,
-      note: '人均资产 = 现金 + 银行存款 + 按人口比例归属的居民投资实体股票权益；股票市值不是现金。',
+      note: '人均资产 = 现金 + 银行存款 + 按有效投资份额归属的居民投资实体股票权益；股票市值不是现金。',
     });
   }
   return stats;
@@ -564,9 +651,9 @@ export function householdPerCapitaWealth(
   const city = world.cities.find((candidate) => candidate.id === group.cityId);
   if (!city) return 0;
   const cityGroups = householdGroupsOfCity(world, city.id);
-  const totalPeople = cityGroups.reduce((total, entry) => total + entry.people, 0);
   const equity = cityInvestorEquity(world, city.id);
-  const equityShare = totalPeople > 0 ? (equity / totalPeople) * group.people : 0;
+  // v1.3 §2：与财富统计、股息返还、居民授信共用“有效份额”口径。
+  const equityShare = investorEquityOfGroup(cityGroups, group, equity);
   const wealth = group.cash + depositBalanceOf(world, group.id) + equityShare;
   return group.people > 0 ? round2(wealth / group.people) : 0;
 }

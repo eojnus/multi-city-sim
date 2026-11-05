@@ -14,6 +14,7 @@ import {
   intercityEquipmentOffers,
   recordIntercityEquipmentPurchase,
 } from '../markets/intercity';
+import { issueInventory } from '../finance/inventory-cost';
 
 /**
  * v0.9：设备资产与设备市场。
@@ -481,10 +482,9 @@ export function executeNewEquipmentPlan(
     if (line.source === 'company') {
       const seller = world.companies.find((entry) => entry.id === line.sellerCompanyId)!;
       seller.cash = round2(seller.cash + line.cost);
-      seller.inventory[goodId] = Math.max(
-        0,
-        round2((seller.inventory[goodId] ?? 0) - line.units),
-      );
+      // v1.3：设备商品从卖方存货转为买方设备资产：卖方按存货账面成本结转 COGS。
+      const soldCost = issueInventory(seller, goodId, line.units);
+      seller.lastMonth.cogs = round2((seller.lastMonth.cogs ?? 0) + soldCost);
       seller.lastMonth.sold = round2(seller.lastMonth.sold + line.units);
       seller.lastMonth.revenue = round2(seller.lastMonth.revenue + line.cost);
       // 设备作为资本品出售的收入：计入卖方 equipmentSold（与二手设备口径一致），
@@ -509,10 +509,9 @@ export function executeNewEquipmentPlan(
       });
     } else {
       const seller = world.companies.find((entry) => entry.id === line.sellerCompanyId)!;
-      seller.inventory[goodId] = Math.max(
-        0,
-        round2((seller.inventory[goodId] ?? 0) - line.units),
-      );
+      // v1.3：跨城设备成交同样在卖方侧按存货账面成本结转 COGS（收入按运力结算）。
+      const soldCost = issueInventory(seller, goodId, line.units);
+      seller.lastMonth.cogs = round2((seller.lastMonth.cogs ?? 0) + soldCost);
       syncMarketClosingStock(world, seller.cityId, goodId, -line.units);
       // 跨城：买方全额付款，卖方所得按既有运输容量结算（期末统一扣减并退回差额）。
       recordIntercityEquipmentPurchase(world, company, seller, kind, line.units, line.cost, config);

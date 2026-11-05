@@ -5,6 +5,7 @@ import { round2 } from '../core/math';
 import { productionTarget } from '../production/production';
 import { planCompanyWorkingCapital, drawPlannedWorkingCapital } from '../management/financing';
 import { corridorKey, recordIntercitySale } from '../transport/network';
+import { issueInventory, receiveInventory } from '../finance/inventory-cost';
 
 /**
  * 点对点跨城市企业贸易。先校验双方城市、商品、库存、需求与资金，
@@ -101,8 +102,10 @@ export function executeTradeRoutes(
     if (importer.cash + 1e-6 < value) continue;
 
     // ---- 原子提交 ----
-    exporter.inventory[route.good] = round2(exporterStock - qty);
-    importer.inventory[route.good] = round2((importer.inventory[route.good] ?? 0) + qty);
+    // v1.3：卖方按存货账面成本结转 COGS；进口方按实付金额把货物入账为存货资产。
+    const soldCost = issueInventory(exporter, route.good, qty);
+    exporter.lastMonth.cogs = round2((exporter.lastMonth.cogs ?? 0) + soldCost);
+    receiveInventory(importer, route.good, qty, value);
     importer.cash = round2(importer.cash - value);
     importer.lastMonth.inputCost = round2(importer.lastMonth.inputCost + value);
     // 出口所得在期末按运输容量结算；容量不足时减少卖方该笔收益，不额外扣款。

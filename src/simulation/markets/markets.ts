@@ -11,6 +11,7 @@ import { GOOD_IDS } from '../companies/company';
 import { clamp, round2 } from '../core/math';
 import { intracityDeliveryEfficiency } from '../transport/network';
 import { accrueConsumptionTax, splitConsumptionTax } from '../government/taxes';
+import { issueInventory, receiveInventory } from '../finance/inventory-cost';
 
 /**
  * 企业自用投入品不进入本月可售供应，避免同一批原料在月内被反复转卖，
@@ -229,10 +230,9 @@ export function executePurchase(
     const consumerTax =
       options.consumer && !buyer && config ? splitConsumptionTax(finalCost, config).tax : 0;
     const sellerProceeds = round2(finalCost - consumerTax);
-    seller.company.inventory[goodId] = round2(currentStock - qty);
-    if (seller.company.inventory[goodId] < 0 && seller.company.inventory[goodId] > -1e-6) {
-      seller.company.inventory[goodId] = 0;
-    }
+    // v1.3：卖方按存货账面移动加权平均成本结转 COGS；买方按实付金额把货物入账为存货资产。
+    const soldCost = issueInventory(seller.company, goodId, qty);
+    seller.company.lastMonth.cogs = round2((seller.company.lastMonth.cogs ?? 0) + soldCost);
     seller.company.cash = round2(seller.company.cash + sellerProceeds);
     seller.company.lastMonth.revenue = round2(
       seller.company.lastMonth.revenue + sellerProceeds,
@@ -243,7 +243,7 @@ export function executePurchase(
 
     if (buyer) {
       buyer.cash = round2(buyer.cash - finalCost);
-      buyer.inventory[goodId] = round2((buyer.inventory[goodId] ?? 0) + qty);
+      receiveInventory(buyer, goodId, qty, finalCost);
       buyer.lastMonth.inputCost = round2(buyer.lastMonth.inputCost + finalCost);
     } else if (options.consumer) {
       // 最终消费：货物离开企业库存后不再进入库存账本。

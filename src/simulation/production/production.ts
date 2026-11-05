@@ -21,6 +21,7 @@ import {
 import { workforceSkillMultiplier } from '../labor/workforce';
 import { leaderSectorMultiplier } from '../politics/politics';
 import { keyIndustryFocus } from '../policies/query';
+import { issueInventory, receiveInventory } from '../finance/inventory-cost';
 
 /** 单个投入品的采购计划（阶段 A/B 共用的中间结构）。 */
 interface InputPurchasePlan {
@@ -156,13 +157,28 @@ export function laborCapacity(
  *   （最大余数到 0.01），成交前重新核对预算与授信。
  * 阶段顺序只改变成交先后，不改变需求记账、融资裁决与账本口径。
  */
+export interface InputPurchasingOptions {
+  /**
+   * v1.3 §4：月内采购轮次（1 起）。
+   * - 第 1 轮：按整月生产计划记录需求（producerRequired/producerDemand/unmetDemand/unmetFunding）
+   *   并完成本地/跨城成交；
+   * - 第 2 轮及以后：为本月剩余计划再采购刚刚生产出来的原料。需求已在第 1 轮记账，
+   *   因此本轮不再新增需求，只在本轮成交后按成交数量冲减对应城市的 unmetDemand
+   *   （原“缺货”被本月新产出补上了），避免同一需求被重复计入。
+   */
+  round?: number;
+}
+
 export function runInputPurchasing(
   world: WorldState,
   ledgers: WorldLedgers,
   config: DemoConfig,
   log: LogEntry[],
+  options: InputPurchasingOptions = {},
 ): void {
   const tick = world.time.tick;
+  const round = Math.max(1, Math.floor(options.round ?? 1));
+  const recordDemand = round <= 1;
   const ordered = [...world.companies].sort((a, b) => {
     const priority = (company: Company): number => {
       const city = world.cities.find((candidate) => candidate.id === company.cityId);
@@ -188,7 +204,15 @@ export function runInputPurchasing(
     const recipe = RECIPES[company.recipeOutput];
     if (!recipe || recipe.inputs.length === 0) continue;
 
-    const target = Math.min(productionTarget(company), laborCapacity(company, city, config, world));
+    // v1.3 §4：第 2 轮只为“本月剩余计划”补料，已生产部分不再重复采购。
+    const producedThisMonth = Math.max(0, company.lastMonth.produced);
+    const monthlyTarget = Math.min(
+      productionTarget(company),
+      laborCapacity(company, city, config, world),
+    );
+    const target = round2(
+      recordDemand ? monthlyTarget : Math.max(0, monthlyTarget - producedThisMonth),
+    );
     if (target <= 0) continue;
     const shortages = recipe.inputs.map((input) => {
       const required = round2(target * input.qty);
@@ -325,9 +349,12 @@ export function runInputPurchasing(
     }
 
     const accounted = plans.map((plan, index) => {
-      const effectiveDemand = round2((fundedExecutable[index] ?? 0) + (claimedDemand[index] ?? 0));
+      // 第 2 轮：需求已在第 1 轮记账，本轮只按剩余缺口采购，不再重复记需求。
+      const effectiveDemand = recordDemand
+        ? round2((fundedExecutable[index] ?? 0) + (claimedDemand[index] ?? 0))
+        : round2(plan.shortage);
       const ledger = cityLedgers[plan.goodId];
-      if (ledger) {
+      if (ledger && recordDemand) {
         ledger.producerRequired = round2(ledger.producerRequired + plan.shortage);
         ledger.producerDemand = round2(ledger.producerDemand + effectiveDemand);
         ledger.demand = round2(ledger.demand + effectiveDemand);
@@ -349,6 +376,42 @@ export function runInputPurchasing(
       creditRoom,
       bought: accounted.map(() => 0),
     });
+  }
+
+  // 第 2 轮（及以后）：本轮能成交的数量必须落在“第 1 轮已记账但尚未满足的需求”之内。
+  // 否则 sold 会超过 demand（不变量校验失败），也会把同一份需求重复计入成交。
+  // 按“城市 + 商品”把该城账本的 unmetDemand 作为本轮可购买上限，再按各企业剩余
+  // 计划缺口加权分配（最大余数到 0.01），避免先到先得。
+  if (!recordDemand) {
+    interface RoundTwoDemand {
+      pending: CompanyInputPurchasing;
+      index: number;
+      requested: number;
+    }
+    const groups = new Map<string, { ledger: (typeof ledgers)[string][GoodId]; demands: RoundTwoDemand[] }>();
+    for (const pending of purchases) {
+      pending.plans.forEach((plan, index) => {
+        if (plan.effectiveDemand <= 0.01) return;
+        const ledger = pending.cityLedgers[plan.goodId];
+        if (!ledger) return;
+        const key = `${pending.city.id}|${plan.goodId}`;
+        const group = groups.get(key) ?? { ledger, demands: [] };
+        group.demands.push({ pending, index, requested: plan.effectiveDemand });
+        groups.set(key, group);
+      });
+    }
+    for (const group of groups.values()) {
+      const cap = Math.max(0, round2(group.ledger.unmetDemand ?? 0));
+      const requested = round2(group.demands.reduce((total, demand) => total + demand.requested, 0));
+      const granted = allocateByWeight(
+        round2(Math.min(cap, requested)),
+        group.demands.map((demand) => demand.requested),
+      );
+      group.demands.forEach((demand, position) => {
+        const plan = demand.pending.plans[demand.index]!;
+        plan.effectiveDemand = round2(granted[position] ?? 0);
+      });
+    }
   }
 
   // 阶段 A：所有企业先买完全部本地可售库存。
@@ -388,6 +451,15 @@ export function runInputPurchasing(
       );
       pending.budget = Math.max(0, round2(pending.budget - local.spend));
       pending.bought[index] = round2((pending.bought[index] ?? 0) + local.qty);
+      // v1.3 §4：第 2 轮的市场供给口径。期初 supply 只统计“当时的可售库存”，
+      // 生产消耗后原本为生产预留的库存会重新变为可售并可能在第二轮成交；
+      // 这部分成交同样来自当月可供库存，因此把 supply 抬到“已成交数量”以上，
+      // 保持 sold ≤ supply + intercityImported 不变量（与设备账本 pendingLedger 的
+      // “sold 同时计入 supply”口径一致）。
+      if (!recordDemand && local.qty > 0) {
+        const ledger = pending.cityLedgers[plan.goodId];
+        if (ledger) ledger.supply = round2(Math.max(ledger.supply, ledger.sold));
+      }
     }
   }
 
@@ -514,10 +586,19 @@ export function runInputPurchasing(
   }
 
   // 需求收尾：缺货只按“有效需求 − 本地成交 − 跨城成交”记一次。
+  // 第 2 轮不再新增需求：本轮用本月新产出补上的数量，直接从第 1 轮记录的
+  // unmetDemand 中冲减（这部分缺货已经被当月的采购满足，不是新增需求）。
   for (const pending of purchases) {
     pending.plans.forEach((plan, index) => {
       if (plan.effectiveDemand <= 0.01) return;
       const ledger = pending.cityLedgers[plan.goodId];
+      if (!recordDemand) {
+        const bought = pending.bought[index] ?? 0;
+        if (ledger && bought > 0.01) {
+          ledger.unmetDemand = round2(Math.max(0, round2(ledger.unmetDemand - bought)));
+        }
+        return;
+      }
       if (plan.supplyQty <= 0.01) {
         if (ledger) {
           ledger.unmetDemand = round2(ledger.unmetDemand + plan.effectiveDemand);
@@ -599,14 +680,21 @@ export function runProduction(
     if (!recipe) continue;
     // v1.0：实际产量 = min(计划, 设备产能, 劳动产能)，再在下面按原料库存收紧。
     // 计划本身已 ≤ min(设备, 劳动, 原料资金)，这里再显式夹一次，防止旧档/手动改计划越界。
-    const equipmentCap = company.productionPlan
+    // v1.3 §4：runProduction 每月可能被调用多轮（月内分阶段生产），这里统一按
+    // “本月剩余计划 / 剩余设备产能 / 剩余劳动产能”计算，保证两轮合计不超过月度上限、
+    // 也不会因为分轮而重复使用同一份劳动或设备。
+    const producedThisMonth = Math.max(0, company.lastMonth.produced);
+    const equipmentLimit = company.productionPlan
       ? Math.max(0, company.productionPlan.equipmentLimit)
       : Math.max(0, company.capacity);
-    let output = Math.min(
-      productionTarget(company),
-      equipmentCap,
-      laborCapacity(company, city, config, world),
+    const monthlyTarget = productionTarget(company);
+    const remainingTarget = Math.max(0, monthlyTarget - producedThisMonth);
+    const remainingEquipment = Math.max(0, equipmentLimit - producedThisMonth);
+    const remainingLabor = Math.max(
+      0,
+      laborCapacity(company, city, config, world) - producedThisMonth,
     );
+    let output = Math.min(remainingTarget, remainingEquipment, remainingLabor);
     if (output <= 0) continue;
 
     for (const input of recipe.inputs) {
@@ -619,6 +707,9 @@ export function runProduction(
 
     const consumed: ProductionRecord['inputs'] = [];
     let inputValue = 0;
+    // v1.3：生产消耗原料不直接计入费用，而是按账面移动加权平均成本转入成品存货。
+    // consumedCost 汇总为本批成品的入账成本；inputValue 仍按市场价记录产出法增值（GDP 口径不变）。
+    let consumedCost = 0;
     for (const input of recipe.inputs) {
       const qty = round2(output * input.qty);
       const price = city.market[input.good]?.price ?? 0;
@@ -626,10 +717,8 @@ export function runProduction(
       if (qty > available + 1e-6) {
         throw new Error(`企业 ${company.id} 原料不足，生产事务失败`);
       }
-      company.inventory[input.good] = round2(available - qty);
-      if (company.inventory[input.good] < 0 && company.inventory[input.good] > -1e-6) {
-        company.inventory[input.good] = 0;
-      }
+      consumedCost = round2(consumedCost + issueInventory(company, input.good, qty));
+      if ((company.inventory[input.good] ?? 0) < 0) company.inventory[input.good] = 0;
       const value = round2(qty * price);
       inputValue = round2(inputValue + value);
       consumed.push({ good: input.good, qty, value });
@@ -637,9 +726,7 @@ export function runProduction(
 
     const outputPrice = city.market[company.recipeOutput]?.price ?? 0;
     const outputValue = round2(output * outputPrice);
-    company.inventory[company.recipeOutput] = round2(
-      (company.inventory[company.recipeOutput] ?? 0) + output,
-    );
+    receiveInventory(company, company.recipeOutput, output, consumedCost);
     company.lastMonth.produced = round2(company.lastMonth.produced + output);
     recordProducedSupply(cityLedgers, company.recipeOutput, output);
 

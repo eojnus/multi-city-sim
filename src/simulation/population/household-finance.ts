@@ -13,7 +13,7 @@
  *   不自动耗尽积蓄。有效需求分四层：desired（想买）→ effective（可支付）→ sold（真实成交）→ unmet（缺货），
  *   由 consumer.ts 的逐群体市场撮合与 recordGroupConsumption 记账落实。
  * - 消费贷款：额度 = max(0, 群体财产基准 × creditLimitRate − 未偿消费贷本金)，
- *   财产基准 = 手头现金 + 银行存款 + 按人口折算的居民投资实体权益（与 householdPerCapitaWealth 同口径）。
+ *   财产基准 = 手头现金 + 银行存款 + 按有效投资份额折算的居民投资实体权益（与 householdPerCapitaWealth 同口径）。
  *   贷款是真实债务，资金从银行支付，**不计入居民收入**；禁止无限信用。
  * - 新授信冻结条件（#35）：存在未结清违约合同，或连续欠付月数 ≥ denyWhenArrearsMonthsAtLeast(2)。
  *   逾期宽限沿用 banking.graceMonths，不新开 grace 配置键。
@@ -35,7 +35,8 @@ import { GOODS } from '../../data/demo-data';
 import { round2 } from '../core/math';
 import { depositAccountFor, withdraw } from '../banking/banking';
 import { cityInvestorEquity, householdGroupsOfCity } from './household-groups';
-import { transferInvestorLedgerForMigration } from '../investors/investors';
+import { transferInvestorAssetsForMigration } from '../investors/investors';
+import { investorEquityOfGroup } from './household-investment';
 
 /**
  * v0.9 T1：存款提取上限（相对“月初存款”）——单月最多提取 5%。
@@ -133,16 +134,21 @@ export function withdrawHouseholdDeposit(
   return take;
 }
 
-/** 居民投资实体权益按人口折算到该群体（与 householdPerCapitaWealth 同口径，不重复计价）。 */
+/**
+ * 居民投资实体权益按有效份额折算到该群体（v1.3 §2 统一口径）。
+ *
+ * 此前按人口比例折算，与股息返还/账本归属（按有效份额）不一致：某群体全部失业后
+ * 人数为 0 却仍持有份额，财富与授信却按人口把权益分给了别人。现在与
+ * householdPerCapitaWealth、股息返还共用 effectiveInvestorShares 权重。
+ */
 function groupInvestorEquityShare(
   world: WorldState,
   group: HouseholdGroup,
   cityGroups: HouseholdGroup[],
 ): number {
-  const totalPeople = cityGroups.reduce((total, entry) => total + entry.people, 0);
-  if (totalPeople <= 0) return 0;
+  if (cityGroups.length === 0) return 0;
   const equity = cityInvestorEquity(world, group.cityId);
-  return round2((equity / totalPeople) * group.people);
+  return investorEquityOfGroup(cityGroups, group, equity);
 }
 
 /** 群体财产基准（现金 + 存款 + 权益）：额度与授信冻结都以此为准。 */
@@ -901,9 +907,9 @@ export function transferHouseholdDebtsForMigration(
   tick: number = world.time.tick,
 ): { principalMoved: number; loansMoved: number } {
   void config;
-  // v1.2 §1：居民投资份额随迁移守恒——与消费贷同一“城 + 职业”粒度、同一人数口径，
-  // 按迁出人数占源群体比例拆分份额给目的地同职业群体；不产生现金、不改实体现金与持股。
-  transferInvestorLedgerForMigration(world, fromCityId, toCityId, people, laborForceMoved);
+  // v1.3 §2：居民投资权益随迁移转移，且必须是真实资产流转（A 城实体现金/持股按占比
+  // 划转到 B 城实体，账本份额随人转移）；不再把 A 城基金份额直接当成 B 城份额。
+  transferInvestorAssetsForMigration(world, fromCityId, toCityId, people, laborForceMoved);
   const result = { principalMoved: 0, loansMoved: 0 };
   const finance = world.householdFinance;
   if (!finance || people <= 0) return result;

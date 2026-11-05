@@ -104,6 +104,11 @@ function snapshot(world: WorldState) {
         inventory: Object.fromEntries(
           Object.entries(company.inventory).map(([goodId, qty]) => [goodId, qty]),
         ),
+        // v1.3 存货成本：旧档没有该字段，读取时按市场价补齐；往返后账面成本不得漂移。
+        inventoryCost: Object.fromEntries(
+          Object.entries(company.inventoryCost ?? {}).sort(([a], [b]) => a.localeCompare(b)),
+        ),
+        cogs: company.lastMonth?.cogs ?? null,
       }))
       .sort((a, b) => a.id.localeCompare(b.id)),
     groups: world.households.groups

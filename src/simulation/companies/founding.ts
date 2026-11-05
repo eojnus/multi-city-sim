@@ -198,12 +198,71 @@ export interface FoundingAttemptRecord {
   capital: number;
   loan: number;
   note: string;
+  // ---- v1.3 §5：结构化机会快照（失败与成功都记录，供 UI/验收报告审计）----
+  /** 评估时“有支付能力但未满足”的有效需求缺口（market.unmetDemand 口径）。 */
+  demandGap: number;
+  /** 评估时同城该商品市场价。 */
+  price: number;
+  /** 评估给出的预计售价（=当前市场价；保留字段便于后续接入价格趋势）。 */
+  expectedPrice: number;
+  /** 单位成本 = 单位原料 + 单位工资 + 单位跨城运输成本。 */
+  unitCost: number;
+  /** 评估时创办人可用资金（不含贷款）。 */
+  availableFunding: number;
+  /** 评估时按授信规则可贷额度。 */
+  loanAvailable: number;
+  /** 所需设备台数（尝试档位；停止记录取首档/需求台数）。 */
+  equipmentNeed: number;
+  /** 所需启动资本（该档设备+首批原料+周转金+利息；停止记录取 startupCost）。 */
+  capitalNeed: number;
+  /** 预期规模：设备台数（无档位时为 null）。 */
+  expectedUnits: number | null;
+  /** 预期规模：员工数（无档位时为 null）。 */
+  expectedJobs: number | null;
 }
 
 declare module '../contracts/types' {
   interface CompanyLifecycleState {
     foundingAttempts?: FoundingAttemptRecord[];
+    /** v1.3：因保留窗口（maxRecords）被裁剪掉的早期 attempt 数量；报告必须显式标注截断。 */
+    foundingAttemptsTruncated?: number;
   }
+}
+
+/** 从评估结果提取 attempt 快照；tier 为空（停止记录）时用首档/需求估算。 */
+export function foundingAttemptSnapshot(
+  assessment: FoundingAssessment,
+  tier: FoundingScaleTier | null,
+): Pick<
+  FoundingAttemptRecord,
+  | 'demandGap'
+  | 'price'
+  | 'expectedPrice'
+  | 'unitCost'
+  | 'availableFunding'
+  | 'loanAvailable'
+  | 'equipmentNeed'
+  | 'capitalNeed'
+  | 'expectedUnits'
+  | 'expectedJobs'
+> {
+  const reference = tier ?? assessment.feasibleTier ?? assessment.scaleTiers[0] ?? null;
+  return {
+    demandGap: round2(assessment.metrics.payableUnmetDemand),
+    price: round2(assessment.metrics.expectedPrice),
+    expectedPrice: round2(assessment.metrics.expectedPrice),
+    unitCost: round2(
+      assessment.metrics.expectedInputCost +
+        assessment.metrics.expectedWageCost +
+        assessment.metrics.expectedTransportCost,
+    ),
+    availableFunding: round2(assessment.metrics.founderEquity),
+    loanAvailable: round2(assessment.metrics.loanAvailable),
+    equipmentNeed: reference?.units ?? 0,
+    capitalNeed: round2(reference?.totalCapital ?? assessment.metrics.startupCost),
+    expectedUnits: reference?.units ?? null,
+    expectedJobs: reference?.jobs ?? null,
+  };
 }
 
 // ---------------------------------------------------------------- 基础工具
@@ -390,6 +449,47 @@ function investorGroupFounderCapacity(world: WorldState, config: DemoConfig, cit
   return round2(count * smallest);
 }
 
+/**
+ * v1.3 §5：在营企业作为创业主体时必须保留的运营缓冲：
+ * 2 个月工资 + 1 个月计划原料采购额 + 已知贷款本息（按月供口径），
+ * 只能动用缓冲之外的余钱，避免抽干原企业运转现金形成 A→B→C 连锁。
+ */
+function companyOperatingReserve(
+  world: WorldState,
+  city: City,
+  company: Company,
+  config: DemoConfig,
+): number {
+  const wageReserve = monthlyWageBill(company, config) * FOUNDING_MIN_WAGE_RESERVE_MONTHS;
+  const plannedOutput =
+    company.productionPlan?.plannedOutput ?? company.capacity * Math.max(0, company.utilization);
+  const recipe = RECIPES[company.recipeOutput];
+  let materialReserve = 0;
+  for (const input of recipe?.inputs ?? []) {
+    const price =
+      city.market[input.good]?.price ??
+      GOODS.find((good) => good.id === input.good)?.basePrice ??
+      1;
+    materialReserve += input.qty * plannedOutput * price;
+  }
+  materialReserve *= FOUNDING_MIN_MATERIAL_RESERVE_MONTHS;
+  const debtService = world.banking.loans
+    .filter(
+      (loan) =>
+        loan.status === 'active' &&
+        loan.borrower.kind === 'company' &&
+        loan.borrower.id === company.id,
+    )
+    .reduce(
+      (sum, loan) =>
+        sum +
+        Math.min(loan.monthlyPrincipal, loan.outstanding) +
+        loan.outstanding * loan.rateMonthly,
+      0,
+    );
+  return round2(wageReserve + materialReserve + debtService);
+}
+
 function companyFounderCapacity(world: WorldState, config: DemoConfig, city: City): number {
   const candidates = world.companies
     .filter(
@@ -403,8 +503,16 @@ function companyFounderCapacity(world: WorldState, config: DemoConfig, city: Cit
             record.investors.some((investor) => investor.id === company.id),
         ) < config.lifecycle.maxCompaniesPerCompany,
     )
-    .sort((a, b) => b.cash - a.cash || a.id.localeCompare(b.id));
-  return candidates[0]?.cash ?? 0;
+    .map((company) => ({
+      company,
+      capacity: Math.max(
+        0,
+        round2(company.cash - companyOperatingReserve(world, city, company, config)),
+      ),
+    }))
+    .filter((entry) => entry.capacity > 0)
+    .sort((a, b) => b.capacity - a.capacity || a.company.id.localeCompare(b.company.id));
+  return candidates[0]?.capacity ?? 0;
 }
 
 function governmentFounderCapacity(world: WorldState, config: DemoConfig, city: City): number {
@@ -448,8 +556,9 @@ export function founderCapacityFor(
           record.investors.some((investor) => investor.id === company.id),
       );
       if (count >= config.lifecycle.maxCompaniesPerCompany) return 0;
-      // v1.2：企业出资人只能用「扣掉 2 个月工资缓冲后的余钱」，避免抽干在营企业运转资金。
-      const reserve = monthlyWageBill(company, config) * 2;
+      // v1.3 §5：企业出资人只能用「扣掉 2 个月工资 + 1 个月原料 + 已知本息后的余钱」，
+      // 既保留原企业运转资金，也避免同一 tick 内 A→B→C 连锁抽血（调用方还需做同 tick 去重）。
+      const reserve = companyOperatingReserve(world, city, company, config);
       return Math.max(0, round2(company.cash - reserve));
     }
     return companyFounderCapacity(world, config, city);
@@ -1086,7 +1195,10 @@ export function assessFounding(
   const payableUnmetDemand = payableShortageFromMarket(market, output);
   const unmetFunding = Math.max(0, market?.unmetFunding ?? 0);
   const supply = availableEquipment(world, config, city.id, equipmentKind);
-  // 实际可购买：同城设备企业库存 + 政府库存；其他城市库存不能直接用于本城创办。
+  // v1.3：评估口径 = 同城设备企业库存 + 政府开局库存。
+  // 新设企业不在跨城运输网络中预留运力（首月即需设备、尚无运输合同），因此真实采购
+  // 也显式关闭 allowIntercity（见 lifecycle.foundCompany），两边保持一致；存续企业扩产
+  // 仍可走跨城设备采购（expandCompanyCapacity 默认允许）。
   const purchasable = Math.max(0, supply.local + supply.government);
   const recentSales = recentSales3m(world, city.id, output);
   const productInventory = Math.max(0, market?.closingStock ?? 0);
@@ -1251,6 +1363,17 @@ export function recordFoundingAttempt(
     id: `attempt-${attempt.tick}-${attempts.length + 1}`,
   };
   attempts.push(record);
-  if (attempts.length > maxRecords) attempts.splice(0, attempts.length - maxRecords);
+  if (attempts.length > maxRecords) {
+    const removed = attempts.length - maxRecords;
+    attempts.splice(0, removed);
+    // v1.3：显式累计截断数量，验收报告不得把窗口内记录当成全期累计。
+    const lifecycle = world.lifecycle as { foundingAttemptsTruncated?: number };
+    lifecycle.foundingAttemptsTruncated = (lifecycle.foundingAttemptsTruncated ?? 0) + removed;
+  }
   return record;
+}
+
+/** v1.3：被保留窗口裁剪掉的 attempt 数量（报告用；0 表示窗口完整）。 */
+export function foundingAttemptsTruncated(world: WorldState): number {
+  return (world.lifecycle as { foundingAttemptsTruncated?: number }).foundingAttemptsTruncated ?? 0;
 }

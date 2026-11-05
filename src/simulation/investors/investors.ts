@@ -32,6 +32,11 @@ import { companyBookValue, companySharePrice, monthlyWageBill } from '../compani
 import { cityMarketPrices } from '../markets/markets';
 import { householdBasicNeedCost } from '../population/household-finance';
 import { cityInvestorEquity, householdGroupsOfCity } from '../population/household-groups';
+import {
+  allocateMoneyExact,
+  effectiveInvestorShares,
+  ensureInvestorLedger,
+} from '../population/household-investment';
 import { PRODUCTIVITY } from '../../data/demo-data';
 import {
   acceptFinancingOffer,
@@ -42,6 +47,7 @@ import {
   holderTotalShares,
   holderVotingShares,
   placeOrder,
+  transferShares,
 } from '../securities/securities';
 import { latestStockPrice, stockHistoryFor } from '../securities/history';
 
@@ -100,21 +106,6 @@ function ensureInvestorUsageHistory(world: WorldState): InvestorUsageEntry[] {
   return world.households.investorUsageHistory;
 }
 
-/** 读取（必要时初始化）群体的投资份额账本；只记投入/份额/分红归属，不凭空造钱。 */
-function ensureInvestorLedger(group: HouseholdGroup): HouseholdInvestorLedger {
-  if (!group.investorLedger) {
-    group.investorLedger = {
-      contributed: 0,
-      shares: 0,
-      dividends: 0,
-      // 从未发生记为 -1（而不是 0）：tick 0 时也要能与“本月已记账”区分，避免幂等判断误挡。
-      lastContributionTick: -1,
-      lastDividendTick: -1,
-    };
-  }
-  return group.investorLedger;
-}
-
 /** 本城投资实体现金合计（用途快照与报告口径）。 */
 function investorCashOfCity(world: WorldState, cityId: string): number {
   return round2(
@@ -127,11 +118,11 @@ function investorCashOfCity(world: WorldState, cityId: string): number {
 /**
  * v1.2 §1：有效份额 = 历史投入份额 + 一次性“开局无主旧资产”起始份额。
  * 股息返还、股息归属、报告占比全部以有效份额为权威口径（未初始化账本按 0）。
+ *
+ * v1.3 §2：实现移到 population/household-investment（纯函数层），财富统计与居民授信
+ * 也必须复用同一口径；这里保留导出以兼容既有调用方。
  */
-export function effectiveInvestorShares(ledger: HouseholdInvestorLedger | undefined): number {
-  if (!ledger) return 0;
-  return round2(Math.max(0, ledger.shares) + Math.max(0, ledger.openingShares ?? 0));
-}
+export { effectiveInvestorShares };
 
 /**
  * v1.2 §1：把投资实体“开局已有净资产”一次性记为各群体的起始份额。
@@ -244,29 +235,66 @@ function attributeInvestorDividends(
 }
 
 /**
- * v1.2 §1：跨城迁移时居民投资份额守恒转移（只迁移“城 + 职业”群体上的账本，不产生现金）。
+ * v1.3 §2：跨城迁移时居民投资权益随人转移，且必须是**真实资产流转**。
  *
- * 按“迁出人数 / 源群体人数”把该群体的累计投入、记账份额与开局起始份额一并拆给目的地
- * 同职业群体（整群迁出则全部改挂），两城有效份额合计严格不变；本函数不读写任何现金、
- * 不改变投资实体现金与持股。自然人口变化不搬份额（份额挂在群体上，只改变人均权益），
- * 因此本函数只应由跨城迁移钩子调用。
+ * 旧实现只把账本份额从 A 城群体改挂到 B 城群体，等于把 A 城基金份额当成 B 城基金份额
+ * （B 城并没有承接对应资产）。现在按迁出居民在 A 城投资实体中的有效份额占比，
+ * 把同等比例的现金与持股从 A 城投资实体真实划转到 B 城投资实体，再把账本份额随人转移：
+ * - 现金：从 A 城各实体现金按占比扣出，合计精确分配给 B 城实体（分币最大余数法）；
+ * - 持股：按占比从 A 城实体持仓转移给 B 城实体（同一股份类别总股数不变，不是新发股份）；
+ * - 账本：源群体按迁出人数比例减少 shares/openingShares/contributed，目标群体把承接的
+ *   权益记入 openingShares（不是“新投入”，不重复计投入额），两城有效份额合计守恒；
+ * - 不产生任何新资金/新股份，源城实体资产减少额严格等于目标城实体增加额。
  */
-export function transferInvestorLedgerForMigration(
+export interface MigrationInvestorTransfer {
+  /** 随人转移的有效份额（shares + openingShares）。 */
+  effectiveSharesMoved: number;
+  /** 真实划转的现金（源城实体减少 = 目标城实体增加）。 */
+  cashMoved: number;
+  /** 真实划转的持股数量（同一类别总股数不变）。 */
+  holdingsMoved: number;
+}
+
+export function transferInvestorAssetsForMigration(
   world: WorldState,
   fromCityId: string,
   toCityId: string,
   people: number,
   laborForceMoved: number = people,
-): { effectiveSharesMoved: number } {
-  const result = { effectiveSharesMoved: 0 };
+): MigrationInvestorTransfer {
+  const result: MigrationInvestorTransfer = {
+    effectiveSharesMoved: 0,
+    cashMoved: 0,
+    holdingsMoved: 0,
+  };
   if (people <= 0 || fromCityId === toCityId) return result;
+  const fromGroups = householdGroupsOfCity(world, fromCityId);
+  const toGroups = householdGroupsOfCity(world, toCityId);
+  const fromInvestors = groupsOfCity(world, fromCityId);
+  const toInvestors = groupsOfCity(world, toCityId);
+  // 没有承接方（旧档缺投资实体）时整体放弃：不能只改账本而不搬资产。
+  if (fromGroups.length === 0 || toGroups.length === 0) return result;
+  if (fromInvestors.length === 0 || toInvestors.length === 0) return result;
+
+  // 旧档/新世界可能尚未建立起始份额：先补齐，保证“份额占比”与投资实体净资产一致，
+  // 否则迁移会按虚低的份额占比搬走过多实体资产。
+  ensureInvestorOpeningShares(world);
+  const totalCityShares = round2(
+    fromGroups.reduce((sum, group) => sum + effectiveInvestorShares(group.investorLedger), 0),
+  );
+  if (totalCityShares <= 0) return result;
+
   const laborMoving = Math.max(0, Math.min(people, Math.round(laborForceMoved)));
   const legs: { occupation: HouseholdGroup['occupation']; moving: number }[] = [
     { occupation: 'unemployed', moving: laborMoving },
     { occupation: 'nonLabor', moving: people - laborMoving },
   ];
-  const fromGroups = householdGroupsOfCity(world, fromCityId);
-  const toGroups = householdGroupsOfCity(world, toCityId);
+  const legMoves: {
+    source: HouseholdGroup;
+    destination: HouseholdGroup;
+    effective: number;
+    moved: number;
+  }[] = [];
   for (const leg of legs) {
     if (leg.moving <= 0) continue;
     const source = fromGroups.find((group) => group.occupation === leg.occupation);
@@ -274,22 +302,80 @@ export function transferInvestorLedgerForMigration(
     if (!source || !destination || source.people <= 0) continue;
     const moving = Math.min(leg.moving, source.people);
     if (moving <= 0) continue;
+    const effective = effectiveInvestorShares(source.investorLedger);
+    if (effective <= 0) continue;
     const whole = moving >= source.people;
-    const share = whole ? 1 : moving / source.people;
-    const from = ensureInvestorLedger(source);
-    const to = ensureInvestorLedger(destination);
-    const split = (value: number): number =>
-      round2(whole ? Math.max(0, value) : Math.max(0, value) * share);
-    const contributed = split(from.contributed);
-    const shares = split(from.shares);
-    const opening = split(from.openingShares ?? 0);
-    from.contributed = round2(from.contributed - contributed);
-    from.shares = round2(from.shares - shares);
-    from.openingShares = round2((from.openingShares ?? 0) - opening);
-    to.contributed = round2(to.contributed + contributed);
-    to.shares = round2(to.shares + shares);
-    to.openingShares = round2((to.openingShares ?? 0) + opening);
-    result.effectiveSharesMoved = round2(result.effectiveSharesMoved + shares + opening);
+    const moved = whole ? effective : round2(effective * (moving / source.people));
+    if (moved <= 0) continue;
+    legMoves.push({ source, destination, effective, moved });
+  }
+  const totalMoved = round2(legMoves.reduce((sum, move) => sum + move.moved, 0));
+  if (totalMoved <= 0) return result;
+  const fraction = Math.min(1, totalMoved / totalCityShares);
+
+  // 1) 现金：按占比从 A 城实体扣出，全额分配给 B 城实体（不产生/销毁资金）。
+  const cashMoves: { investor: InvestorGroup; amount: number }[] = [];
+  for (const investor of fromInvestors) {
+    const amount = round2(Math.max(0, investor.cash) * fraction);
+    if (amount > 0) cashMoves.push({ investor, amount });
+  }
+  const cashTotal = round2(cashMoves.reduce((sum, move) => sum + move.amount, 0));
+  if (cashTotal > 0) {
+    const weights = toInvestors.map((investor) => Math.max(0, investor.populationShare));
+    const credits = allocateMoneyExact(cashTotal, weights);
+    for (const move of cashMoves) {
+      move.investor.cash = round2(move.investor.cash - move.amount);
+    }
+    toInvestors.forEach((investor, index) => {
+      investor.cash = round2(investor.cash + (credits[index] ?? 0));
+    });
+    result.cashMoved = cashTotal;
+  }
+
+  // 2) 持股：按占比从 A 城实体持仓转给 B 城实体；类别总股数不变（不是新发）。
+  const fromIds = new Set(fromInvestors.map((investor) => investor.id));
+  const holdingWeights = toInvestors.map((investor) => Math.max(0, investor.populationShare));
+  const holdings = world.securities.holdings.filter(
+    (holding) => holding.holder.type === 'investorGroup' && fromIds.has(holding.holder.id),
+  );
+  for (const holding of holdings) {
+    const moved = round2(holding.shares * fraction);
+    if (moved <= 0) continue;
+    const splits = allocateMoneyExact(moved, holdingWeights);
+    toInvestors.forEach((investor, index) => {
+      const quantity = splits[index] ?? 0;
+      if (quantity <= 0) return;
+      const to: HolderRef = { type: 'investorGroup', id: investor.id };
+      if (
+        transferShares(
+          world,
+          holding.companyId,
+          holding.shareClassId,
+          holding.holder,
+          to,
+          quantity,
+          world.time.tick,
+        )
+      ) {
+        result.holdingsMoved = round2(result.holdingsMoved + quantity);
+      }
+    });
+  }
+
+  // 3) 账本随人转移：源群体按迁出比例减少，目标群体把承接权益记为 openingShares。
+  for (const move of legMoves) {
+    const from = ensureInvestorLedger(move.source);
+    const to = ensureInvestorLedger(move.destination);
+    const sharesOut = Math.min(Math.max(0, from.shares), move.moved);
+    const openingOut = round2(Math.max(0, move.moved - sharesOut));
+    const contributedOut =
+      move.effective > 0 ? round2(from.contributed * (move.moved / move.effective)) : 0;
+    from.shares = round2(Math.max(0, from.shares - sharesOut));
+    from.openingShares = round2(Math.max(0, (from.openingShares ?? 0) - openingOut));
+    from.contributed = round2(Math.max(0, from.contributed - contributedOut));
+    to.openingShares = round2((to.openingShares ?? 0) + move.moved);
+    to.contributed = round2(to.contributed + contributedOut);
+    result.effectiveSharesMoved = round2(result.effectiveSharesMoved + move.moved);
   }
   return result;
 }
@@ -398,41 +484,6 @@ export function groupsOfCity(world: WorldState, cityId: string): InvestorGroup[]
     .sort((a, b) => a.id.localeCompare(b.id));
 }
 
-/** 按比例分配金额并保证合计严格相等（余数给最后一个）。 */
-/**
- * 以 0.01 为单位按权重分配，保证合计严格等于 total（份额/股息口径需要精确到分）。
- * 与 household-economy.allocateMoney 同算法；此处本地实现避免 investors ↔ household-economy
- * 的循环依赖。
- */
-function allocateMoneyExact(total: number, weights: number[]): number[] {
-  const target = round2(total);
-  if (weights.length === 0) return [];
-  const cents = Math.round(target * 100);
-  if (cents <= 0) return weights.map(() => 0);
-  const weightSum = weights.reduce((acc, value) => acc + Math.max(0, value), 0);
-  if (weightSum <= 0) {
-    const base = Math.floor(cents / weights.length);
-    const result = weights.map(() => base);
-    for (let i = 0; i < cents - base * weights.length; i += 1) {
-      result[i] = (result[i] ?? 0) + 1;
-    }
-    return result.map((value) => round2(value / 100));
-  }
-  const exact = weights.map((value) => (Math.max(0, value) / weightSum) * cents);
-  const floors = exact.map((value) => Math.floor(value));
-  let remaining = cents - floors.reduce((sum, value) => sum + value, 0);
-  const order = exact
-    .map((value, index) => ({ index, fraction: value - Math.floor(value) }))
-    .sort((a, b) => b.fraction - a.fraction || a.index - b.index);
-  const result = [...floors];
-  for (let i = 0; i < order.length && remaining > 0; i += 1) {
-    const entry = order[i];
-    if (!entry) continue;
-    result[entry.index] = (result[entry.index] ?? 0) + 1;
-    remaining -= 1;
-  }
-  return result.map((value) => round2(value / 100));
-}
 
 function allocateMoney(total: number, weights: number[]): number[] {
   const counts = allocateProportionally(100_000, weights);

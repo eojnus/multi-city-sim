@@ -38,6 +38,21 @@ function seedGap(world: WorldState, cityId = 'lanport', output: GoodId = 'food')
   market.unmetDemand = 28_000;
 }
 
+/**
+ * v1.3：给每城设备厂补足本地库存。
+ * 开局政府设备储备是世界级共享池、跨城设备也会被先评估的城市先买走，若只用开局库存，
+ * 富裕测试世界里字母序靠前的城市会吃光全部设备。该用例只验证“每城每月上限 100”本身，
+ * 因此显式给每城本地设备供给（每城设备厂各补 400 台），隔离共享储备/城市顺序/劳动力耗尽因素；
+ * 该用例只验证“每城每月上限”，资源不足时其他用例另有覆盖（公平性问题见 v1.3 报告）。
+ */
+function seedLocalEquipmentStock(world: WorldState): void {
+  for (const company of world.companies) {
+    if (company.recipeOutput === 'farmEquipment' || company.recipeOutput === 'industryEquipment' || company.recipeOutput === 'energyEquipment') {
+      company.inventory[company.recipeOutput] = (company.inventory[company.recipeOutput] ?? 0) + 400;
+    }
+  }
+}
+
 function makeRich(world: WorldState): void {
   for (const city of world.cities) {
     city.treasury = 200_000_000;
@@ -245,6 +260,7 @@ describe('v1.2 每城每月 100 家与 160 上限', () => {
   it('每城每月最多 100 家，同月重复调用不再超发', () => {
     const world = newWorld();
     makeRich(world);
+    seedLocalEquipmentStock(world);
     for (const city of world.cities) {
       seedGap(world, city.id, 'food');
       seedGap(world, city.id, 'clothing');
@@ -260,7 +276,15 @@ describe('v1.2 每城每月 100 家与 160 上限', () => {
       expect(count).toBeLessThanOrEqual(100);
     }
     const second = maybeFoundCompanies(world, DEMO_CONFIG, []);
-    expect(second).toHaveLength(0);
+    // v1.3：100 是“每城每月上限”，重复调用可以继续创办，但合计不得超发；
+    // 剩余机会/设备/劳动力不足时第二次调用自然为 0。
+    for (const city of world.cities) {
+      const count = world.lifecycle.foundingMonth?.counts[city.id] ?? 0;
+      expect(count).toBeLessThanOrEqual(100);
+      expect(count).toBeGreaterThanOrEqual(1);
+    }
+    expect(second.length).toBeLessThanOrEqual(300);
+    expect(world.companies.length).toBeLessThanOrEqual(65 + 300);
   });
 
   it('资金/资产/股份守恒，checkInvariants 通过', () => {

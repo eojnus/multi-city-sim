@@ -36,7 +36,7 @@ import {
   ensureInvestorOpeningShares,
   groupsOfCity,
   householdBasicNeedReserve,
-  transferInvestorLedgerForMigration,
+  transferInvestorAssetsForMigration,
 } from '../src/simulation/investors/investors';
 
 const CITY_ID = 'lanport';
@@ -384,8 +384,10 @@ describe('居民投资份额与股息归属（v1.2 §1）', () => {
     }
   });
 
-  it('跨城迁移：份额按人数比例拆分给目的地同职业群体，总额守恒且不产生现金', () => {
+  it('跨城迁移：投资权益随人转移且为真实资产流转（A 城实体资产划转到 B 城）', () => {
     const world = createWorld();
+    // 先建立开局起始份额，使账本口径与投资实体净资产一致，再覆盖本用例的账本。
+    ensureInvestorOpeningShares(world);
     const cities = [...world.cities].sort((a, b) => a.id.localeCompare(b.id));
     const from = cities[0];
     const to = cities[1];
@@ -395,9 +397,10 @@ describe('居民投资份额与股息归属（v1.2 §1）', () => {
       (group) => group.occupation === 'unemployed',
     );
     if (!source || !destination) throw new Error('缺少失业群体');
-    source.people = 1_000;
-    source.cash = 0;
-    destination.cash = 0;
+    // 不改人数（保持“群体人数合计 = 城市总人口”不变量），按实际人数的 1/4 迁移。
+    const sourcePeople = source.people;
+    const moving = Math.max(1, Math.round(sourcePeople / 4));
+    const expectedMoved = round2(600 * (moving / sourcePeople));
     source.investorLedger = {
       contributed: 400,
       shares: 400,
@@ -414,33 +417,58 @@ describe('居民投资份额与股息归属（v1.2 §1）', () => {
       lastContributionTick: -1,
       lastDividendTick: -1,
     };
-    const totalBefore = round2(
-      [...householdGroups(world, from.id), ...householdGroups(world, to.id)].reduce(
-        (sum, group) => sum + effectiveInvestorShares(group.investorLedger),
-        0,
-      ),
+    const sourceSharesBefore = effectiveInvestorShares(source.investorLedger);
+    const destSharesBefore = effectiveInvestorShares(destination.investorLedger);
+    const fromInvestorCash = round2(
+      groupsOfCity(world, from.id).reduce((sum, investor) => sum + investor.cash, 0),
     );
-    const fromCash = source.cash;
-    const toCash = destination.cash;
+    const toInvestorCash = round2(
+      groupsOfCity(world, to.id).reduce((sum, investor) => sum + investor.cash, 0),
+    );
+    const totalHoldingShares = round2(
+      world.securities.holdings.reduce((sum, holding) => sum + holding.shares, 0),
+    );
+    const sourceHouseholdCash = source.cash;
+    const destinationHouseholdCash = destination.cash;
 
-    transferInvestorLedgerForMigration(world, from.id, to.id, 250, 250);
-    // 250 / 1000 = 25%：投入 100、份额 100、起始份额 50。
-    expect(source.investorLedger.contributed).toBeCloseTo(300, 2);
-    expect(source.investorLedger.shares).toBeCloseTo(300, 2);
-    expect(source.investorLedger.openingShares).toBeCloseTo(150, 2);
-    expect(destination.investorLedger.contributed).toBeCloseTo(100, 2);
-    expect(destination.investorLedger.shares).toBeCloseTo(100, 2);
-    expect(destination.investorLedger.openingShares).toBeCloseTo(50, 2);
-    const totalAfter = round2(
-      [...householdGroups(world, from.id), ...householdGroups(world, to.id)].reduce(
-        (sum, group) => sum + effectiveInvestorShares(group.investorLedger),
-        0,
-      ),
+    const moved = transferInvestorAssetsForMigration(world, from.id, to.id, moving, moving);
+
+    // 迁出比例 = moving / 源群体人数：有效份额按比例迁移，账本合计守恒。
+    expect(moved.effectiveSharesMoved).toBeCloseTo(expectedMoved, 2);
+    expect(effectiveInvestorShares(source.investorLedger)).toBeCloseTo(
+      sourceSharesBefore - expectedMoved,
+      2,
     );
-    expect(totalAfter).toBeCloseTo(totalBefore, 2);
-    // 只迁移账本，不动现金。
-    expect(source.cash).toBeCloseTo(fromCash, 2);
-    expect(destination.cash).toBeCloseTo(toCash, 2);
+    expect(effectiveInvestorShares(destination.investorLedger)).toBeCloseTo(
+      destSharesBefore + expectedMoved,
+      2,
+    );
+    // 累计投入按同一比例随人转移（不是新投入）。
+    const expectedContributed = round2(400 * (moving / sourcePeople));
+    expect(source.investorLedger.contributed).toBeCloseTo(400 - expectedContributed, 2);
+    expect(destination.investorLedger.contributed).toBeCloseTo(expectedContributed, 2);
+
+    // 真实资产流转：两城投资实体现金合计不变，且 B 城实体确实收到现金；持股总股数不变。
+    const fromInvestorCashAfter = round2(
+      groupsOfCity(world, from.id).reduce((sum, investor) => sum + investor.cash, 0),
+    );
+    const toInvestorCashAfter = round2(
+      groupsOfCity(world, to.id).reduce((sum, investor) => sum + investor.cash, 0),
+    );
+    expect(round2(fromInvestorCashAfter + toInvestorCashAfter)).toBeCloseTo(
+      round2(fromInvestorCash + toInvestorCash),
+      2,
+    );
+    expect(toInvestorCashAfter).toBeGreaterThan(toInvestorCash);
+    expect(moved.cashMoved).toBeGreaterThan(0);
+    expect(
+      round2(world.securities.holdings.reduce((sum, holding) => sum + holding.shares, 0)),
+    ).toBeCloseTo(totalHoldingShares, 2);
+
+    // 居民手头现金不因迁移账本/资产划转而变化（现金与存款由迁移资产转移单独处理）。
+    expect(source.cash).toBeCloseTo(sourceHouseholdCash, 2);
+    expect(destination.cash).toBeCloseTo(destinationHouseholdCash, 2);
+    expect(checkInvariants(world)).toEqual([]);
   });
 
   it('旧档读取：补齐起始份额且幂等，不改现金、不重复归属', () => {

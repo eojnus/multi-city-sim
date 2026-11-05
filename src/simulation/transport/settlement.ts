@@ -19,6 +19,7 @@ import { intercityTradeSupportPayment } from '../policies/policies';
 import { householdGroupsOfCity } from '../population/household-groups';
 import { accrueConsumptionTax, splitConsumptionTax } from '../government/taxes';
 import { allocateMoney } from '../population/household-economy';
+import { adjustInventoryCost } from '../finance/inventory-cost';
 
 /**
  * 城际容量结算（期末统一核算，避免订单先后造成差别）。
@@ -66,6 +67,8 @@ function refundIntercityBuyer(
   buyerCompany.lastMonth.inputCost = round2(
     Math.max(0, buyerCompany.lastMonth.inputCost - refund),
   );
+  // v1.3：退款是采购价的冲减，存货账面成本同步下调（货已售出/消耗时最多冲减到 0）。
+  adjustInventoryCost(buyerCompany, sale.good, -refund);
   return 0;
 }
 

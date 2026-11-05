@@ -210,6 +210,12 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
       );
     }
     inventory[seed.recipeOutput] = round2(target * config.company.initialOutputMonths);
+    // v1.3：开局库存按开局市场价入账为存货资产（与现金不同，库存成本只在销售时结转 COGS）。
+    const inventoryCost = {} as Record<GoodId, number>;
+    for (const goodId of Object.keys(inventory) as GoodId[]) {
+      const qty = inventory[goodId] ?? 0;
+      inventoryCost[goodId] = round2(qty * (city.market[goodId]?.price ?? 0));
+    }
 
     const company: Company = {
       id: seed.id,
@@ -230,6 +236,7 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
       wageRate: seed.wageRate,
       priceFactor: seed.priceFactor,
       inventory,
+      inventoryCost,
       equipment,
       equipmentCapacity: capacity,
       equipmentCapacityRemainder: 0,
@@ -240,6 +247,7 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
       lastMonth: {
         revenue: 0,
         inputCost: 0,
+        cogs: 0,
         wagesPaid: 0,
         wageArrears: 0,
         interestPaid: 0,
@@ -260,6 +268,7 @@ export function createInitialWorld(config: DemoConfig = DEMO_CONFIG): WorldState
       previousMonth: {
         revenue: 0,
         inputCost: 0,
+        cogs: 0,
         wagesPaid: 0,
         wageArrears: 0,
         interestPaid: 0,

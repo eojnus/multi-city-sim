@@ -2,6 +2,7 @@ import type {
   BondHolder,
   Company,
   FiscalVisibility,
+  GoodId,
   HolderRef,
   SaveFile,
   WorldState,
@@ -17,6 +18,7 @@ import {
   equipmentKindForSector,
 } from '../equipment/equipment';
 import { checkInvariants } from './invariants';
+import { emptyInventoryCost, ensureInventoryCost } from '../finance/inventory-cost';
 import { DEMO_CONFIG } from '../../data/config';
 import { allocateProportionally, round2 } from './math';
 import {
@@ -89,6 +91,8 @@ const STATS_KEYS = [
   'capacityChange',
   'dividendIncome',
 ] as const;
+/** v1.3 §3：可选统计字段（旧档缺失；出现时必须为有限数值）。 */
+const OPTIONAL_STATS_KEYS = ['cogs', 'inventoryWriteOff', 'operatingCashFlow'] as const;
 
 export function createSaveFile(world: WorldState, savedAt = new Date().toISOString()): SaveFile {
   return {
@@ -208,12 +212,20 @@ export function parseSave(text: string): ParseResult {
       worldValue = compatibility.world;
     }
 
+    // v1.3 §3：库存成本结转字段（inventoryCost / stats.cogs）在旧档中缺失。
+    // 读取时按当前市场价补齐存货账面成本、把缺失的 cogs 回退为旧现金制口径 inputCost，
+    // 保证旧档利润/税收/分红不因新口径跳变；该处理幂等，不升级 formatVersion。
+    const costCompatibility = normalizeInventoryCostWorld(worldValue);
+    if (!costCompatibility.ok || !costCompatibility.world) {
+      return { ok: false, error: costCompatibility.error ?? '库存成本字段兼容处理失败' };
+    }
+    worldValue = costCompatibility.world;
+
     const structureError = validateWorldStructure(worldValue);
     if (structureError) return { ok: false, error: structureError };
 
     const world = worldValue as WorldState;
-    syncCompanyTotalSharesSafe(world);
-    // v1.2 §1：旧档/旧版世界首次读取时按开局人口补齐“无主旧资产”起始份额（幂等：
+    syncCompanyTotalSharesSafe(world);    // v1.2 §1：旧档/旧版世界首次读取时按开局人口补齐“无主旧资产”起始份额（幂等：
     // 已写入 openingShares 的存档不会重算，避免读档后重复归属或凭空增现金）。
     ensureInvestorOpeningShares(world);
     const problems = checkInvariants(world);
@@ -1162,16 +1174,37 @@ function validateCompany(value: unknown, index: number): string | null {
   for (const goodId of GOOD_IDS) {
     if (!isFiniteNumber(inventory[goodId])) return `企业 ${id}.inventory.${goodId} 必须是有限数值`;
   }
+  // v1.3 §3：库存账面成本可选（旧档读取时补齐）；出现时必须是有限非负数，
+  // 且不得出现未知商品键。
+  if (value.inventoryCost !== undefined) {
+    if (!isRecord(value.inventoryCost)) return `企业 ${id}.inventoryCost 必须是对象`;
+    for (const [goodId, cost] of Object.entries(value.inventoryCost)) {
+      if (!(GOOD_IDS as readonly string[]).includes(goodId)) {
+        return `企业 ${id}.inventoryCost.${goodId} 商品无效`;
+      }
+      if (!isFiniteNumber(cost) || (cost as number) < 0) {
+        return `企业 ${id}.inventoryCost.${goodId} 必须是非负数值`;
+      }
+    }
+  }
 
   const lastMonth = value.lastMonth;
   if (!isRecord(lastMonth)) return `企业 ${id} 缺少 lastMonth`;
   for (const key of STATS_KEYS) {
     if (!isFiniteNumber(lastMonth[key])) return `企业 ${id}.lastMonth.${key} 必须是有限数值`;
   }
+  for (const key of OPTIONAL_STATS_KEYS) {
+    if (lastMonth[key] === undefined) continue;
+    if (!isFiniteNumber(lastMonth[key])) return `企业 ${id}.lastMonth.${key} 必须是有限数值`;
+  }
 
   const previousMonth = value.previousMonth;
   if (!isRecord(previousMonth)) return `企业 ${id} 缺少 previousMonth`;
   for (const key of STATS_KEYS) {
+    if (!isFiniteNumber(previousMonth[key])) return `企业 ${id}.previousMonth.${key} 必须是有限数值`;
+  }
+  for (const key of OPTIONAL_STATS_KEYS) {
+    if (previousMonth[key] === undefined) continue;
     if (!isFiniteNumber(previousMonth[key])) return `企业 ${id}.previousMonth.${key} 必须是有限数值`;
   }
 
@@ -2889,6 +2922,63 @@ export function normalizeLegacyV09World(raw: unknown): MigrationResult {
       message:
         `读取 v0.9 旧档：补齐 ${fixedCompanies} 家企业的设备产能余量（合计 ${round2(totalRemainder)}，` +
         `调整设备 ${adjustedUnits} 台以消除旧档取整伪影）；总产能、现金、债务与进度均未改变。`,
+      visibility: { scope: 'public', cityId: null },
+    });
+  }
+  return { ok: true, world };
+}
+
+/**
+ * v1.3 §3：库存成本结转字段的旧档兼容（幂等，不升级 formatVersion）。
+ *
+ * - 缺失 `inventoryCost` 的企业：按当前城市市场价把现有库存全额入账（历史库存没有采购成本记录，
+ *   这是允许的近似，日志标注），之后按移动加权平均正常结转；
+ * - `lastMonth` / `previousMonth` 缺失 `cogs`：回退为 `inputCost`（旧现金制口径），保证旧档在华
+ *   结算时利润、税收、分红与旧版本一致；
+ * - 只补会计字段，不改现金、债务、库存数量、设备、股份、人口、时间与随机状态。
+ */
+export function normalizeInventoryCostWorld(raw: unknown): MigrationResult {
+  if (!isRecord(raw)) return { ok: false, error: '存档 world 不是对象' };
+  if (!Array.isArray(raw.companies)) return { ok: false, error: '存档缺少企业数据' };
+  if (!Array.isArray(raw.cities)) return { ok: false, error: '存档缺少城市数据' };
+  const world = deepClone(raw) as unknown as WorldState;
+  let fixedInventoryCost = 0;
+  let fixedCogs = 0;
+  const cityById = new Map(world.cities.map((city) => [city.id, city]));
+  for (const company of world.companies) {
+    if (!isRecord(company.inventory)) continue;
+    const city = cityById.get(company.cityId);
+    const hadCost = isRecord(company.inventoryCost);
+    const priceOf = (goodId: GoodId): number => city?.market?.[goodId]?.price ?? 0;
+    if (hadCost) {
+      // 已有账面的企业：只清理非法值/无货残差，保留真实历史成本。
+      ensureInventoryCost(company, priceOf);
+    } else {
+      // 旧档没有账面成本：按当前市场价把现有库存全额入账（近似，日志标注）。
+      const book = emptyInventoryCost();
+      for (const goodId of GOOD_IDS) {
+        const qty = round2(Math.max(0, company.inventory[goodId] ?? 0));
+        book[goodId] = round2(qty * priceOf(goodId));
+      }
+      company.inventoryCost = book;
+      fixedInventoryCost += 1;
+    }
+    for (const stats of [company.lastMonth, company.previousMonth]) {
+      if (!isRecord(stats)) continue;
+      if (!isFiniteNumber(stats.cogs)) {
+        stats.cogs = round2(isFiniteNumber(stats.inputCost) ? stats.inputCost : 0);
+        fixedCogs += 1;
+      }
+    }
+  }
+  if (fixedInventoryCost > 0 || fixedCogs > 0) {
+    if (!Array.isArray(world.log)) world.log = [];
+    world.log.push({
+      tick: world.time.tick,
+      kind: 'system',
+      message:
+        `读取旧存档：为 ${fixedInventoryCost} 家企业按当前市场价补齐库存账面成本，` +
+        `${fixedCogs} 份月度统计的 COGS 回退为旧现金制口径；现金、债务、库存数量与进度均未改变。`,
       visibility: { scope: 'public', cityId: null },
     });
   }
