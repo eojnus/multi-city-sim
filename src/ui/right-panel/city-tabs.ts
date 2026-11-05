@@ -13,6 +13,7 @@ import {
   renderCityIdentity,
   renderCompanies,
   renderGovernmentSection,
+  renderInvestorSection,
   renderKpis,
   renderMarket,
   renderMayorDemo,
@@ -63,6 +64,7 @@ function renderCityPopulation(store: GameStore, city: City): string {
   return `
     ${renderPopulationSection(city)}
     ${renderPopulationStrataSection(store, city)}
+    ${renderInvestorSection(store, city)}
     ${renderTalentMarketSection(store, city)}`;
 }
 

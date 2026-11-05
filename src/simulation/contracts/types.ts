@@ -3,7 +3,7 @@
 // v0.2 新增证券/治理/居民投资/协议/通知数据；旧 v1 存档由 core/save.ts 迁移。
 
 export const SAVE_FORMAT_VERSION = 9;
-export const GAME_VERSION = '1.3.0';
+export const GAME_VERSION = '1.4.0';
 
 export type GoodId =
   | 'grain'
@@ -135,6 +135,17 @@ export interface CompanyMonthlyStats {
    * 不计入 COGS、不重复计成本；未填视为 0。
    */
   inventoryWriteOff?: number;
+  /**
+   * v1.4 §6.6：跨城运输容量退款中“超出该商品剩余账面成本”的部分。
+   *
+   * 退款的正常口径是冲减采购支出与存货账面成本（移动加权平均）；当货已售出/耗用、
+   * 该商品账面成本不足以吸收整笔退款时，超出部分是真实的采购退款收益，必须计入
+   * 当期利润（否则只留在现金流里，利润与现金流口径不一致）。利润公式因此为：
+   * `profit = revenue − cogs − wagesPaid − corporateTax − interestPaid + bonusPaid + refundGain`
+   * （bonusPaid 计入 wagesPaid 但不进利润，故计算利润时加回）。
+   * 可选：旧存档/旧测试夹具未填时视为 0。
+   */
+  refundGain?: number;
 }
 
 export interface Company {
@@ -194,6 +205,11 @@ export interface Company {
   productionPlan: CompanyProductionPlan | null;
   /** v0.9：最近若干月税后利润（用于季度奖金条件）。 */
   recentProfits: number[];
+  /**
+   * v1.4 §4：创办者从模拟范围外带入的初始实物设备记录（旧档/无实物出资时缺省）。
+   * 锁定期内不得出售/转让；企业提前退出时未到期部分返还出资方。
+   */
+  initialEquipment?: InitialEquipmentGrant;
 }
 
 /** v0.9：设备类别。农业设备服务农业/纤维，工业设备服务加工制造，能源设备服务能源生产。 */
@@ -204,6 +220,26 @@ export interface EquipmentAssets {
   farm: number;
   industry: number;
   energy: number;
+}
+
+/**
+ * v1.4 §4：新企业成立时由创办者从模拟范围外带入的实物设备（外部实物出资）。
+ *
+ * 这是“模拟范围外的创办者带来的设备”，不是游戏内设备厂生产、不进入设备企业库存、
+ * 不消耗政府开局库存、不产生财政补贴或设备市场成交。它只解除新企业的设备库存瓶颈，
+ * 让最小可行规模企业能够真实开工；后续扩产仍必须通过游戏内设备市场购买。
+ */
+export interface InitialEquipmentGrant {
+  kind: EquipmentKind;
+  /** 带入的实物设备台数（最小可行规模，默认 1 台）。 */
+  units: number;
+  /** 实物出资估值（按创办时该设备单价；仅用于记录/审计，不计入现金或商品库存）。 */
+  valuation: number;
+  /** 来源：模拟范围外创办者实物出资（当前唯一合法来源）。 */
+  source: 'founderInKind';
+  grantedTick: number;
+  /** 锁定期结束 tick：此前不得出售/转让；提前退出按实物返还出资方。 */
+  lockUntilTick: number;
 }
 
 /**
@@ -1013,6 +1049,8 @@ export interface ActivePolicy {
   effects: Record<string, number>;
   reason: string;
   note: string;
+  /** v1.4 §五：执行追踪（可选，旧存档/旧测试夹具缺省）。 */
+  tracking?: PolicyTracking;
 }
 
 export interface PolicyHistoryEntry extends ActivePolicy {
@@ -1025,6 +1063,128 @@ export interface PolicyState {
   lastRuns: { cityId: string; policyId: PolicyId; tick: number }[];
   /** 非玩家政府最近一次选政策的说明，供玩家理解。 */
   lastSelection: { tick: number; cityId: string; policyId: PolicyId | null; reason: string }[];
+  /**
+   * v1.4 §五：AI 政府每月经济体检快照（可选，旧存档缺省为空）。
+   *
+   * 只保存可重复计算的月度观测值，用于失业率 3 月均值/趋势、分级迟滞（避免边界抖动）
+   * 与“不足 3 个月开局”的处理；不保存任何未落地的承诺或虚构数据。
+   */
+  checkups?: EconomicCheckup[];
+}
+
+/** v1.4 §五：AI 政府经济体检的失业分级。 */
+export type UnemploymentTier = 'normal' | 'strained' | 'severe' | 'crisis';
+
+/**
+ * v1.4 §五：政策某次月度执行的可追溯记录。
+ *
+ * 记录原因、资金来源、周期、实际支出、受益人数、就业效果与财政影响；
+ * 救助类额外记录理论需求/实发/未支付（未支付部分不计入居民收入）。
+ */
+export interface PolicyExecutionRecord {
+  tick: number;
+  reason: string;
+  fundingSource: string;
+  periodMonths: number;
+  spent: number;
+  beneficiaries: number;
+  /** 对就业的净效果（新增岗位为正、退出为负；培训/补贴不虚构岗位）。 */
+  jobsEffect: number;
+  /** 对财政的净影响（支出为负；只记实际发生额）。 */
+  fiscalImpact: number;
+  /** 仅失业救助：理论需求。 */
+  theoreticalNeed?: number;
+  /** 仅失业救助：实际发放。 */
+  paid?: number;
+  /** 仅失业救助：未支付（不计入居民收入）。 */
+  unpaid?: number;
+  note?: string;
+}
+
+/**
+ * v1.4 §五：政策执行追踪。
+ *
+ * - 招聘补贴只按“真实净新增岗位”发放：hiringBaseline 记录启动时在岗人数（只增不减），
+ *   subsidisedJobs 记录已补贴人次，先裁后招不会重复领取；
+ * - 公共工程记录设立岗位、启动时在岗人数与工资来源，便于核对预留/实付/账本；
+ * - runs 保留最近若干次执行，效果差时 AI 可据此停止。
+ */
+export interface PolicyTracking {
+  runs: PolicyExecutionRecord[];
+  hiringBaseline?: Record<string, number>;
+  subsidisedJobs?: Record<string, number>;
+  publicWorksJobs?: number;
+  publicWorksBaselineEmployees?: number;
+  publicWorksWageRate?: number;
+  publicWorksFunding?: string;
+}
+
+/**
+ * v1.4 §五：AI 政府每月经济体检快照（可追溯、可重复计算）。
+ *
+ * 口径：失业率 = 失业 / 劳动力；3 月均值与趋势用于分级迟滞；
+ * 税收区分“真实税收”（taxes.historyByCity 最近 12 个月实际入账）与
+ * “估算税收”（不足 12 个月时按近 12 月 GDP 估算，明确标注估计月数）。
+ */
+export interface EconomicCheckup {
+  tick: number;
+  cityId: string;
+  unemploymentRate: number;
+  unemploymentRateAvg3: number;
+  unemploymentTrend: number;
+  rawTier: UnemploymentTier;
+  tier: UnemploymentTier;
+  employed: number;
+  unemployed: number;
+  laborForce: number;
+  householdIncome: number;
+  consumerSpend: number;
+  consumerBudget: number;
+  foodDemand: number;
+  foodUnmetDemand: number;
+  foodUnmetFunding: number;
+  foodInventory: number;
+  foodCapacity: number;
+  foodOutput: number;
+  foodPrice: number;
+  effectivePurchasingPower: number;
+  /** 有供给但居民买不起（收入/购买力不足）。 */
+  fundingGap: boolean;
+  /** 有购买力但缺货（产能/原料/运输/库存不足）。 */
+  supplyGap: boolean;
+  vacancies: number;
+  /** 有岗位、有失业，但招聘启动受阻。 */
+  hiringBlocked: boolean;
+  hires: number;
+  layoffs: number;
+  founded: number;
+  closed: number;
+  treasury: number;
+  monthlyTaxRevenueReal: number;
+  monthlyTaxRevenueEstimated: number;
+  taxMonthsReal: number;
+  taxMonthsEstimated: number;
+  necessarySpending: number;
+  totalDebt: number;
+  /**
+   * v1.4 §五（一）：近 12 个月 GDP 窗口合计与月数（债务/GDP 分母的来源，可追溯）。
+   * 可选字段：旧存档/旧测试夹具缺省视为未记录，不影响任何判定。
+   */
+  gdpWindowSum?: number;
+  gdpWindowMonths?: number;
+  debtRatio: number;
+  bondDue: number;
+  loanDue: number;
+  debtServicePressure: number;
+  /** 债务/GDP ≥ 预警线（85%，非破产线）。 */
+  debtWarning: boolean;
+  budget: number;
+  budgetShare: number;
+  budgetNote: string;
+  skillLevel: number;
+  skillMismatch: boolean;
+  symptoms: string[];
+  note: string;
 }
 
 // ---------------------------------------------------------------- 交通（政府主导）与容量结算
@@ -1167,6 +1327,8 @@ export interface FoundingRecord {
   investors: FoundingInvestor[];
   governmentGrant: number;
   note: string;
+  /** v1.4 §4：创办者从模拟范围外带入的初始实物设备（无实物出资时缺省）。 */
+  initialEquipment?: InitialEquipmentGrant;
 }
 
 export interface LiquidationHolding {
@@ -1193,6 +1355,8 @@ export interface LiquidationRecord {
   inventoryBookValue: number;
   agreementsAffected: string[];
   note: string;
+  /** v1.4 §4：锁定期内提前退出时，按实物返还给创办者的初始设备（不进入清算现金）。 */
+  initialEquipmentReturned?: { kind: EquipmentKind; units: number; valuation: number };
 }
 
 export interface CompanyLifecycleState {
@@ -1246,6 +1410,23 @@ export interface HouseholdMonthlyStats {
   unmetFunding?: number;
   /** v0.9：本月为补足基本消费而从本人银行存款提取的金额（先于消费贷）。 */
   depositWithdrawn?: number;
+  /**
+   * v1.4 §6.1 消费六项口径（件 / 金额，可选；旧存档缺省按 0 处理）。
+   * 基本需要量必须单列：不得用“有效需求满足率”代替“基本需要覆盖率”。
+   */
+  basicNeedUnits?: number;
+  basicSoldUnits?: number;
+  basicNeedCoverage?: number;
+  /** Σ 有效需求量（consumer goods，件）。 */
+  effectiveUnits?: number;
+  /** Σ 实际成交量（consumer goods，件）。 */
+  soldUnits?: number;
+  /** Σ 商品不足缺口（尝试过但未成交，件）。 */
+  supplyShortfallUnits?: number;
+  /** 本月由手头现金支付的消费额（成交额 − 存款提取 − 消费贷）。 */
+  cashPaid?: number;
+  /** v1.4 §6.1：有支付能力有效需求的金额口径（Σ effectiveQty × 本月价，与件数同源）。 */
+  effectiveCost?: number;
 }
 
 /**

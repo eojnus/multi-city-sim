@@ -42,12 +42,17 @@ import {
   disposeCompanyEquipment,
   emptyEquipmentAssets,
   equipmentCapacityPerUnit,
+  equipmentCatalog,
   equipmentKindForSector,
+  equipmentUnitPrice,
   executeNewEquipmentPlan,
   planNewEquipmentPurchase,
+  recomputeCompanyCapacity,
+  returnLockedInitialEquipment,
 } from '../../equipment/equipment';
 import {
   FOUNDING_MIN_SCORE,
+  INITIAL_EQUIPMENT_LOCK_MONTHS,
   assessFounding,
   assessFoundingOpportunities,
   founderCapacityFor,
@@ -735,25 +740,67 @@ function foundCompanyV1(
     loanAmount = loanResult.loan.principal;
   }
 
-  const purchase = buyNewEquipment(world, company, assessment.equipmentKind, chosen.tier.units, config, world.time.tick, {
-    allowGovernmentStock: true,
-    // v1.3 §5：评估与实际采购同口径——新设企业只使用同城/政府库存，不走跨城运输；
-    // 存续企业扩产仍可跨城采购（见 expandCompanyCapacity）。
-    allowIntercity: false,
-    reason: '创办设备采购',
-    log,
-  });
-  if (!purchase.ok || purchase.units !== chosen.tier.units) {
-    rollbackFoundingShell(world, company.id, loanId);
-    refundFoundingInvestors(world, city, investors);
-    return rejectFounding(
-      world,
-      request,
-      assessment,
-      chosen.tier,
-      [{ kind: 'equipment', detail: purchase.error ?? `启动设备未按计划购足（${purchase.units}/${chosen.tier.units} 台）` }],
-      chosen.founderType,
-    );
+  // v1.4 §4：创办者从模拟范围外带入最小可行规模的实物设备（默认 1 台），
+  // 只有超出部分才需要在游戏内设备市场真实购买。
+  // 实物设备不消耗设备企业库存/政府库存、不进入市场账本、不产生财政补贴，
+  // 因此这里不调用 buyNewEquipment，也不修改 equipmentMarket。
+  const marketUnits = Math.max(0, Math.floor(chosen.tier.marketUnits));
+  let purchase: ReturnType<typeof buyNewEquipment> | null = null;
+  let equipmentCost = 0;
+  if (marketUnits > 0) {
+    purchase = buyNewEquipment(world, company, assessment.equipmentKind, marketUnits, config, world.time.tick, {
+      allowGovernmentStock: true,
+      // v1.3 §5：评估与实际采购同口径——新设企业只使用同城/政府库存，不走跨城运输；
+      // 存续企业扩产仍可跨城采购（见 expandCompanyCapacity）。
+      allowIntercity: false,
+      reason: '创办设备采购',
+      log,
+    });
+    if (!purchase.ok || purchase.units !== marketUnits) {
+      rollbackFoundingShell(world, company.id, loanId);
+      refundFoundingInvestors(world, city, investors);
+      return rejectFounding(
+        world,
+        request,
+        assessment,
+        chosen.tier,
+        [{ kind: 'equipment', detail: purchase.error ?? `启动设备未按计划购足（${purchase.units}/${marketUnits} 台）` }],
+        chosen.founderType,
+      );
+    }
+    equipmentCost = purchase.cost;
+    // 政府开局库存是市场之外的一次性供给；设备购买会把成交计入市场账本，
+    // 这里同步补充 supply，避免 invariants 误报“成交超过供应”。
+    if (purchase.fromGovernment > 0) {
+      const equipmentGoodId = config.equipment.catalog[assessment.equipmentKind].goodId;
+      const ledger = city.market[equipmentGoodId];
+      if (ledger) ledger.supply = round2(ledger.supply + purchase.fromGovernment);
+    }
+  }
+  const inKindUnits = Math.max(0, Math.floor(chosen.tier.inKindUnits));
+  if (inKindUnits > 0) {
+    company.equipment[assessment.equipmentKind] =
+      Math.floor(company.equipment[assessment.equipmentKind] ?? 0) + inKindUnits;
+    recomputeCompanyCapacity(world, company, config);
+    const unitPrice = equipmentUnitPrice(world, city.id, assessment.equipmentKind, config);
+    const valuation = round2(inKindUnits * unitPrice);
+    const lockUntilTick = world.time.tick + INITIAL_EQUIPMENT_LOCK_MONTHS;
+    company.initialEquipment = {
+      kind: assessment.equipmentKind,
+      units: inKindUnits,
+      valuation,
+      source: 'founderInKind',
+      grantedTick: world.time.tick,
+      lockUntilTick,
+    };
+    const catalog = equipmentCatalog(assessment.equipmentKind, config);
+    log.push({
+      tick: world.time.tick,
+      kind: 'market',
+      message: `${city.name} 新企业「${company.name}」获得创办者从模拟范围外带入的 ${inKindUnits} 台${catalog.name}（实物出资，估值 ${valuation.toFixed(
+        0,
+      )}，锁定期 ${INITIAL_EQUIPMENT_LOCK_MONTHS} 个月至第 ${lockUntilTick} tick）；不计入游戏内设备生产/库存/销售与政府补贴。`,
+    });
   }
   if (company.equipmentCapacity <= 0) {
     rollbackFoundingShell(world, company.id, loanId);
@@ -766,14 +813,6 @@ function foundCompanyV1(
       [{ kind: 'equipment', detail: '启动设备未形成产能，无法创办企业' }],
       chosen.founderType,
     );
-  }
-  const equipmentCost = purchase.cost;
-  // 政府开局库存是市场之外的一次性供给；设备购买会把成交计入市场账本，
-  // 这里同步补充 supply，避免 invariants 误报“成交超过供应”。
-  if (purchase.fromGovernment > 0) {
-    const equipmentGoodId = config.equipment.catalog[assessment.equipmentKind].goodId;
-    const ledger = city.market[equipmentGoodId];
-    if (ledger) ledger.supply = round2(ledger.supply + purchase.fromGovernment);
   }
   // v1.1：买完启动设备后至少保留“2 个月基础工资 + 1 个月计划原料采购额”的周转金。
   if (company.cash + 0.01 < chosen.tier.workingCapital) {
@@ -895,7 +934,12 @@ function foundCompanyV1(
     investorCount: investors.length,
     investors,
     governmentGrant: grant,
-    note: `${founderLabel}。行业评分 ${assessment.score.toFixed(1)} 分（${assessment.reasons.slice(0, 3).join('；')}）；最小可行档 ${tier.units} 台设备、计划岗位 ${tier.jobs} 人，设备支出 ${equipmentCost.toFixed(0)}，首批原料 ${tier.firstBatchInputCost.toFixed(0)}，周转金 ${tier.workingCapital.toFixed(0)}；首月保守上岗 ${bootstrapJobs} 人（按设备维护性产出），后续随销量/现金平滑增长；创业贷款 ${loanAmount.toFixed(0)}（利息约 ${tier.interestCost.toFixed(0)}）。`,
+    initialEquipment: company.initialEquipment,
+    note: `${founderLabel}。行业评分 ${assessment.score.toFixed(1)} 分（${assessment.reasons.slice(0, 3).join('；')}）；最小可行档 ${tier.units} 台设备（其中 ${tier.inKindUnits} 台为创办者从模拟范围外带入的实物出资，估值约 ${round2(
+      (tier.equipmentValue * tier.inKindUnits) / Math.max(1, tier.units),
+    ).toFixed(0)}；${tier.marketUnits} 台在设备市场真实购买，支出 ${equipmentCost.toFixed(
+      0,
+    )}）、计划岗位 ${tier.jobs} 人，首批原料 ${tier.firstBatchInputCost.toFixed(0)}，周转金 ${tier.workingCapital.toFixed(0)}；首月保守上岗 ${bootstrapJobs} 人（按设备维护性产出），后续随销量/现金平滑增长；创业贷款 ${loanAmount.toFixed(0)}（利息约 ${tier.interestCost.toFixed(0)}）。`,
   };
   world.lifecycle.foundings.push(record);
   world.lifecycle.nextFoundingNumber += 1;
@@ -1341,6 +1385,21 @@ export function liquidateCompany(
     (company.lastMonth.inventoryWriteOff ?? 0) + inventoryBookValue,
   );
 
+  // v1.4 §4：创办者实物出资的初始设备在锁定期内按实物返还，不进入清算现金/股东分配；
+  // 锁定期满后已转为普通资产，由下面的真实买家处置。
+  const returnedInitial = returnLockedInitialEquipment(company, world.time.tick);
+  if (returnedInitial) {
+    recomputeCompanyCapacity(world, company, config);
+    log.push({
+      tick: world.time.tick,
+      kind: 'warning',
+      message: `${company.name} 清算：${returnedInitial.units} 台${
+        config.equipment.catalog[returnedInitial.kind].name
+      }仍在创办实物出资锁定期内，按实物返还出资方（估值 ${returnedInitial.valuation.toFixed(
+        0,
+      )}，不进入清算现金/股东分配）。`,
+    });
+  }
   // v0.9：设备资产按真实买家处置（无人购买则移交政府设备库存，不按账面变现）。
   const equipmentSale = disposeCompanyEquipment(world, company, config, world.time.tick, log);
   if (equipmentSale.proceeds > 0) {
@@ -1616,6 +1675,7 @@ export function liquidateCompany(
     inventoryWrittenOff,
     inventoryBookValue,
     agreementsAffected,
+    initialEquipmentReturned: returnedInitial ?? undefined,
     note:
       '清算顺序（暂定）：现金先偿还债务，剩余按股分配；库存按账面注销并留痕，未产生现金；未偿还债务记为减免。不是完整破产程序。' +
       (proposedMotions.length > 0

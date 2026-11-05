@@ -30,6 +30,8 @@ export interface ConsumerGroupResult {
   budget: number;
   spend: number;
   desiredCost: number;
+  /** v1.4 §6.1：可支付有效需求成本（按本月本城市场价，= Σ effective×price）。 */
+  effectiveCost?: number;
   /** v1.0：想买的量（desired，未按预算缩放；基本需求不因失业削减）。 */
   desired?: Record<GoodId, number>;
   /** v1.0：可支付的有效需求量（effective；基本需求=desired，非基本按日常预算与消费意愿缩放）。 */
@@ -277,6 +279,8 @@ interface GroupConsumptionState {
   desiredQty: Map<GoodId, number>;
   effectiveQty: Map<GoodId, number>;
   desiredCost: number;
+  /** v1.4 §6.1：可支付有效需求成本（= Σ effective×本月本城价格）。 */
+  effectiveCost: number;
   affordability: number;
   /** 已记入市场需求台账的“尝试购买量”，跨阶段补记 demand 时避免重复。 */
   recorded: Record<GoodId, number>;
@@ -356,6 +360,7 @@ function createCityConsumptionState(
         desiredQty: new Map<GoodId, number>(),
         effectiveQty: new Map<GoodId, number>(),
         desiredCost: 0,
+        effectiveCost: 0,
         affordability: 1,
         recorded: emptyGoodsRecord(),
         bought: emptyGoodsRecord(),
@@ -424,13 +429,18 @@ function computeGroupDemand(
         : clamp(nonBasicBudget / nonBasicDesiredCost, 0, 1);
   group.affordability =
     group.desiredCost <= 0 ? 1 : clamp(group.dailyBudget / group.desiredCost, 0, 1);
+  // v1.4 §6.1：可支付有效需求金额按本月本城价格折算，供报告区分“有效需求/成交/缺口”。
+  let effectiveCost = 0;
   for (const good of CONSUMER_GOODS) {
     const desired = group.desiredQty.get(good.id) ?? 0;
     const effective = isBasicNeedGood(good.id)
       ? Math.min(desired, group.basicNeedQty.get(good.id) ?? 0)
       : round2(desired * nonBasicAffordability);
     group.effectiveQty.set(good.id, round2(effective));
+    const price = state.city.market[good.id]?.price ?? good.basePrice;
+    effectiveCost += round2(effective) * price;
   }
+  group.effectiveCost = round2(effectiveCost);
 }
 
 /** 当前仍未被成交覆盖的资金有效需求，按 goodId 升序（复现性）。 */
@@ -724,6 +734,45 @@ function runIntercityConsumptionPhase(
     group.group.lastMonth.unmetFunding = round2(
       (group.group.lastMonth.unmetFunding ?? 0) + unmetFunding,
     );
+
+    // v1.4 §6.1 消费六项：把“基本需要量/有效需求/成交/商品不足缺口”的件数与现金支付
+    // 落到本月统计，供报告与审计直接读取（旧存档缺省按 0 处理）。
+    // 关键口径：基本需要覆盖率 = 基本需要商品成交量 / 基本需要量，不得用“有效需求满足率”替代；
+    // 商品不足缺口取本月最终仍未成交的供给缺口（Σunmet），与资金缺口互斥、不重复记账。
+    let basicNeedUnits = 0;
+    for (const qty of group.basicNeedQty.values()) basicNeedUnits += qty;
+    basicNeedUnits = round2(basicNeedUnits);
+    let basicSoldUnits = 0;
+    let soldUnits = 0;
+    let supplyShortfallUnits = 0;
+    let effectiveUnits = 0;
+    for (const good of CONSUMER_GOODS) {
+      const bought = round2(group.bought[good.id] ?? 0);
+      soldUnits += bought;
+      if (isBasicNeedGood(good.id)) basicSoldUnits += bought;
+      supplyShortfallUnits += round2(group.unmet[good.id] ?? 0);
+      effectiveUnits += round2(group.effectiveQty.get(good.id) ?? 0);
+    }
+    basicSoldUnits = round2(basicSoldUnits);
+    soldUnits = round2(soldUnits);
+    supplyShortfallUnits = round2(supplyShortfallUnits);
+    effectiveUnits = round2(effectiveUnits);
+    const cashPaid = round2(Math.min(finalCashPayments, group.cashAtStart));
+    const stats = group.group.lastMonth;
+    stats.basicNeedUnits = round2((stats.basicNeedUnits ?? 0) + basicNeedUnits);
+    stats.basicSoldUnits = round2((stats.basicSoldUnits ?? 0) + basicSoldUnits);
+    stats.effectiveUnits = round2((stats.effectiveUnits ?? 0) + effectiveUnits);
+    stats.soldUnits = round2((stats.soldUnits ?? 0) + soldUnits);
+    stats.supplyShortfallUnits = round2(
+      (stats.supplyShortfallUnits ?? 0) + supplyShortfallUnits,
+    );
+    stats.cashPaid = round2((stats.cashPaid ?? 0) + cashPaid);
+    stats.effectiveCost = round2((stats.effectiveCost ?? 0) + round2(group.effectiveCost));
+    stats.basicNeedCoverage =
+      (stats.basicNeedUnits ?? 0) > 0.01
+        ? Math.round(((stats.basicSoldUnits ?? 0) / (stats.basicNeedUnits ?? 1)) * 10000) / 10000
+        : 0;
+
     // v1.0：把四层口径中的 desired / effective 也写进结果，便于审计与测试区分
     // “想买多少”“能支付多少”“真实成交多少”“缺货多少”。
     const desiredRecord = emptyGoodsRecord();
@@ -736,6 +785,7 @@ function runIntercityConsumptionPhase(
       budget: round2(group.budget),
       spend: round2(paid),
       desiredCost: round2(group.desiredCost),
+      effectiveCost: round2(group.effectiveCost),
       desired: desiredRecord,
       effective: effectiveRecord,
       dailyBudget: round2(group.dailyBudget),
@@ -745,7 +795,7 @@ function runIntercityConsumptionPhase(
       loanAvailable: round2(group.snapshot.loanAvailable),
       loanFinanced: round2(group.loanFinanced),
       unmetFunding: round2(unmetFunding),
-      cashPaid: round2(Math.min(finalCashPayments, group.cashAtStart)),
+      cashPaid,
       depositWithdrawn: round2(group.withdrawn),
     };
   }
@@ -912,6 +962,7 @@ function assembleConsumerResult(state: CityConsumptionState): ConsumerResult {
   let totalBudget = 0;
   let totalSpend = 0;
   let totalDesiredCost = 0;
+  let totalEffectiveCost = 0;
   for (const group of state.groups) {
     const entry = group.entry;
     if (!entry) continue;
@@ -919,6 +970,7 @@ function assembleConsumerResult(state: CityConsumptionState): ConsumerResult {
     totalBudget += entry.budget;
     totalSpend += entry.spend;
     totalDesiredCost += entry.desiredCost;
+    totalEffectiveCost += entry.effectiveCost ?? 0;
     for (const good of GOODS) {
       totalBought[good.id] = round2((totalBought[good.id] ?? 0) + (entry.bought[good.id] ?? 0));
       totalUnmet[good.id] = round2((totalUnmet[good.id] ?? 0) + (entry.unmet[good.id] ?? 0));
@@ -928,10 +980,12 @@ function assembleConsumerResult(state: CityConsumptionState): ConsumerResult {
     budget: round2(totalBudget),
     spend: round2(totalSpend),
     desiredCost: round2(totalDesiredCost),
+    // v1.4 §6.1 口径修正：affordability 是“可支付有效需求 / 期望需求”，
+    // 不是“实际成交 / 期望需求”（后者把缺货与资金缺口混在一起，不能当作满足率）。
     affordability:
       totalDesiredCost <= 0
         ? 1
-        : round2(clamp(totalSpend / totalDesiredCost, 0, 1) * 1000) / 1000,
+        : round2(clamp(totalEffectiveCost / totalDesiredCost, 0, 1) * 1000) / 1000,
     bought: totalBought,
     unmet: totalUnmet,
     byGroup,

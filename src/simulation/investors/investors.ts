@@ -36,6 +36,9 @@ import {
   allocateMoneyExact,
   effectiveInvestorShares,
   ensureInvestorLedger,
+  investorBondValue,
+  investorNavPerShare,
+  sharesForInvestorValue,
 } from '../population/household-investment';
 import { PRODUCTIVITY } from '../../data/demo-data';
 import {
@@ -235,24 +238,30 @@ function attributeInvestorDividends(
 }
 
 /**
- * v1.3 §2：跨城迁移时居民投资权益随人转移，且必须是**真实资产流转**。
+ * v1.3 §2 / v1.4 §3：跨城迁移时居民投资权益随人转移，且必须是**真实资产流转**。
  *
- * 旧实现只把账本份额从 A 城群体改挂到 B 城群体，等于把 A 城基金份额当成 B 城基金份额
- * （B 城并没有承接对应资产）。现在按迁出居民在 A 城投资实体中的有效份额占比，
- * 把同等比例的现金与持股从 A 城投资实体真实划转到 B 城投资实体，再把账本份额随人转移：
- * - 现金：从 A 城各实体现金按占比扣出，合计精确分配给 B 城实体（分币最大余数法）；
- * - 持股：按占比从 A 城实体持仓转移给 B 城实体（同一股份类别总股数不变，不是新发股份）；
- * - 账本：源群体按迁出人数比例减少 shares/openingShares/contributed，目标群体把承接的
- *   权益记入 openingShares（不是“新投入”，不重复计投入额），两城有效份额合计守恒；
- * - 不产生任何新资金/新股份，源城实体资产减少额严格等于目标城实体增加额。
+ * v1.4 §3 修复“两城净值不同导致权益价值错配”：
+ * 迁移权益不再按“份额 1:1 改挂”，而是按**源城净值/份额**计价出真实价值，
+ * 再按**目标城净值/份额**换算为目标城份额：
+ * - 价值：迁出者带走的价值 = 迁出有效份额 × 源城净值/份额（源城净资产含现金、持股市值、
+ *   未到期国债本息）；源城净资产为 0 时价值为 0，不凭空划转资产、也不给目标城增发份额；
+ * - 资产：按“迁移价值/源城净资产”的比例，把现金与持股从源城实体真实划转到目标城实体
+ *   （股份总股数不变、两城现金守恒，合计划转价值严格等于迁移价值）；
+ * - 份额：目标城新增份额 = 迁移价值 / 目标城净值/份额（目标城零净资产时回退 1:1），
+ *   记入目标群体 openingShares（不是“新投入”，不重复计投入额）；
+ * - 结果：迁出者、迁出地其他居民、迁入地原居民每份价值均不因迁移而变，无无偿转移。
  */
 export interface MigrationInvestorTransfer {
-  /** 随人转移的有效份额（shares + openingShares）。 */
+  /** 源城随人转出的有效份额（shares + openingShares）。 */
   effectiveSharesMoved: number;
   /** 真实划转的现金（源城实体减少 = 目标城实体增加）。 */
   cashMoved: number;
   /** 真实划转的持股数量（同一类别总股数不变）。 */
   holdingsMoved: number;
+  /** 按源城净值/份额计价后随人转移的权益价值。 */
+  valueMoved: number;
+  /** 按目标城净值/份额换算后新增到目标群体的有效份额。 */
+  targetSharesAdded: number;
 }
 
 export function transferInvestorAssetsForMigration(
@@ -266,6 +275,8 @@ export function transferInvestorAssetsForMigration(
     effectiveSharesMoved: 0,
     cashMoved: 0,
     holdingsMoved: 0,
+    valueMoved: 0,
+    targetSharesAdded: 0,
   };
   if (people <= 0 || fromCityId === toCityId) return result;
   const fromGroups = householdGroupsOfCity(world, fromCityId);
@@ -283,6 +294,8 @@ export function transferInvestorAssetsForMigration(
     fromGroups.reduce((sum, group) => sum + effectiveInvestorShares(group.investorLedger), 0),
   );
   if (totalCityShares <= 0) return result;
+  const fromEquity = cityInvestorEquity(world, fromCityId);
+  const fromNavPerShare = investorNavPerShare(fromEquity, totalCityShares);
 
   const laborMoving = Math.max(0, Math.min(people, Math.round(laborForceMoved)));
   const legs: { occupation: HouseholdGroup['occupation']; moving: number }[] = [
@@ -311,72 +324,140 @@ export function transferInvestorAssetsForMigration(
   }
   const totalMoved = round2(legMoves.reduce((sum, move) => sum + move.moved, 0));
   if (totalMoved <= 0) return result;
-  const fraction = Math.min(1, totalMoved / totalCityShares);
+  // 迁移权益价值：源城净值/份额 × 迁出份额（净值=0 时价值=0，不虚增）。
+  const valueMoved = round2(totalMoved * fromNavPerShare);
+  // 目标城净值/份额必须在划入资产之前取，否则会把自己划入的资产算进分母。
+  const toSharesBefore = round2(
+    toGroups.reduce((sum, group) => sum + effectiveInvestorShares(group.investorLedger), 0),
+  );
+  const toNavPerShare = investorNavPerShare(
+    cityInvestorEquity(world, toCityId),
+    toSharesBefore,
+  );
+  // 目标城份额：价值 / 目标城净值；目标城零净资产时 1:1 兜底（旧份额价值为 0，不稀释）。
+  let targetShares = sharesForInvestorValue(valueMoved, toNavPerShare);
+  let movedSharesActual = totalMoved;
+  const fraction = fromEquity > 0 ? Math.min(1, valueMoved / fromEquity) : 0;
 
-  // 1) 现金：按占比从 A 城实体扣出，全额分配给 B 城实体（不产生/销毁资金）。
-  const cashMoves: { investor: InvestorGroup; amount: number }[] = [];
-  for (const investor of fromInvestors) {
-    const amount = round2(Math.max(0, investor.cash) * fraction);
-    if (amount > 0) cashMoves.push({ investor, amount });
-  }
-  const cashTotal = round2(cashMoves.reduce((sum, move) => sum + move.amount, 0));
-  if (cashTotal > 0) {
-    const weights = toInvestors.map((investor) => Math.max(0, investor.populationShare));
-    const credits = allocateMoneyExact(cashTotal, weights);
-    for (const move of cashMoves) {
-      move.investor.cash = round2(move.investor.cash - move.amount);
-    }
-    toInvestors.forEach((investor, index) => {
-      investor.cash = round2(investor.cash + (credits[index] ?? 0));
-    });
-    result.cashMoved = cashTotal;
-  }
-
-  // 2) 持股：按占比从 A 城实体持仓转给 B 城实体；类别总股数不变（不是新发）。
+  // 1) 持股：按迁移价值占源城净资产的比例划转（向下取到 0.01 股，避免划多）。
   const fromIds = new Set(fromInvestors.map((investor) => investor.id));
   const holdingWeights = toInvestors.map((investor) => Math.max(0, investor.populationShare));
-  const holdings = world.securities.holdings.filter(
-    (holding) => holding.holder.type === 'investorGroup' && fromIds.has(holding.holder.id),
-  );
-  for (const holding of holdings) {
-    const moved = round2(holding.shares * fraction);
-    if (moved <= 0) continue;
-    const splits = allocateMoneyExact(moved, holdingWeights);
-    toInvestors.forEach((investor, index) => {
-      const quantity = splits[index] ?? 0;
-      if (quantity <= 0) return;
-      const to: HolderRef = { type: 'investorGroup', id: investor.id };
-      if (
-        transferShares(
-          world,
-          holding.companyId,
-          holding.shareClassId,
-          holding.holder,
-          to,
-          quantity,
-          world.time.tick,
-        )
-      ) {
-        result.holdingsMoved = round2(result.holdingsMoved + quantity);
-      }
-    });
+  let holdingsValueMoved = 0;
+  if (fraction > 0) {
+    const holdings = world.securities.holdings.filter(
+      (holding) => holding.holder.type === 'investorGroup' && fromIds.has(holding.holder.id),
+    );
+    for (const holding of holdings) {
+      const moved = Math.floor(Math.max(0, holding.shares) * fraction * 100) / 100;
+      if (moved <= 0) continue;
+      const company = world.companies.find((candidate) => candidate.id === holding.companyId);
+      if (!company) continue;
+      const companyCity = world.cities.find((candidate) => candidate.id === company.cityId);
+      if (!companyCity) continue;
+      const unitPrice = companySharePrice(company, cityMarketPrices(companyCity));
+      const splits = allocateMoneyExact(moved, holdingWeights);
+      toInvestors.forEach((investor, index) => {
+        const quantity = splits[index] ?? 0;
+        if (quantity <= 0) return;
+        const to: HolderRef = { type: 'investorGroup', id: investor.id };
+        if (
+          transferShares(
+            world,
+            holding.companyId,
+            holding.shareClassId,
+            holding.holder,
+            to,
+            quantity,
+            world.time.tick,
+          )
+        ) {
+          result.holdingsMoved = round2(result.holdingsMoved + quantity);
+          holdingsValueMoved = round2(holdingsValueMoved + quantity * unitPrice);
+        }
+      });
+    }
   }
 
-  // 3) 账本随人转移：源群体按迁出比例减少，目标群体把承接权益记为 openingShares。
-  for (const move of legMoves) {
+  // 2) 现金：迁移价值扣除已划转持股市值后的余额，从源城实体现金扣出并转入目标城实体。
+  const cashTarget = round2(Math.max(0, valueMoved - holdingsValueMoved));
+  const fromCashTotal = round2(
+    fromInvestors.reduce((sum, investor) => sum + Math.max(0, investor.cash), 0),
+  );
+  const cashToMove = round2(Math.min(cashTarget, fromCashTotal));
+  if (cashToMove > 0) {
+    // 先按现金比例分币分配，再夹取到各自现金余额并重分配尾差，绝不把实体现金扣成负数。
+    const amounts = allocateMoneyExact(
+      cashToMove,
+      fromInvestors.map((investor) => Math.max(0, investor.cash)),
+    );
+    let residual = cashToMove;
+    const taken = amounts.map((amount, index) => {
+      const available = Math.max(0, fromInvestors[index]!.cash);
+      const value = Math.min(amount, available);
+      residual = round2(residual - value);
+      return value;
+    });
+    for (let guard = 0; guard < fromInvestors.length * 2 && residual > 0.005; guard += 1) {
+      let moved = 0;
+      for (let index = 0; index < fromInvestors.length && residual > 0.005; index += 1) {
+        const investor = fromInvestors[index]!;
+        const capacity = round2(Math.max(0, investor.cash - (taken[index] ?? 0)));
+        if (capacity <= 0) continue;
+        const add = round2(Math.min(capacity, residual));
+        taken[index] = round2((taken[index] ?? 0) + add);
+        moved = round2(moved + add);
+        residual = round2(residual - add);
+      }
+      if (moved <= 0) break;
+    }
+    const cashTotal = round2(taken.reduce((sum, value) => sum + value, 0));
+    if (cashTotal > 0) {
+      fromInvestors.forEach((investor, index) => {
+        investor.cash = round2(investor.cash - (taken[index] ?? 0));
+      });
+      const credits = allocateMoneyExact(cashTotal, holdingWeights);
+      toInvestors.forEach((investor, index) => {
+        investor.cash = round2(investor.cash + (credits[index] ?? 0));
+      });
+      result.cashMoved = cashTotal;
+    }
+  }
+
+  // 3) 账本随人转移：若源城实体现金不足，实际划转价值可能低于理论迁移价值；
+  //    此时按“实际划转价值”重算迁出份额与目标份额，避免账本份额多于实际资产（无偿转移）。
+  const actualValueMoved = round2(holdingsValueMoved + result.cashMoved);
+  const shortfall = actualValueMoved + 0.005 < valueMoved;
+  if (shortfall) {
+    movedSharesActual = Math.min(
+      totalMoved,
+      sharesForInvestorValue(actualValueMoved, fromNavPerShare),
+    );
+    targetShares = sharesForInvestorValue(actualValueMoved, toNavPerShare);
+  }
+  const legRemovedShares = shortfall
+    ? allocateMoneyExact(movedSharesActual, legMoves.map((move) => move.moved))
+    : legMoves.map((move) => move.moved);
+  const legShares = allocateMoneyExact(
+    targetShares,
+    legMoves.map((move) => move.moved),
+  );
+  legMoves.forEach((move, index) => {
+    const removed = round2(Math.min(legRemovedShares[index] ?? 0, move.effective));
     const from = ensureInvestorLedger(move.source);
     const to = ensureInvestorLedger(move.destination);
-    const sharesOut = Math.min(Math.max(0, from.shares), move.moved);
-    const openingOut = round2(Math.max(0, move.moved - sharesOut));
+    const sharesOut = Math.min(Math.max(0, from.shares), removed);
+    const openingOut = round2(Math.max(0, removed - sharesOut));
     const contributedOut =
-      move.effective > 0 ? round2(from.contributed * (move.moved / move.effective)) : 0;
+      move.effective > 0 ? round2(from.contributed * (removed / move.effective)) : 0;
     from.shares = round2(Math.max(0, from.shares - sharesOut));
     from.openingShares = round2(Math.max(0, (from.openingShares ?? 0) - openingOut));
     from.contributed = round2(Math.max(0, from.contributed - contributedOut));
-    to.openingShares = round2((to.openingShares ?? 0) + move.moved);
+    to.openingShares = round2((to.openingShares ?? 0) + (legShares[index] ?? 0));
     to.contributed = round2(to.contributed + contributedOut);
-    result.effectiveSharesMoved = round2(result.effectiveSharesMoved + move.moved);
-  }
+    result.effectiveSharesMoved = round2(result.effectiveSharesMoved + removed);
+  });
+  result.valueMoved = actualValueMoved;
+  result.targetSharesAdded = targetShares;
   return result;
 }
 
@@ -561,6 +642,9 @@ export function collectInvestableFunds(world: WorldState, config: DemoConfig, lo
   const tick = world.time.tick;
   const fundingHistory = ensureInvestorFundingHistory(world);
   const usageHistory = ensureInvestorUsageHistory(world);
+  // v1.4 §3：新资金按“净值/份额”一致口径增发，必须先补齐开局起始份额；
+  // 否则份额合计为 0/偏低会把净值算虚高，新资金换到过多份额、稀释原持有人。
+  ensureInvestorOpeningShares(world);
   for (const city of [...world.cities].sort((a, b) => a.id.localeCompare(b.id))) {
     const groups = groupsOfCity(world, city.id);
     if (groups.length === 0) continue;
@@ -579,6 +663,16 @@ export function collectInvestableFunds(world: WorldState, config: DemoConfig, lo
     // v1.1：收入为零不再阻止投资；有收入时仍取收入意愿额与闲钱上限的较小者。
     const target = round2(income > 0 ? Math.min(incomeDesired, idleCap) : idleCap);
     const takes = allocateIdleSavings(idles, target);
+    // v1.4 §3：转入前的实体净值与有效份额，决定每 1 信用点应换多少份额。
+    // 零净资产（净值=0）时回退 1:1：此时旧份额价值为 0，新资金按 1:1 入账不会稀释任何人。
+    const equityBefore = cityInvestorEquity(world, city.id);
+    const sharesBefore = round2(
+      householdGroups.reduce(
+        (sum, group) => sum + effectiveInvestorShares(group.investorLedger),
+        0,
+      ),
+    );
+    const navPerShare = investorNavPerShare(equityBefore, sharesBefore);
     let contribution = 0;
     householdGroups.forEach((group, index) => {
       const take = takes[index] ?? 0;
@@ -587,10 +681,11 @@ export function collectInvestableFunds(world: WorldState, config: DemoConfig, lo
       group.cash = round2(group.cash - take);
       group.lastMonth.savingsContribution = round2(group.lastMonth.savingsContribution + take);
       group.lastMonth.netCashChange = round2(group.lastMonth.netCashChange - take);
-      // v1.1 §2：可审计账本——投入金额 1:1 记为份额，分红归属按份额占比分摊。
+      // v1.4 §3：按净值换算份额（不再是 1:1），保证新资金进入后原持有人每份价值不变；
+      // contributed 仍记真实投入现金，便于审计与报告。
       const ledger = ensureInvestorLedger(group);
       ledger.contributed = round2(ledger.contributed + take);
-      ledger.shares = round2(ledger.shares + take);
+      ledger.shares = round2(ledger.shares + sharesForInvestorValue(take, navPerShare));
       ledger.lastContributionTick = tick;
       contribution = round2(contribution + take);
     });
@@ -661,6 +756,10 @@ export interface InvestorGroupFundingReport {
   dividendIncomeLastMonth: number;
   /** 累计收到的股息（含已返还居民部分） */
   dividendsReceived: number;
+  /** 持有的政府债券估值（未到期本金 + 已计提未付利息，v1.4 §3） */
+  bondsValue: number;
+  /** 实体净资产 = 现金 + 持股市值 + 债券估值 */
+  netWorth: number;
 }
 
 /** v1.1 §2：居民群体投资份额账本的可审计视图（投入/份额/归属股息）。 */
@@ -670,9 +769,13 @@ export interface HouseholdFundingShare {
   occupation: string;
   /** 累计从该群体转入投资实体的现金 */
   contributed: number;
-  /** 账本份额（按累计转入 1:1 记账，仅作归属依据） */
+  /** 历史投入份额（v1.4 §3 起按转入时净值换算，不再与投入现金 1:1） */
   shares: number;
-  /** 占本城居民投入份额的比例（0~1，四位小数） */
+  /** 开局/旧档无主旧资产的一次性起始份额（旧档缺省 0） */
+  openingShares: number;
+  /** 有效份额 = shares + openingShares（股息/财富/授信/展示的权威口径） */
+  effectiveShares: number;
+  /** 占本城有效份额的比例（0~1，四位小数） */
   shareRatio: number;
   /** 按份额归属给该群体的累计股息（只审计，不重复计收入） */
   attributedDividends: number;
@@ -704,6 +807,8 @@ export interface CityInvestorFundingReport {
   monthlyFunding: { tick: number; amount: number }[];
   /** 居民群体投入/份额/归属股息账本（可审计） */
   householdShares: HouseholdFundingShare[];
+  /** 本城投资实体净资产（现金 + 持股市值 + 未到期国债本息，v1.4 §3） */
+  investorNetWorth: number;
   note: string;
 }
 
@@ -744,6 +849,8 @@ export function investorFundingReport(world: WorldState): CityInvestorFundingRep
           holdingsValue,
           dividendIncomeLastMonth: round2(group.lastDividend),
           dividendsReceived: round2(group.dividendsReceived),
+          bondsValue: investorBondValue(world, group.id),
+          netWorth: round2(group.cash + holdingsValue + investorBondValue(world, group.id)),
         };
       });
       // 本月实际转入流水：同一 tick 聚合，按 tick 升序（旧档缺省为空）。
@@ -773,26 +880,37 @@ export function investorFundingReport(world: WorldState): CityInvestorFundingRep
             invested: round2(latestUsage.invested),
           }
         : { ...EMPTY_INVESTOR_USAGE };
-      // 居民群体账本：份额 1:1 对应累计投入，按本城合计份额算归属比例。
+      // 居民群体账本：v1.4 §3 起份额按转入时净值换算，展示/占比必须用有效份额
+      // （shares + openingShares），否则会把开局旧资产份额或按净值增发的份额漏掉。
       const residents = householdGroupsOfCity(world, city.id);
+      const effectiveSharesOf = (group: HouseholdGroup): number =>
+        effectiveInvestorShares(group.investorLedger);
       const totalShares = round2(
-        residents.reduce((sum, group) => sum + (group.investorLedger?.shares ?? 0), 0),
+        residents.reduce((sum, group) => sum + effectiveSharesOf(group), 0),
       );
       const householdShares = residents
         .filter((group) => {
           const ledger = group.investorLedger;
-          return Boolean(ledger) && ((ledger?.contributed ?? 0) > 0 || (ledger?.shares ?? 0) > 0);
+          return (
+            Boolean(ledger) &&
+            ((ledger?.contributed ?? 0) > 0 || effectiveSharesOf(group) > 0)
+          );
         })
         .map((group) => {
           const ledger = group.investorLedger;
           const shares = round2(ledger?.shares ?? 0);
+          const openingShares = round2(ledger?.openingShares ?? 0);
+          const effectiveShares = effectiveSharesOf(group);
           return {
             householdGroupId: group.id,
             name: group.name,
             occupation: group.occupation,
             contributed: round2(ledger?.contributed ?? 0),
             shares,
-            shareRatio: totalShares > 0 ? Math.round((shares / totalShares) * 10_000) / 10_000 : 0,
+            openingShares,
+            effectiveShares,
+            shareRatio:
+              totalShares > 0 ? Math.round((effectiveShares / totalShares) * 10_000) / 10_000 : 0,
             attributedDividends: round2(ledger?.dividends ?? 0),
           };
         });
@@ -805,7 +923,8 @@ export function investorFundingReport(world: WorldState): CityInvestorFundingRep
         usage,
         monthlyFunding,
         householdShares,
-        note: '居民闲钱投资：先保留 3 个月基本生活需求，闲置现金每月最多转入 1%；不提取存款、不借消费贷；账本记录各群体投入、份额与归属股息。',
+        investorNetWorth: cityInvestorEquity(world, city.id),
+        note: '居民闲钱投资：先保留 3 个月基本生活需求，闲置现金每月最多转入 1%；不提取存款、不借消费贷；账本记录各群体投入、份额（含开局起始份额 openingShares）与归属股息。',
       };
     });
 }

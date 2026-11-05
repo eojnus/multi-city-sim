@@ -294,6 +294,61 @@ export const DEMO_CONFIG = {
       aiRaiseMonths: 1.5,
       aiCutMonths: 4,
     },
+    /**
+     * v1.4 §五：AI 政府高失业决策（经济体检 / 失业分级 / 对症政策 / 动态预算 / 执行追踪）。
+     *
+     * 失业分级（按 3 个月均值失业率）：
+     * - normal   < 10%
+     * - strained 10%–20%
+     * - severe   20%–35%
+     * - crisis   > 35%
+     * 分级采用迟滞：升级需连续 tierConfirmMonths 个月达到新档位，降级需连续
+     * tierDeescalateMonths 个月低于当前档位，避免在阈值附近逐月抖动。
+     * 开局不足 earlyMonthsCap 个月时最多判为 earlyTierCap（“承压”），防止样本过少就饱和。
+     *
+     * 动态预算：参考近 12 个月“真实税收”的月均（不足 12 个月时用近 12 个月 GDP 估算补齐，
+     * 估算月数显式记录），按档位取 budgetTaxRevenueMinShare–budgetTaxRevenueMaxShare 的比例；
+     * 债务/GDP ≥ debtWarningRatio 时预算乘以 debtWarningBudgetShare（缩减高风险承诺，
+     * 不是破产线，破产仍由 fiscalRisk.bankruptAt=100% 判定）。
+     */
+    aiLabor: {
+      /** 失业分级阈值（3 个月均值失业率）。 */
+      tierStrainedAt: 0.1,
+      tierSevereAt: 0.2,
+      tierCrisisAt: 0.35,
+      /** 升级确认月数与降级确认月数（迟滞，防止边界抖动）。 */
+      tierConfirmMonths: 2,
+      tierDeescalateMonths: 2,
+      /** 趋势窗口：3 个月均值与再前 3 个月均值之差。 */
+      trendMonths: 3,
+      /** 开局不足该月数时最多判为 earlyTierCap，避免过早饱和。 */
+      earlyMonthsCap: 3,
+      earlyTierCap: 'strained' as const,
+      /** 月预算 = 近 12 月平均月税收 × 档位比例（5%–15% 区间）。 */
+      budgetTaxRevenueMinShare: 0.05,
+      budgetTaxRevenueMaxShare: 0.15,
+      budgetTierShares: { normal: 0.05, strained: 0.08, severe: 0.11, crisis: 0.15 },
+      /** 不足 12 个月时用 GDP 估算月税收：月税收 ≈ 月 GDP × 该比例。 */
+      budgetEstimateGdpTaxBaseShare: 0.08,
+      /** 单城月预算下限/上限（与 policies.minBudget 共同约束）。 */
+      budgetFloor: 120_000,
+      budgetCap: 6_000_000,
+      /** 债务/GDP 预警线（85%）与预警时预算比例。 */
+      debtWarningRatio: 0.85,
+      debtWarningBudgetShare: 0.5,
+      /** 食品库存覆盖低于该月数视为“缺货”。 */
+      foodCoverageMonths: 0.5,
+      /** 岗位空缺/劳动力 超过该比例视为招聘启动受阻。 */
+      vacancyRateForHiringBlocked: 0.02,
+      /** 技能水平低于该值且存在岗位空缺时，才允许用培训缓解结构性错配。 */
+      skillMismatchSkillLevel: 0.55,
+      /** 公共工程期限（月）：到期撤岗，不无限期占用财政工资。 */
+      publicWorksMonths: 6,
+      /** 政策连续 ineffectiveStopMonths 个月有支出但无受益/无就业效果时停止。 */
+      ineffectiveStopMonths: 2,
+      /** 经济体检快照保留月数。 */
+      checkupRetentionMonths: 60,
+    },
   },
   /** v0.3：政府主导的城内/城际公路与铁路容量（单位：货物单位/月）。 */
   transport: {

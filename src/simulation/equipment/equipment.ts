@@ -36,6 +36,51 @@ export function emptyEquipmentAssets(): EquipmentAssets {
   return { farm: 0, industry: 0, energy: 0 };
 }
 
+/**
+ * v1.4 §4：锁定期内不得出售/转让的初始实物设备台数。
+ * 锁定期满后返回 0（设备转为普通企业资产，可正常挂单/清算）。
+ *
+ * 锁定期只约束实物出资对应的设备类别：企业仍可能通过二手市场合法持有其他类别设备
+ * （见 buyUsedEquipment，它不按行业过滤卖方挂单），那部分设备不属于实物出资，可正常出售。
+ * 传入 kind 时只统计该类别；不传时返回实物出资类别的锁定台数（供清算/返还使用）。
+ */
+export function lockedInitialEquipmentUnits(
+  company: Company,
+  tick: number,
+  kind?: EquipmentKind,
+): number {
+  const grant = company.initialEquipment;
+  if (!grant) return 0;
+  if (kind !== undefined && kind !== grant.kind) return 0;
+  if (tick >= grant.lockUntilTick) return 0;
+  return Math.max(
+    0,
+    Math.min(Math.floor(grant.units), Math.floor(company.equipment[grant.kind] ?? 0)),
+  );
+}
+
+/**
+ * v1.4 §4：企业提前退出时，把锁定期内的初始实物设备按实物返还给模拟范围外的出资方。
+ * 设备从企业资产中扣除，不产生现金、不进入设备市场/政府库存、不向股东分配。
+ * 调用方负责在扣除后重算产能；返回的估值仅用于清算记录审计。
+ */
+export function returnLockedInitialEquipment(
+  company: Company,
+  tick: number,
+): { kind: EquipmentKind; units: number; valuation: number } | null {
+  const grant = company.initialEquipment;
+  if (!grant) return null;
+  const units = lockedInitialEquipmentUnits(company, tick);
+  if (units <= 0) return null;
+  company.equipment[grant.kind] = Math.max(
+    0,
+    Math.floor(company.equipment[grant.kind] ?? 0) - units,
+  );
+  company.initialEquipment = undefined;
+  const perUnit = grant.units > 0 ? grant.valuation / grant.units : 0;
+  return { kind: grant.kind, units, valuation: round2(units * perUnit) };
+}
+
 export function equipmentKindForSector(sector: string, config: DemoConfig): EquipmentKind {
   for (const kind of KINDS) {
     if (config.equipment.catalog[kind].sectors.includes(sector as never)) return kind;
@@ -594,7 +639,16 @@ export function listUsedEquipment(
   const want = Math.max(0, Math.floor(units));
   if (want <= 0) return { ok: false, error: '出售数量必须为正整数' };
   const owned = Math.floor(company.equipment[kind] ?? 0);
-  if (owned < want) return { ok: false, error: `设备数量不足：持有 ${owned}，拟出售 ${want}` };
+  // v1.4 §4：锁定期内的初始实物设备不得出售/转让，防止“创办即卖设备”套利。
+  // 只按被出售设备的类别判断（实物出资类别之外的合法持有设备不受影响）。
+  const locked = lockedInitialEquipmentUnits(company, tick, kind);
+  const sellable = Math.max(0, owned - locked);
+  if (sellable < want) {
+    return {
+      ok: false,
+      error: `可出售设备不足：持有 ${owned}，其中 ${locked} 台为锁定期内的创办实物出资，可出售 ${sellable}，拟出售 ${want}`,
+    };
+  }
   const catalog = config.equipment.catalog[kind];
   const price = round2(Math.max(1, askPrice ?? catalog.price * config.equipment.usedPriceFactor));
   company.equipment[kind] = owned - want;
@@ -692,11 +746,49 @@ export function disposeCompanyEquipment(
   config: DemoConfig,
   tick: number,
   log: LogEntry[],
-): { proceeds: number; unitsSold: number; unitsConsigned: number; buyers: string[] } {
+): {
+  proceeds: number;
+  unitsSold: number;
+  unitsConsigned: number;
+  buyers: string[];
+  /** v1.4：锁定期内按实物返还给创办者的初始设备（不产生现金，不进入政府库存）。 */
+  initialReturned: { kind: EquipmentKind; units: number; valuation: number }[];
+} {
   let proceeds = 0;
   let unitsSold = 0;
   let unitsConsigned = 0;
   const buyers: string[] = [];
+  const initialReturned: { kind: EquipmentKind; units: number; valuation: number }[] = [];
+  // v1.4 §4 审计修复：处置前先撤销本企业仍挂出的二手设备委托，把冻结台数返还企业资产，
+  // 再统一走“锁定期实物返还 → 真实买家折价出售 → 无人购买移交政府库存”的处置顺序。
+  // 否则企业随后从 world.companies 移除时挂单会悬空（invariant 报“引用不存在的企业”），
+  // 冻结在委托里的设备也会凭空消失（既没卖给真实买家，也没移交政府库存）。
+  const ownOffers = world.equipmentMarket.offers.filter((entry) => entry.companyId === company.id);
+  if (ownOffers.length > 0) {
+    for (const offer of ownOffers) {
+      company.equipment[offer.kind] = Math.floor(
+        (company.equipment[offer.kind] ?? 0) + offer.units,
+      );
+      log.push({
+        tick,
+        kind: 'warning',
+        message: `${company.name} 清算：撤销 ${offer.units} 台${config.equipment.catalog[offer.kind].name}未成交的二手出售委托，设备返还企业资产后继续按真实买家/政府库存处置。`,
+      });
+    }
+    world.equipmentMarket.offers = world.equipmentMarket.offers.filter(
+      (entry) => entry.companyId !== company.id,
+    );
+  }
+  // v1.4 §4：锁定期内的创办实物出资先按实物返还，不参与清算折价出售/移交政府库存。
+  const returnedInitial = returnLockedInitialEquipment(company, tick);
+  if (returnedInitial) {
+    initialReturned.push(returnedInitial);
+    log.push({
+      tick,
+      kind: 'warning',
+      message: `${company.name} 清算：${returnedInitial.units} 台${config.equipment.catalog[returnedInitial.kind].name}仍在创办实物出资锁定期内，按实物返还出资方（估值 ${returnedInitial.valuation.toFixed(0)}，不进入清算现金/股东分配）。`,
+    });
+  }
   for (const kind of KINDS) {
     const units = Math.floor(company.equipment[kind] ?? 0);
     if (units <= 0) continue;
@@ -735,7 +827,7 @@ export function disposeCompanyEquipment(
       });
     }
   }
-  return { proceeds: round2(proceeds), unitsSold, unitsConsigned, buyers };
+  return { proceeds: round2(proceeds), unitsSold, unitsConsigned, buyers, initialReturned };
 }
 
 export function nextUsedOfferId(world: WorldState): string {

@@ -9531,3 +9531,184 @@ kbd {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
+
+/* ==========================================================================
+   v1.4 UI 可观察性：投资有效份额/净资产、初始实物出资、AI 政府体检与执行记录
+   只做排版，不改变任何数据口径；所有数值来自只读视图。
+   ========================================================================== */
+
+.investor-section .investor-kpis {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  margin: 4px 0 6px;
+}
+
+.investor-kpis > span {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.investor-kpis i {
+  color: var(--faint);
+  font-size: 6.4px;
+  font-style: normal;
+}
+
+.investor-kpis b {
+  color: var(--text);
+  font-family: var(--pixel);
+  font-size: 8px;
+}
+
+.investor-kpis small {
+  color: var(--faint);
+  font-size: 6.2px;
+  line-height: 1.35;
+}
+
+.investor-kpis .is-warn b {
+  color: var(--orange);
+}
+
+.ai-government {
+  margin: 5px 0;
+  padding: 6px 7px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: rgba(95, 227, 192, 0.04);
+}
+
+.ai-government .sub-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.ai-government .sub-head > span {
+  color: var(--teal);
+  font-size: 7.4px;
+  letter-spacing: 0.04em;
+}
+
+.ai-government .sub-head > em {
+  color: var(--faint);
+  font-size: 6.2px;
+  font-style: normal;
+}
+
+.ai-government.is-player {
+  background: rgba(242, 193, 78, 0.05);
+  border-color: var(--line-strong);
+}
+
+.ai-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 6.8px;
+  line-height: 1.55;
+}
+
+.ai-status b {
+  color: var(--gold);
+}
+
+.ai-checkup-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.ai-checkup-grid > span {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.ai-checkup-grid i {
+  color: var(--faint);
+  font-size: 6.4px;
+  font-style: normal;
+}
+
+.ai-checkup-grid b {
+  color: var(--text);
+  font-family: var(--pixel);
+  font-size: 7.6px;
+  line-height: 1.4;
+}
+
+.ai-checkup-grid small {
+  color: var(--faint);
+  font-size: 6.1px;
+  line-height: 1.35;
+}
+
+.ai-checkup-grid .is-warn b {
+  color: var(--orange);
+}
+
+.ai-budget-note {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 6.3px;
+  line-height: 1.5;
+}
+
+.policy-active-reason {
+  margin: 2px 0;
+  color: var(--muted);
+  font-size: 6.4px;
+  line-height: 1.5;
+}
+
+.policy-run {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 9px;
+  margin-top: 3px;
+  padding-top: 3px;
+  border-top: 1px dashed var(--line);
+  color: var(--faint);
+  font-size: 6.2px;
+}
+
+.policy-run b {
+  color: var(--text);
+  font-family: var(--pixel);
+  font-size: 6.8px;
+}
+
+.policy-run b.is-positive {
+  color: var(--green);
+}
+
+.policy-run .policy-run-reason,
+.policy-run .policy-run-source {
+  flex-basis: 100%;
+  color: var(--faint);
+}
+
+.policy-run-empty {
+  margin: 2px 0 0;
+  color: var(--faint);
+  font-size: 6.1px;
+}
+
+@media (max-width: 1180px) {
+  .investor-section .investor-kpis,
+  .ai-checkup-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

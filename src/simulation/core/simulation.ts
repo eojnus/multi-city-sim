@@ -46,6 +46,7 @@ import {
 import {
   autoDecideFinancingOffers,
   collectInvestableFunds,
+  ensureInvestorOpeningShares,
   maybeCreateCompanyFinancing,
   planCompanyOrders,
   planInvestorOrders,
@@ -54,6 +55,7 @@ import { matchOrders, playerStakeOf } from '../securities/securities';
 import { notifyPlayer } from '../notifications/notifications';
 import { advancePolitics } from '../politics/politics';
 import { autoSelectPolicies, settlePolicies } from '../policies/policies';
+import { runEconomicCheckup } from '../policies/ai-labor';
 import { advanceTransportConstruction } from '../transport/network';
 import { settleTransportMonth } from '../transport/settlement';
 import { checkBankruptcies, maybeFoundCompanies } from '../companies/lifecycle/lifecycle';
@@ -188,7 +190,12 @@ export class Simulation {
   }
 
   static create(config: DemoConfig = DEMO_CONFIG): Simulation {
-    return new Simulation(createInitialWorld(config), config);
+    const world = createInitialWorld(config);
+    // v1.4 §3.5：新开局即按人口把“开局无主净资产”记为各群体 openingShares，
+    // 使 create → serialize → parse 的份额账本幂等（旧档仍由 parseSave 补齐）。
+    // 只记录权益归属，不产生现金、不改居民现有资产与统计。
+    ensureInvestorOpeningShares(world);
+    return new Simulation(world, config);
   }
 
   get dateLabel(): string {
@@ -241,7 +248,10 @@ export class Simulation {
 
       // 2. 政治：任期、选举；非玩家政府按弱项与领导人倾向选择政策。
       //    玩家为市长的城市由玩家选择，autoSelectPolicies 明确跳过。
+      //    v1.4 §五：选政策前先做本月经济体检（失业分级/购买力/缺货/招聘/债务/税收），
+      //    高失业档位走“对症政策 + 动态预算”，正常档位沿用既有弱项打分。
       advancePolitics(this.state, this.config, this.state.time.tick, logs);
+      runEconomicCheckup(this.state, this.config);
       autoSelectPolicies(this.state, this.config, logs);
 
       // 3. 交通建设推进与维护（财政支出，容量在建成后提高）。

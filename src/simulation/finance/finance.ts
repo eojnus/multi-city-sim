@@ -171,8 +171,13 @@ export function settleCompanyFinance(
     // 采购支出先进入存货资产（Company.inventoryCost），只有被销售的存货才结转 COGS；
     // 未售成品留在期末存货，不再像旧口径那样把本月采购直接费用化（避免采购/消耗重复计成本）。
     // 旧存档/旧夹具未记录 cogs 时回退到 inputCost，保持既有测试与旧档可读。
+    // v1.4 §6.6：跨城运力退款超出剩余账面成本的部分是采购退款收益（refundGain），
+    // 计入当期利润；旧档缺省字段按 0 处理，利润口径不跳变。
     const periodCogs = stats.cogs ?? stats.inputCost;
-    const preTaxProfit = round2(stats.revenue - periodCogs - paidWages);
+    const periodRefundGain = round2(Math.max(0, stats.refundGain ?? 0));
+    const preTaxProfit = round2(
+      stats.revenue - periodCogs - paidWages + periodRefundGain,
+    );
     // 使用企业所在城市的有效企业税率：政策调整只影响该城市企业。
     const corporateTaxRate = clamp(city.corporateTaxRate, 0, 1);
     const taxOwed = round2(Math.max(0, preTaxProfit) * corporateTaxRate);

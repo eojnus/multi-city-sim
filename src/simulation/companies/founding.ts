@@ -53,6 +53,20 @@ export const FOUNDING_MIN_WAGE_RESERVE_MONTHS = 2;
 /** 周转金下限：至少保留 1 个月计划原料采购额。 */
 export const FOUNDING_MIN_MATERIAL_RESERVE_MONTHS = 1;
 
+/**
+ * v1.4 §4：每家企业成立时由创办者从模拟范围外带入的“行业最小可行规模”设备台数。
+ * 这是外部实物出资（不在游戏内生产/库存/销售，不消耗政府库存、不记财政补贴），
+ * 只用于解除新企业的设备库存瓶颈；后续扩产仍必须通过真实设备市场购买。
+ */
+export const INITIAL_EQUIPMENT_UNITS = 1;
+
+/**
+ * v1.4 §4：初始实物设备锁定期（月）。锁定期内设备不得出售/转让；企业提前退出时，
+ * 未到期部分按实物返还给模拟范围外的出资方，不进入清算现金、不向股东分配。
+ * 锁定期满后设备成为企业正常资产，按普通设备参与二手挂单与清算处置。
+ */
+export const INITIAL_EQUIPMENT_LOCK_MONTHS = 12;
+
 /** 分项评分（每项已 clamp，total 为七项之和）。 */
 export interface FoundingScoreBreakdown {
   price: number;
@@ -112,8 +126,15 @@ export interface FoundingObstacle {
 /** 一个规模档位（1/2/4 台设备）。 */
 export interface FoundingScaleTier {
   units: number;
+  /** v1.4：创办者从模拟范围外带入的实物设备台数（不占现金、不进游戏内设备市场）。 */
+  inKindUnits: number;
+  /** v1.4：需要在游戏内设备市场真实购买的台数（units − inKindUnits）。 */
+  marketUnits: number;
+  /** v1.4：该档设备总估值（实物 + 市场购买，按当前设备单价；仅用于记录/审计）。 */
+  equipmentValue: number;
   /** 该档设备对应的真实员工数。 */
   jobs: number;
+  /** 需要在游戏内市场真实支付的设备现金（只覆盖 marketUnits）。 */
   equipmentCost: number;
   firstBatchInputCost: number;
   /** 周转金：工资储备 + 原料安全库存。 */
@@ -219,6 +240,10 @@ export interface FoundingAttemptRecord {
   expectedUnits: number | null;
   /** 预期规模：员工数（无档位时为 null）。 */
   expectedJobs: number | null;
+  /** v1.4：该档由创办者从模拟范围外带入的实物设备台数（0 表示没有实物出资）。 */
+  inKindUnits: number;
+  /** v1.4：该档实物设备估值（仅记录，不进入游戏内设备市场/财政）。 */
+  inKindValue: number;
 }
 
 declare module '../contracts/types' {
@@ -245,8 +270,13 @@ export function foundingAttemptSnapshot(
   | 'capitalNeed'
   | 'expectedUnits'
   | 'expectedJobs'
+  | 'inKindUnits'
+  | 'inKindValue'
 > {
   const reference = tier ?? assessment.feasibleTier ?? assessment.scaleTiers[0] ?? null;
+  const inKindUnits = reference?.inKindUnits ?? 0;
+  const inKindValue =
+    reference && reference.units > 0 ? round2((reference.equipmentValue * inKindUnits) / reference.units) : 0;
   return {
     demandGap: round2(assessment.metrics.payableUnmetDemand),
     price: round2(assessment.metrics.expectedPrice),
@@ -262,6 +292,8 @@ export function foundingAttemptSnapshot(
     capitalNeed: round2(reference?.totalCapital ?? assessment.metrics.startupCost),
     expectedUnits: reference?.units ?? null,
     expectedJobs: reference?.jobs ?? null,
+    inKindUnits,
+    inKindValue,
   };
 }
 
@@ -454,13 +486,12 @@ function investorGroupFounderCapacity(world: WorldState, config: DemoConfig, cit
  * 2 个月工资 + 1 个月计划原料采购额 + 已知贷款本息（按月供口径），
  * 只能动用缓冲之外的余钱，避免抽干原企业运转现金形成 A→B→C 连锁。
  */
-function companyOperatingReserve(
+export function companyOperatingReserve(
   world: WorldState,
   city: City,
   company: Company,
   config: DemoConfig,
-): number {
-  const wageReserve = monthlyWageBill(company, config) * FOUNDING_MIN_WAGE_RESERVE_MONTHS;
+): number {  const wageReserve = monthlyWageBill(company, config) * FOUNDING_MIN_WAGE_RESERVE_MONTHS;
   const plannedOutput =
     company.productionPlan?.plannedOutput ?? company.capacity * Math.max(0, company.utilization);
   const recipe = RECIPES[company.recipeOutput];
@@ -583,12 +614,18 @@ function buildTier(
   output: GoodId,
   candidate: FoundingCandidate,
   units: number,
+  inKindUnits: number,
   purchasable: number,
   requiredCapital: number,
   founderCapacity: number,
   economics: ReturnType<typeof unitEconomics>,
 ): FoundingScaleTier {
-  const equipCost = round2(units * candidate.unitPrice);
+  // v1.4 §4：创办者从模拟范围外带入行业最小可行规模的实物设备（默认 1 台），
+  // 只有超出部分才需要在游戏内设备市场真实购买；实物部分不消耗库存/不记市场账本/不记财政补贴。
+  const inKind = Math.max(0, Math.min(units, Math.floor(inKindUnits)));
+  const marketUnits = Math.max(0, units - inKind);
+  const equipCost = round2(marketUnits * candidate.unitPrice);
+  const equipmentValue = round2(units * candidate.unitPrice);
   const capacity = units * candidate.unitCapacity;
   // v1.2 量纲统一：岗位由“设备产能 ÷ 人均产出”推出，与 reconcileLabor / 生产计划的岗位口径一致；
   // 计划产量、工资、首批原料、周转金、销量全部使用同一产出量纲。
@@ -653,10 +690,10 @@ function buildTier(
   const product = config.banking.products.workingCapital;
   const interestCost = round2(loanPrincipal * product.rateMonthly * product.termMonths);
   const totalCapital = round2(upfront + interestCost);
-  if (purchasable < units) {
+  if (purchasable < marketUnits) {
     blockers.push({
       kind: 'equipment',
-      detail: `本地设备企业库存 + 政府库存合计 ${purchasable} 台，不足本档需要的 ${units} 台`,
+      detail: `本地设备企业库存 + 政府库存合计 ${purchasable} 台，不足本档需要在市场购买的 ${marketUnits} 台（另有 ${inKind} 台由创办者实物出资带入）`,
     });
   }
   if (jobs > city.population.laborForce) {
@@ -684,6 +721,9 @@ function buildTier(
   }
   return {
     units,
+    inKindUnits: inKind,
+    marketUnits,
+    equipmentValue,
     jobs,
     equipmentCost: equipCost,
     firstBatchInputCost,
@@ -759,10 +799,10 @@ export function retuneTierForCapacity(
       )}（需保留 ${tier.workingCapital.toFixed(0)}）`,
     });
   }
-  if (purchasable < tier.units) {
+  if (purchasable < tier.marketUnits) {
     blockers.push({
       kind: 'equipment',
-      detail: `可购买设备 ${purchasable} 台，不足本档 ${tier.units} 台`,
+      detail: `可购买设备 ${purchasable} 台，不足本档需要在市场购买的 ${tier.marketUnits} 台（另有 ${tier.inKindUnits} 台为实物出资）`,
     });
   }
   if (tier.jobs > laborForce) {
@@ -1213,6 +1253,8 @@ export function assessFounding(
       output,
       candidate,
       units,
+      // v1.4：每家企业固定由创办者实物出资带入最小可行规模设备（默认 1 台）。
+      Math.min(units, INITIAL_EQUIPMENT_UNITS),
       purchasable,
       requiredCapital,
       founders.best,
@@ -1261,9 +1303,11 @@ export function assessFounding(
       );
     }
     reasons.push(
-      `选定档位 ${feasibleTier.units} 台设备：员工 ${feasibleTier.jobs}、设备 ${feasibleTier.equipmentCost.toFixed(
+      `选定档位 ${feasibleTier.units} 台设备（其中 ${feasibleTier.inKindUnits} 台为创办者从模拟范围外带入的实物出资，估值约 ${round2(
+        (feasibleTier.equipmentValue * feasibleTier.inKindUnits) / Math.max(1, feasibleTier.units),
+      ).toFixed(0)}；${feasibleTier.marketUnits} 台需在设备市场真实购买，支出 ${feasibleTier.equipmentCost.toFixed(
         0,
-      )}、首批原料 ${feasibleTier.firstBatchInputCost.toFixed(0)}、周转金 ${feasibleTier.workingCapital.toFixed(
+      )}）：员工 ${feasibleTier.jobs}、首批原料 ${feasibleTier.firstBatchInputCost.toFixed(0)}、周转金 ${feasibleTier.workingCapital.toFixed(
         0,
       )}（2 个月基础工资 + 1 个月计划原料）、启动总资本 ${feasibleTier.totalCapital.toFixed(0)}（创办人出资 ${feasibleTier.founderEquity.toFixed(
         0,

@@ -10,8 +10,46 @@
 // 口径：有效份额 = ledger.shares + ledger.openingShares（开局/旧档无主旧资产一次性归属）。
 // 账本尚未建立（旧档或手工构造世界）时回退到人口权重，保证钱与权益不会凭空消失。
 
-import type { HouseholdGroup, HouseholdInvestorLedger } from '../contracts/types';
+import type { HouseholdGroup, HouseholdInvestorLedger, WorldState } from '../contracts/types';
 import { round2 } from '../core/math';
+
+/**
+ * 投资实体持有的政府债券估值（v1.4 §3）：未到期本金 + 已计提未付利息。
+ * 权威明细在 world.bonds.holdings（BondHolding.principal / accruedInterest）；
+ * 只统计 status='active'，已兑付（含到期/破产兑付）的持债不再计入净资产，避免重复计价。
+ */
+export function investorBondValue(world: WorldState, investorId: string): number {
+  const holdings = world.bonds?.holdings ?? [];
+  let total = 0;
+  for (const holding of holdings) {
+    if (holding.status !== 'active') continue;
+    if (holding.holder.kind !== 'investorGroup' || holding.holder.id !== investorId) continue;
+    total += Math.max(0, holding.principal) + Math.max(0, holding.accruedInterest);
+  }
+  return round2(total);
+}
+
+/**
+ * 每份有效份额对应的投资实体净资产（净值/份额）。
+ * 份额为 0（旧档未建账/零人城市）或净资产为 0 时返回 0，由调用方决定 1:1 兜底口径。
+ */
+export function investorNavPerShare(equity: number, totalShares: number): number {
+  const netWorth = Math.max(0, equity);
+  const shares = Math.max(0, totalShares);
+  if (shares <= 0 || netWorth <= 0) return 0;
+  return netWorth / shares;
+}
+
+/**
+ * 按净值把一笔权益价值换算成份额（v1.4 §3）：新资金/迁移权益不得再按 1:1 增发，
+ * 否则会稀释原持有人。零/负净值（净资产为 0 的实体）回退 1:1，保证资金与份额可对账。
+ */
+export function sharesForInvestorValue(value: number, navPerShare: number): number {
+  const amount = Math.max(0, value);
+  if (amount <= 0) return 0;
+  if (navPerShare > 0) return round2(amount / navPerShare);
+  return round2(amount);
+}
 
 /** 读取（必要时初始化）群体的投资份额账本；只记投入/份额/分红归属，不凭空造钱。 */
 export function ensureInvestorLedger(group: HouseholdGroup): HouseholdInvestorLedger {

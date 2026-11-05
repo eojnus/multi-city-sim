@@ -18,6 +18,11 @@ import type {
   LayerMode,
   ViewMode,
 } from '../app/gameStore';
+// v1.4 只读视图：投资实体的净资产/债券估值/有效份额与 AI 政府经济体检都在模拟层计算，
+// 面板只做展示，不在这里重算财富或政策效果（口径与月度报告/CLI 报告一致）。
+import { investorFundingReport } from '../simulation/investors/investors';
+import { latestCheckup, unemploymentTierLabel } from '../simulation/policies/ai-labor';
+import { lockedInitialEquipmentUnits } from '../simulation/equipment/equipment';
 import { renderPopulationPie, POPULATION_PIE_COLORS } from './charts/pie';
 import {
   aggregateTradeFlows,
@@ -39,6 +44,7 @@ import {
   sectorLabel,
   signClass,
   signedMoney,
+  signedPct,
   signedPointPercent,
   sparkline,
   tickDate,
@@ -151,6 +157,9 @@ const POLICY_DOMAIN_LABELS: Record<string, string> = {
   welfare: '民生',
   fiscal: '财政',
 };
+
+/** v1.4：居民群体职业标签（配置里的只读展示名；occupation 是字符串枚举）。 */
+const HOUSEHOLD_OCCUPATION_LABELS: Record<string, string> = DEMO_CONFIG.households.labels;
 
 const FISCAL_KIND_LABELS: Record<string, string> = {
   incomeTax: '个人所得税',
@@ -823,6 +832,27 @@ export function renderGovernmentSection(store: GameStore, city: City): string {
           .map((policy) => {
             const definition = view.definitions.find((entry) => entry.id === policy.policyId);
             const name = definition?.name ?? policy.policyId;
+            // v1.4 §五：执行追踪只在真实发生月度执行后才有记录；没有记录不编造支出/受益/岗位。
+            const latestRun = policy.tracking?.runs.at(-1) ?? null;
+            const runHtml = latestRun
+              ? `<div class="policy-run" data-testid="policy-run-${esc(policy.policyId)}">
+                  <span>最近执行 <b>${esc(tickDate(latestRun.tick))}</b> · 周期 ${num(latestRun.periodMonths)} 个月</span>
+                  <span>支出 <b>${money(latestRun.spent)}</b></span>
+                  <span>受益 <b>${num(latestRun.beneficiaries)}</b></span>
+                  <span>真实岗位 <b class="${latestRun.jobsEffect > 0 ? 'is-positive' : ''}">${
+                    latestRun.jobsEffect > 0 ? '+' : ''
+                  }${num(latestRun.jobsEffect)}</b></span>
+                  ${
+                    latestRun.theoreticalNeed !== undefined
+                      ? `<span>理论需求 ${money(latestRun.theoreticalNeed)} · 实发 ${money(
+                          latestRun.paid ?? 0,
+                        )} · 未支付 ${money(latestRun.unpaid ?? 0)}</span>`
+                      : ''
+                  }
+                  <span class="policy-run-source">来源：${esc(latestRun.fundingSource)}</span>
+                  <span class="policy-run-reason">${esc(latestRun.reason)}</span>
+                </div>`
+              : '<p class="policy-run-empty">尚无月度执行记录：政策启动后，首次真实执行会记录支出、受益与岗位效果（不预填数据）。</p>';
             return `
               <div class="policy-active-card" data-policy-id="${esc(policy.policyId)}">
                 <div class="policy-active-head">
@@ -833,10 +863,14 @@ export function renderGovernmentSection(store: GameStore, city: City): string {
                   ${
                     isPlayerMayor
                       ? `已支出 <b>${money(policy.spent)}</b> / 预算 ${money(policy.budget)}`
-                      : '<span class="is-restricted-inline">预算与支出明细仅该城市市长可见</span>'
+                      : '<span class="is-restricted-inline">政策预算额度与城市财政流水仅该城市市长可见</span>'
                   }
                 </div>
+                <p class="policy-active-reason" data-testid="policy-reason-${esc(policy.policyId)}">启动原因：${esc(
+                  policy.reason || '—',
+                )}</p>
                 <p class="policy-active-effect">${esc(effectSummary(policy.effects))}</p>
+                ${runHtml}
                 ${
                   isPlayerMayor
                     ? `<div class="policy-active-foot">
@@ -1000,6 +1034,59 @@ export function renderGovernmentSection(store: GameStore, city: City): string {
     })
     .join('');
 
+  // v1.4 §五：AI 政府经济体检（只在 AI 执政的城市显示；玩家市长时不代选政策）。
+  // 数据全部来自最新一份只读体检快照；没有快照时明确写“尚无记录”，不虚构预算/预警。
+  const checkup = isPlayerMayor ? null : latestCheckup(store.world, city.id);
+  const warningLine = pct(DEMO_CONFIG.policies.aiLabor.debtWarningRatio, 0);
+  const aiGovernmentHtml = isPlayerMayor
+    ? `<div class="ai-government is-player" data-testid="ai-mayor-status">
+        <div class="sub-head"><span>AI 政府</span><em>玩家市长</em></div>
+        <p class="ai-status"><b>AI 不代选政策</b>：你是本城现任市长，政策由你选择与停止，AI 不会替你选政策或替城市花钱。月度经济体检仍按真实数据生成，仅供背景参考。</p>
+      </div>`
+    : checkup
+      ? `<div class="ai-government" data-testid="ai-government">
+          <div class="sub-head"><span>AI 政府 · 经济体检</span><em>${esc(tickDate(checkup.tick))} 快照 · 只读</em></div>
+          <div class="ai-checkup-grid">
+            <span data-testid="ai-checkup-tier"${
+              checkup.tier !== 'normal' ? ' class="is-warn"' : ''
+            }><i>失业档位</i><b>${esc(unemploymentTierLabel(checkup.tier))}</b><small>3 月均值 ${pct(
+              checkup.unemploymentRateAvg3,
+            )} · 原始档 ${esc(unemploymentTierLabel(checkup.rawTier))}${
+              checkup.tier !== checkup.rawTier ? ' · 迟滞/开局上限生效' : ''
+            }</small></span>
+            <span><i>失业率 3 月均值</i><b>${pct(checkup.unemploymentRateAvg3)}</b><small>趋势 ${signedPct(
+              checkup.unemploymentTrend,
+            )}（环比前 3 月）</small></span>
+            <span data-testid="ai-checkup-symptoms"><i>症结</i><b>${
+              checkup.symptoms.length > 0 ? esc(checkup.symptoms.join('、')) : '无明显症状'
+            }</b><small>按真实失业/供需/招聘/债务判定</small></span>
+            <span><i>月政策预算</i><b>${money(checkup.budget)}</b><small>占参考税收 ${pct(checkup.budgetShare)}</small></span>
+            <span><i>税收参考月数</i><b>真实 ${num(checkup.taxMonthsReal)} 月 / 估算 ${num(
+              checkup.taxMonthsEstimated,
+            )} 月</b><small>真实月均 ${money(checkup.monthlyTaxRevenueReal)} · 估算 ${money(
+              checkup.monthlyTaxRevenueEstimated,
+            )}/月</small></span>
+            <span data-testid="ai-checkup-debt"${
+              checkup.debtWarning ? ' class="is-warn"' : ''
+            }><i>债务 / GDP</i><b>${pct(
+              checkup.debtRatio,
+            )}</b><small>${
+              checkup.debtWarning
+                ? `≥ ${warningLine} 预警线，长期承诺政策已缩减`
+                : `预警线 ${warningLine}（非破产线）`
+            }</small></span>
+            <span><i>本月到期压力</i><b>${pct(checkup.debtServicePressure)}</b><small>债券到期 ${money(
+              checkup.bondDue,
+            )} · 贷款到期 ${money(checkup.loanDue)}</small></span>
+          </div>
+          <p class="ai-budget-note">${esc(checkup.budgetNote)}</p>
+          <p class="fin-hint">体检与政策选择全部基于真实失业、税收、债务与到期合同；AI 只按症状排序可执行政策，不虚构支出、受益人数或岗位。</p>
+        </div>`
+      : `<div class="ai-government" data-testid="ai-government">
+          <div class="sub-head"><span>AI 政府 · 经济体检</span><em>尚无记录</em></div>
+          <p class="fin-hint" data-testid="ai-checkup-empty">本月经济体检尚未生成：AI 政府不会在没有体检数据时凭空选择政策。推进 1 个月后这里会显示失业档位、预算与债务预警。</p>
+        </div>`;
+
   const ledgerRows =
     ledger.length === 0
       ? '<li class="fiscal-empty">本月暂无财政流水。</li>'
@@ -1045,6 +1132,7 @@ export function renderGovernmentSection(store: GameStore, city: City): string {
               >参选市长（${money(electionCost)}）</button>
             </div>`
       }
+      ${aiGovernmentHtml}
       ${isPlayerMayor ? renderMayorFiscalPanel(store, city) : ''}
       ${isPlayerMayor ? renderCityTaxPanel(store, city) : ''}
       <div class="gov-active">
@@ -3075,6 +3163,126 @@ export function renderPopulationStrataSection(store: GameStore, city: City): str
     </section>`;
 }
 
+/**
+ * v1.4 §3：居民投资实体面板（有效份额 / 净资产 / 每份净值 / 债券估值）。
+ *
+ * 口径完全来自只读聚合 `investorFundingReport`（同一个函数供月度报告与 CLI 使用）：
+ * - 有效份额 = shares + openingShares（含开局无主旧资产的起始份额与按净值增发的新份额）；
+ * - 投资实体净资产 = 现金 + 股票市值 + 债券估值（未到期本金 + 已计提未付利息）；
+ * - 每份净值 = 净资产 ÷ 有效份额合计。
+ * 面板不重算财富、不展示内部持仓明细，也不虚构任何成交或收益。
+ */
+export function renderInvestorSection(store: GameStore, city: City): string {
+  const report = investorFundingReport(store.world).find((entry) => entry.cityId === city.id);
+  if (!report) return '';
+  const shares = report.householdShares;
+  const totalShares = shares.reduce((sum, entry) => sum + entry.effectiveShares, 0);
+  const holdingsValue = report.groups.reduce((sum, group) => sum + group.holdingsValue, 0);
+  const bondsValue = report.groups.reduce((sum, group) => sum + group.bondsValue, 0);
+  const attributedDividends = shares.reduce((sum, entry) => sum + entry.attributedDividends, 0);
+  const navPerShare = totalShares > 0 ? report.investorNetWorth / totalShares : 0;
+  const shareRows =
+    shares.length === 0
+      ? '<tr><td class="mini-empty" colspan="8">本城居民尚未向投资实体投入，暂无份额。</td></tr>'
+      : shares
+          .map(
+            (entry) => `
+              <tr data-testid="investor-share-${esc(entry.householdGroupId)}">
+                <th scope="row">${esc(entry.name)}</th>
+                <td title="${esc(HOUSEHOLD_OCCUPATION_LABELS[entry.occupation] ?? entry.occupation)}">${esc(
+                  HOUSEHOLD_OCCUPATION_LABELS[entry.occupation] ?? entry.occupation,
+                )}</td>
+                <td>${money(entry.contributed)}</td>
+                <td>${num(entry.shares, 2)}</td>
+                <td>${num(entry.openingShares, 2)}</td>
+                <td><b>${num(entry.effectiveShares, 2)}</b></td>
+                <td>${pct(entry.shareRatio, 2)}</td>
+                <td>${money(entry.attributedDividends)}</td>
+              </tr>`,
+          )
+          .join('');
+  const shareTotalRow =
+    shares.length === 0
+      ? ''
+      : `<tr class="total" data-testid="investor-share-total">
+          <th scope="row">合计</th>
+          <td>—</td>
+          <td>—</td>
+          <td>${num(shares.reduce((sum, entry) => sum + entry.shares, 0), 2)}</td>
+          <td>${num(shares.reduce((sum, entry) => sum + entry.openingShares, 0), 2)}</td>
+          <td><b>${num(totalShares, 2)}</b></td>
+          <td>${totalShares > 0 ? pct(1, 2) : pct(0, 2)}</td>
+          <td>${money(attributedDividends)}</td>
+        </tr>`;
+  const usage = report.usage;
+  const usageHasRecord = usage.tick > 0;
+  const usageGrid = usageHasRecord
+    ? `<div class="strata-demand-grid" data-testid="investor-usage">
+        <span><i>本月转入</i><b>${money(usage.contributed)}</b><small>居民闲钱转进投资实体</small></span>
+        <span><i>收到股息</i><b>${money(usage.dividendsReceived)}</b><small>返还居民 ${money(usage.dividendsReturned)} · 留存 ${money(
+          usage.dividendsRetained,
+        )}</small></span>
+        <span><i>本月投资支出</i><b>${money(usage.invested)}</b><small>期初 ${money(usage.openingCash)} → 期末 ${money(
+          usage.closingCash,
+        )}</small></span>
+      </div>`
+    : '<p class="fin-hint" data-testid="investor-usage-empty">尚无资金用途记录：推进 1 个月后显示真实转入、股息返还与投资支出（未发生的月份不编造数字）。</p>';
+  const lastFunding = report.monthlyFunding.at(-1) ?? null;
+  return `
+    <section class="panel-section investor-section" data-testid="investor-section">
+      <div class="section-head">
+        <div>
+          <span class="kicker">HOUSEHOLD INVESTMENT</span>
+          <h2>居民投资实体 · 有效份额与净资产</h2>
+        </div>
+        <span class="section-tag">${num(totalShares, 2)} 份</span>
+      </div>
+      <p class="strata-note">口径与月度投资报告一致：有效份额 = shares + openingShares；投资实体净资产 = 现金 + 股票市值 + 债券估值；每份净值 = 净资产 ÷ 有效份额合计。股票市值不是现金，债券按发行批次记在投资实体层。</p>
+      <div class="investor-kpis" data-testid="investor-networth">
+        <span><i>投资实体净资产</i><b>${money(report.investorNetWorth)}</b><small>现金 + 股票市值 + 债券估值</small></span>
+        <span><i>实体现金</i><b>${money(report.investorCash)}</b><small>投资实体账户可用现金</small></span>
+        <span><i>股票市值</i><b>${money(holdingsValue)}</b><small>按当前城市市价估值</small></span>
+        <span><i>债券估值</i><b>${money(bondsValue)}</b><small>未到期本金 + 已计提未付利息</small></span>
+        <span><i>有效份额合计</i><b>${num(totalShares, 2)}</b><small>含 openingShares 与按净值增发份额</small></span>
+        <span data-testid="investor-nav"><i>每份净值</i><b>${totalShares > 0 ? num(navPerShare, 4) : '—'}</b><small>信用点 / 份</small></span>
+      </div>
+      <div class="detail-subsection">
+        <div class="sub-head">
+          <h4>居民群体份额与占比</h4>
+          <span>本城 ${shares.length} 个群体 · 只读账本</span>
+        </div>
+        <div class="table-wrap">
+          <table class="strata-table" aria-label="${esc(city.name)} 居民投资有效份额" data-testid="investor-share-table">
+            <thead>
+              <tr>
+                <th scope="col">群体</th>
+                <th scope="col">职业</th>
+                <th scope="col">累计投入</th>
+                <th scope="col">shares</th>
+                <th scope="col">openingShares</th>
+                <th scope="col">有效份额</th>
+                <th scope="col">占比</th>
+                <th scope="col">归属股息</th>
+              </tr>
+            </thead>
+            <tbody>${shareRows}${shareTotalRow}</tbody>
+          </table>
+        </div>
+        <p class="fin-hint">占比按本城有效份额合计计算（原始比例四位小数，这里保留两位显示）；归属股息只做账本归属，不重复计入居民收入。</p>
+      </div>
+      <div class="detail-subsection">
+        <div class="sub-head">
+          <h4>资金用途 · 最近一月</h4>
+          <span>${usageHasRecord ? `${esc(tickDate(usage.tick))}` : '尚无记录'}${
+            lastFunding ? ` · 上次转入 T${num(lastFunding.tick)} ${money(lastFunding.amount)}` : ''
+          }</span>
+        </div>
+        ${usageGrid}
+      </div>
+      <p class="fin-hint">以上字段全部来自 investorFundingReport 的只读聚合；不展示投资实体内部持仓明细，也不虚构成交。</p>
+    </section>`;
+}
+
 /** B. 城市人才市场：只展示空闲经营者；在任 AI 经营者不在名单内。 */
 export function renderTalentMarketSection(store: GameStore, city: City): string {
   const view = store.talentMarketView(city.id);
@@ -3554,6 +3762,21 @@ export function renderCompanyEquipmentSection(store: GameStore, company: Company
   const market = store.equipmentMarketView(company.cityId);
   const plan = view.plan;
   const isPlayerOperator = view.isPlayerOperator;
+  // v1.4 §4：初始实物出资（模拟范围外）与锁定期。只读 company.initialEquipment；
+  // 锁定台数由 equipment.ts 的只读函数按当前 tick 计算（锁定期满自动解禁）。
+  const tick = store.world.time.tick;
+  const grant = company.initialEquipment;
+  const grantRow = grant ? view.equipmentRows.find((row) => row.kind === grant.kind) ?? null : null;
+  const lockedUnits = grant ? lockedInitialEquipmentUnits(company, tick, grant.kind) : 0;
+  const lockRemaining = grant ? Math.max(0, grant.lockUntilTick - tick) : 0;
+  const totalOwnedUnits = view.equipmentRows.reduce((total, row) => total + row.units, 0);
+  const inKindUnits = grant ? Math.min(grant.units, totalOwnedUnits) : 0;
+  const marketPurchasedUnits = Math.max(0, totalOwnedUnits - inKindUnits);
+  const lockLabel = !grant
+    ? '无锁定设备'
+    : lockRemaining > 0
+      ? `${num(lockRemaining)} 个月后解禁`
+      : '已解禁';
   const equipmentRows = view.equipmentRows
     .map(
       (row) => `
@@ -3575,7 +3798,12 @@ export function renderCompanyEquipmentSection(store: GameStore, company: Company
     .join('');
   const ownedOptions = view.equipmentRows
     .filter((row) => row.units > 0)
-    .map((row) => `<option value="${esc(row.kind)}">${esc(row.name)} · 持有 ${num(row.units)} 台</option>`)
+    .map((row) => {
+      const rowLocked = grant ? lockedInitialEquipmentUnits(company, tick, row.kind) : 0;
+      return `<option value="${esc(row.kind)}">${esc(row.name)} · 持有 ${num(row.units)} 台${
+        rowLocked > 0 ? `（锁定 ${num(rowLocked)} 台）` : ''
+      }</option>`;
+    })
     .join('');
   const held = view.equipmentRows.reduce((total, row) => total + row.units, 0);
   const offers = market?.offers ?? [];
@@ -3684,7 +3912,11 @@ export function renderCompanyEquipmentSection(store: GameStore, company: Company
               ${held > 0 ? '' : 'disabled'}
             >挂出</button>
           </div>
-          <p class="fin-hint">默认挂单价 = 目录价 × ${pct(market?.usedPriceFactor ?? 0.65, 0)}；成交后买方付款、设备所有权即时转移。</p>
+          <p class="fin-hint">默认挂单价 = 目录价 × ${pct(market?.usedPriceFactor ?? 0.65, 0)}；成交后买方付款、设备所有权即时转移。${
+            lockedUnits > 0
+              ? `锁定期内的 ${num(lockedUnits)} 台实物出资设备不可出售：后端会拒绝并提示可售台数。`
+              : ''
+          }</p>
         </form>
       </div>`
     : `<p class="fin-hint equip-readonly" data-testid="equipment-readonly">你目前不经营该企业：只能查看设备、产能与生产计划；购买/出售设备需要经营授权。</p>`;
@@ -3703,6 +3935,37 @@ export function renderCompanyEquipmentSection(store: GameStore, company: Company
         <span><i>成品库存</i><b>${qty(view.finishedStock)}</b><small>${
           view.sellableMonths === null ? '无销售参考' : `约 ${num(view.sellableMonths, 1)} 个月销量`
         }</small></span>
+      </div>
+      <div class="equip-block equip-initial" data-testid="equipment-initial">
+        <div class="sub-head">
+          <span>初始实物出资</span>
+          <em>${grant ? '模拟范围外实物出资' : '无实物出资'}</em>
+        </div>
+        <div class="equip-kpis">
+          <span><i>来源</i><b>${grant ? '模拟范围外实物出资' : '全部为市场采购'}</b><small>${
+            grant ? `创办者带入 · T${num(grant.grantedTick)}` : '无创办实物出资记录（旧档/未带设备）'
+          }</small></span>
+          <span><i>实物出资台数</i><b>${grant ? `${num(grant.units)} 台${grantRow ? ` · ${esc(grantRow.name)}` : ''}` : '0 台'}</b><small>${
+            grant ? '不计入游戏内设备生产/库存/销售' : '设备全部来自游戏内市场或政府储备'
+          }</small></span>
+          <span><i>实物出资估值</i><b>${grant ? money(grant.valuation) : '—'}</b><small>按创办时单价记录，仅审计</small></span>
+          <span data-testid="equipment-initial-lock"${
+            lockedUnits > 0 ? ' class="is-warn"' : ''
+          }><i>锁定期剩余</i><b>${lockLabel}</b><small>${
+            lockedUnits > 0
+              ? `锁定 ${num(lockedUnits)} 台不可出售/转让`
+              : grant
+                ? '锁定期已满，设备可正常出售'
+                : '设备全部可按二手规则出售'
+          }</small></span>
+          <span><i>市场采购</i><b>${num(marketPurchasedUnits)} 台</b><small>游戏内设备市场 / 政府储备</small></span>
+          <span><i>持有合计</i><b>${num(totalOwnedUnits)} 台</b><small>设备产能按台数重算</small></span>
+        </div>
+        <p class="fin-hint">${
+          grant
+            ? `实物出资 ${num(grant.units)} 台锁定期至 T${num(grant.lockUntilTick)}：锁定期内尝试出售会被后端拒绝并给出可售台数；锁定期满后转为普通企业资产。`
+            : '该企业没有实物出资记录：设备全部来自游戏内设备市场或政府储备，按二手设备规则出售。'
+        }</p>
       </div>
       <div class="equip-block">
         <div class="sub-head"><span>设备持有</span><em>技术系数 ×${num(view.techMultiplier, 2)}</em></div>
@@ -3821,6 +4084,7 @@ export function renderRightCity(store: GameStore, state: PanelState): string {
       ${renderKpis(store, city)}
       ${renderPopulationSection(city)}
       ${renderPopulationStrataSection(store, city)}
+      ${renderInvestorSection(store, city)}
       ${renderPulse(city)}
     </section>
     ${renderCompanies(store, city, state.focusCompanyId)}

@@ -28,6 +28,7 @@ import {
   allocateMoneyExact,
   effectiveInvestorShares,
   ensureInvestorLedger,
+  investorBondValue,
   investorEquityOfGroup,
   splitInvestorEquity,
 } from './household-investment';
@@ -233,12 +234,13 @@ export function householdLiquidWealth(world: WorldState, group: HouseholdGroup):
   return round2(group.cash + depositBalanceOf(world, group.id));
 }
 
-/** 本城居民投资实体净资产（现金 + 持股市值）。 */
+/** 本城居民投资实体净资产（现金 + 持股市值 + 政府债券未到期本息，v1.4 §3）。 */
 export function cityInvestorEquity(world: WorldState, cityId: string): number {
   let total = 0;
   for (const investor of world.investors) {
     if (investor.cityId !== cityId) continue;
     total += investor.cash;
+    total += investorBondValue(world, investor.id);
     for (const holding of world.securities.holdings) {
       if (holding.holder.type !== 'investorGroup' || holding.holder.id !== investor.id) continue;
       const company = world.companies.find((candidate) => candidate.id === holding.companyId);

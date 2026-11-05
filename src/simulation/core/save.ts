@@ -91,8 +91,13 @@ const STATS_KEYS = [
   'capacityChange',
   'dividendIncome',
 ] as const;
-/** v1.3 §3：可选统计字段（旧档缺失；出现时必须为有限数值）。 */
-const OPTIONAL_STATS_KEYS = ['cogs', 'inventoryWriteOff', 'operatingCashFlow'] as const;
+/** v1.3 §3 / v1.4 §6.6：可选统计字段（旧档缺失；出现时必须为有限数值）。 */
+const OPTIONAL_STATS_KEYS = [
+  'cogs',
+  'inventoryWriteOff',
+  'operatingCashFlow',
+  'refundGain',
+] as const;
 
 export function createSaveFile(world: WorldState, savedAt = new Date().toISOString()): SaveFile {
   return {
@@ -1111,6 +1116,40 @@ function validateMarket(value: unknown, path: string): string | null {
   return null;
 }
 
+const INITIAL_EQUIPMENT_KINDS = new Set(['farm', 'industry', 'energy']);
+
+/**
+ * v1.4：创办者实物出资的初始设备是可选字段；旧档缺失时跳过，
+ * 出现时只做形状与数值校验（不改变 SAVE_FORMAT_VERSION=9 的兼容承诺）。
+ */
+function validateInitialEquipmentGrant(value: unknown, path: string): string | null {
+  if (!isRecord(value)) return `${path} 无效`;
+  if (typeof value.kind !== 'string' || !INITIAL_EQUIPMENT_KINDS.has(value.kind)) {
+    return `${path}.kind 无效`;
+  }
+  for (const key of ['units', 'valuation', 'grantedTick', 'lockUntilTick']) {
+    if (!isFiniteNumber(value[key])) return `${path}.${key} 必须是有限数值`;
+  }
+  if ((value.units as number) < 0 || (value.valuation as number) < 0) {
+    return `${path}.units/valuation 必须是非负数`;
+  }
+  if (value.source !== 'founderInKind') return `${path}.source 必须是 founderInKind`;
+  return null;
+}
+
+function validateInitialEquipmentReturned(value: unknown, path: string): string | null {
+  if (!isRecord(value)) return `${path} 无效`;
+  if (typeof value.kind !== 'string' || !INITIAL_EQUIPMENT_KINDS.has(value.kind)) {
+    return `${path}.kind 无效`;
+  }
+  for (const key of ['units', 'valuation']) {
+    if (!isFiniteNumber(value[key]) || (value[key] as number) < 0) {
+      return `${path}.${key} 必须是非负数值`;
+    }
+  }
+  return null;
+}
+
 function validateCompany(value: unknown, index: number): string | null {
   if (!isRecord(value)) return `companies[${index}] 不是对象`;
   const id = typeof value.id === 'string' ? value.id : `companies[${index}]`;
@@ -1154,6 +1193,10 @@ function validateCompany(value: unknown, index: number): string | null {
   }
   if (!Array.isArray(value.recentProfits) || value.recentProfits.some((entry) => !isFiniteNumber(entry))) {
     return `企业 ${id}.recentProfits 必须是数值数组`;
+  }
+  if (value.initialEquipment !== undefined) {
+    const error = validateInitialEquipmentGrant(value.initialEquipment, `企业 ${id}.initialEquipment`);
+    if (error) return error;
   }
   for (const key of [
     'cash', 'debt', 'capacity', 'baseCapacity', 'maxCapacity', 'utilization',
@@ -1935,6 +1978,27 @@ function validatePolicies(policies: unknown, fiscal: unknown, cityIds: Set<strin
       return `policies.history[${index}].endedTick 无效`;
     }
   }
+  // v1.4 §五：经济体检记录（可选，旧档缺省合法）。
+  if (policies.checkups !== undefined) {
+    if (!Array.isArray(policies.checkups)) return 'policies.checkups 必须是数组';
+    for (const [index, checkup] of (policies.checkups as unknown[]).entries()) {
+      if (!isRecord(checkup)) return `policies.checkups[${index}] 不是对象`;
+      if (typeof checkup.cityId !== 'string' || !cityIds.has(checkup.cityId)) {
+        return `policies.checkups[${index}].cityId 无效`;
+      }
+      if (!isFiniteNumber(checkup.unemploymentRate) || !isFiniteNumber(checkup.budget)) {
+        return `policies.checkups[${index}] 数值无效`;
+      }
+      if (
+        checkup.tier !== 'normal' &&
+        checkup.tier !== 'strained' &&
+        checkup.tier !== 'severe' &&
+        checkup.tier !== 'crisis'
+      ) {
+        return `policies.checkups[${index}].tier 无效`;
+      }
+    }
+  }
   if (!isRecord(fiscal)) return 'world.fiscal 无效';
   if (!Array.isArray(fiscal.ledger)) return 'fiscal.ledger 必须是数组';
   if (!isInteger(fiscal.nextEntryId) || fiscal.nextEntryId < 1) {
@@ -1989,6 +2053,30 @@ function validateActivePolicy(value: unknown, path: string, cityIds: Set<string>
   }
   if (typeof value.reason !== 'string' || typeof value.note !== 'string') {
     return `${path} 文本字段无效`;
+  }
+  // v1.4 §五：执行追踪（可选，旧档缺省合法）。
+  if (value.tracking !== undefined) {
+    const tracking = value.tracking;
+    if (!isRecord(tracking)) return `${path}.tracking 无效`;
+    if (!Array.isArray(tracking.runs)) return `${path}.tracking.runs 必须是数组`;
+    for (const [index, run] of tracking.runs.entries()) {
+      if (!isRecord(run)) return `${path}.tracking.runs[${index}] 不是对象`;
+      for (const key of ['tick', 'periodMonths', 'spent', 'beneficiaries', 'jobsEffect', 'fiscalImpact']) {
+        if (!isFiniteNumber(run[key])) return `${path}.tracking.runs[${index}].${key} 无效`;
+      }
+      if (typeof run.reason !== 'string' || typeof run.fundingSource !== 'string') {
+        return `${path}.tracking.runs[${index}] 文本字段无效`;
+      }
+    }
+    for (const key of ['hiringBaseline', 'subsidisedJobs']) {
+      const map = tracking[key];
+      if (map !== undefined) {
+        if (!isRecord(map)) return `${path}.tracking.${key} 无效`;
+        for (const amount of Object.values(map)) {
+          if (!isFiniteNumber(amount)) return `${path}.tracking.${key} 含非数值`;
+        }
+      }
+    }
   }
   return null;
 }
@@ -2105,6 +2193,13 @@ function validateLifecycle(value: unknown, cityIds: Set<string>): string | null 
     }
     if (!Array.isArray(record.investors)) return `lifecycle.foundings[${index}].investors 无效`;
     if (typeof record.note !== 'string') return `lifecycle.foundings[${index}].note 无效`;
+    if (record.initialEquipment !== undefined) {
+      const error = validateInitialEquipmentGrant(
+        record.initialEquipment,
+        `lifecycle.foundings[${index}].initialEquipment`,
+      );
+      if (error) return error;
+    }
   }
   for (const [index, record] of (value.liquidations as unknown[]).entries()) {
     if (!isRecord(record)) return `lifecycle.liquidations[${index}] 不是对象`;
@@ -2122,6 +2217,13 @@ function validateLifecycle(value: unknown, cityIds: Set<string>): string | null 
       return `lifecycle.liquidations[${index}].inventoryWrittenOff 无效`;
     }
     if (typeof record.note !== 'string') return `lifecycle.liquidations[${index}].note 无效`;
+    if (record.initialEquipmentReturned !== undefined) {
+      const error = validateInitialEquipmentReturned(
+        record.initialEquipmentReturned,
+        `lifecycle.liquidations[${index}].initialEquipmentReturned`,
+      );
+      if (error) return error;
+    }
   }
   return null;
 }

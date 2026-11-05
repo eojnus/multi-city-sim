@@ -4,8 +4,10 @@ import type {
   City,
   LogEntry,
   PolicyDomain,
+  PolicyExecutionRecord,
   PolicyHistoryEntry,
   PolicyId,
+  PolicyTracking,
   SectorId,
   WorldState,
 } from '../contracts/types';
@@ -19,9 +21,11 @@ import {
   keyIndustryFocus,
   remainingBudget,
 } from './query';
+import { ensureEconomicCheckups, rankLaborPolicies, unemploymentTierLabel } from './ai-labor';
 import { spendTreasury } from '../government/treasury';
 import { addWorkforceSkill, recordTraining } from '../labor/workforce';
 import { cityPolitics, cityWeaknesses, incumbencySummary, leaderOf, playerIsMayor } from '../politics/politics';
+import { syncCityPopulationFromAllocations } from '../population/population';
 import { startCorridorUpgrade, startIntracityUpgrade } from '../transport/network';
 
 /**
@@ -162,6 +166,80 @@ function closePolicy(world: WorldState, policy: ActivePolicy, tick: number, stat
   world.policies.active = world.policies.active.filter((entry) => entry.id !== policy.id);
 }
 
+// ---------------------------------------------------------------- v1.4 §五：执行追踪
+
+const TRACKING_RUN_LIMIT = 24;
+
+function ensureTracking(policy: ActivePolicy): PolicyTracking {
+  policy.tracking ??= { runs: [] };
+  policy.tracking.runs ??= [];
+  return policy.tracking;
+}
+
+/** 记录一次真实执行（原因/资金来源/周期/支出/受益/就业效果/财政影响）。 */
+function recordExecution(policy: ActivePolicy, record: PolicyExecutionRecord): void {
+  const tracking = ensureTracking(policy);
+  tracking.runs.push(record);
+  if (tracking.runs.length > TRACKING_RUN_LIMIT) {
+    tracking.runs.splice(0, tracking.runs.length - TRACKING_RUN_LIMIT);
+  }
+}
+
+/**
+ * 公共工程到期/取消：撤回岗位，并同步撤回真实在岗人员。
+ *
+ * 岗位是一次性设立的，工资由财政“公共工资”科目按月真实支付（fiscal.ts），
+ * 因此到期必须撤岗，不能无限期占用财政工资；预算预留额与实付额分账记录。
+ *
+ * v1.4 不变量修复：只减 jobs 会把已填满的岗位留在 employees 上（employees > jobs），
+ * 要等到下月劳动力结算才自愈。这里按“实际在岗数不超过撤岗后岗位数”同步撤人，
+ * 并把被撤岗的真实在岗人员放回失业人口（P = E + U + N 与“雇主员工合计 = 就业人口”立即成立）。
+ * 工资仍由 fiscal.ts 的公共工资科目按月实付，撤岗本身不产生任何扣费。
+ */
+function releasePublicWorksJobs(world: WorldState, policy: ActivePolicy): number {
+  if (policy.policyId !== 'publicJobs') return 0;
+  const city = world.cities.find((entry) => entry.id === policy.cityId);
+  const jobs = Math.max(0, Math.round(policy.tracking?.publicWorksJobs ?? policy.effects.jobsCreated ?? 0));
+  if (!city || jobs <= 0) return 0;
+  const jobsBefore = Math.max(0, Math.round(city.publicSector.jobs));
+  const employeesBefore = Math.max(0, Math.round(city.publicSector.employees));
+  const removed = Math.min(jobs, jobsBefore);
+  city.publicSector.jobs = Math.max(0, jobsBefore - removed);
+  // 撤岗后公共部门人数不得超过岗位数；多出来的真实在岗人员回到失业人口。
+  const employeesAfter = Math.max(0, Math.min(employeesBefore, city.publicSector.jobs));
+  city.publicSector.employees = employeesAfter;
+  const releasedEmployees = Math.max(0, employeesBefore - employeesAfter);
+  if (releasedEmployees > 0) {
+    syncCityPopulationFromAllocations(city, world);
+  }
+  // tracking 中保留设立岗位数/启动时在岗人数/工资来源，供事后核对预留 vs 实付 vs 财政账本。
+  policy.effects.jobsRemoved = removed;
+  if (releasedEmployees > 0) policy.effects.employeesRemoved = releasedEmployees;
+  return removed;
+}
+
+/** 政策是否连续多个月有支出却没有任何受益/就业效果（用于停止低效政策）。 */
+function policyIneffective(policy: ActivePolicy, config: DemoConfig): boolean {
+  // 只对“以就业/收入为目标”的政策做低效停止；研发/教育/住房等长期投入不计入。
+  const employmentTargeted: PolicyId[] = [
+    'hiringSubsidy',
+    'retentionSubsidy',
+    'vocationalTraining',
+    'publicJobs',
+    'unemploymentAid',
+    'companyRelief',
+    'keyIndustrySupport',
+    'startupSupport',
+  ];
+  if (!employmentTargeted.includes(policy.policyId)) return false;
+  const tracking = policy.tracking;
+  if (!tracking || tracking.runs.length === 0) return false;
+  const months = Math.max(1, Math.round(config.policies.aiLabor.ineffectiveStopMonths));
+  const recent = tracking.runs.slice(-months);
+  if (recent.length < months) return false;
+  return recent.every((run) => run.spent > 0 && run.beneficiaries <= 0 && run.jobsEffect <= 0);
+}
+
 function nextPolicyId(world: WorldState): string {
   return `policy-${world.time.tick}-${world.policies.active.length + world.policies.history.length + 1}-${
     world.policies.lastRuns.length
@@ -296,7 +374,11 @@ export function startPolicy(
     policyId,
     budget,
     spent: 0,
-    monthsRemaining: config.policies.defaultDurationMonths,
+    // 公共工程有明确期限（aiLabor.publicWorksMonths），到期必须撤岗；其余政策沿用默认期限。
+    monthsRemaining:
+      policyId === 'publicJobs'
+        ? Math.max(1, Math.round(config.policies.aiLabor.publicWorksMonths))
+        : config.policies.defaultDurationMonths,
     startedTick: world.time.tick,
     status: 'active',
     targetSector: policyId === 'keyIndustrySupport' ? options.targetSector ?? defaultTargetSector(world, city, config) : null,
@@ -307,7 +389,23 @@ export function startPolicy(
     note: definition.effect,
   };
 
-  // 公共岗位：立即把预算转换为岗位（工资由财政按月支付，见 fiscal.ts）。
+  // 招聘补贴：启动时就把各城企业当前在岗人数记为基线（只增不减）。
+  // 若只依赖首次结算时的惰性初始化，政策启动到首次结算之间发生的真实入职会被算进基线，
+  // 首月真实净新增岗位就拿不到补贴（v1.4 §五 修复点）。
+  if (policyId === 'hiringSubsidy') {
+    const tracking = ensureTracking(policy);
+    tracking.hiringBaseline ??= {};
+    tracking.subsidisedJobs ??= {};
+    for (const company of world.companies
+      .filter((entry) => entry.cityId === city.id)
+      .sort((a, b) => a.id.localeCompare(b.id))) {
+      tracking.hiringBaseline[company.id] = Math.max(0, Math.round(company.employees));
+    }
+  }
+
+  // 公共岗位：立即设立岗位，但**不预扣财政**——工资由 fiscal.ts 的公共工资科目按月真实支付。
+  // 这里只记录“预算预留额”（上限），并在 tracking 中记录岗位数、启动时在岗人数与资金来源，
+  // 供月度核对“预留 vs 实付 vs 财政账本”，避免预扣与实付重复扣费或资金消失。
   if (policyId === 'publicJobs') {
     const wageMonths = Math.max(1, config.policies.publicJobs.wageMonthsReserved);
     const perJobCost = Math.max(1, city.publicSector.wageRate * wageMonths);
@@ -315,9 +413,23 @@ export function startPolicy(
     const jobsToAdd = Math.min(affordableJobs, Math.max(0, city.population.unemployed));
     if (jobsToAdd <= 0) return { ok: false, error: '预算不足以设立公共岗位，或没有失业居民' };
     city.publicSector.jobs += jobsToAdd;
-    payFromPolicy(world, policy, budget, `新增 ${jobsToAdd} 个公共岗位（预留 ${wageMonths} 个月工资）`, config);
+    const reservedWages = round2(jobsToAdd * perJobCost);
+    policy.budget = round2(Math.max(reservedWages, 0));
     policy.effects.jobsCreated = jobsToAdd;
-    policy.note = `${policy.note} 本项已设立 ${jobsToAdd} 个公共岗位（预算 ${budget.toFixed(0)}）。`;
+    policy.effects.reservedWages = reservedWages;
+    const tracking = ensureTracking(policy);
+    tracking.publicWorksJobs = jobsToAdd;
+    tracking.publicWorksBaselineEmployees = city.publicSector.employees;
+    tracking.publicWorksWageRate = city.publicSector.wageRate;
+    tracking.publicWorksFunding = '城市财政公共工资科目（fiscal.ts publicWages，按月实付）';
+    policy.note = `${policy.note} 本项已设立 ${jobsToAdd} 个公共岗位，期限 ${policy.monthsRemaining} 个月；预留 ${wageMonths} 个月工资 ${reservedWages.toFixed(0)}，不预扣财政，工资按月由公共工资科目实付，到期撤岗。`;
+    log.push({
+      tick: world.time.tick,
+      kind: 'government',
+      // 岗位数与预留工资属市长财政口径。
+      visibility: { scope: 'mayor', cityId: city.id },
+      message: `${city.name} 公共岗位计划：设立 ${jobsToAdd} 个岗位（期限 ${policy.monthsRemaining} 个月），预留工资 ${reservedWages.toFixed(0)}，由公共工资科目按月实付。`,
+    });
   }
 
   world.policies.active.push(policy);
@@ -333,8 +445,15 @@ export function startPolicy(
 export function cancelPolicy(world: WorldState, cityId: string, policyId: PolicyId): ActionResult {
   const policy = activePolicy(world, cityId, policyId);
   if (!policy) return { ok: false, error: '该政策未在执行' };
+  // 公共工程取消时立即撤岗（工资随岗位真实退出，避免继续占用财政公共工资）。
+  const releasedJobs = releasePublicWorksJobs(world, policy);
   closePolicy(world, policy, world.time.tick, 'cancelled');
-  return { ok: true, note: `${policyName(policyId)} 已停止；未使用预算不再支出。` };
+  return {
+    ok: true,
+    note: releasedJobs > 0
+      ? `${policyName(policyId)} 已停止；撤回公共岗位 ${releasedJobs} 个，未使用预算不再支出。`
+      : `${policyName(policyId)} 已停止；未使用预算不再支出。`,
+  };
 }
 
 /**
@@ -351,20 +470,35 @@ export function settlePolicies(
   for (const city of [...world.cities].sort((a, b) => a.id.localeCompare(b.id))) {
     for (const policy of activePoliciesFor(world, city.id)) {
       const definition = policyDefinition(policy.policyId);
+      const spentBefore = policy.spent;
+      let execution: PolicyExecutionRecord | null = null;
       switch (policy.policyId) {
         case 'hiringSubsidy': {
+          // v1.4 §五：只按“真实净新增岗位”发放。
+          // hiringBaseline 记录政策启动时的在岗人数（只增不减）：先裁后招只会补回基线，
+          // 不会再次领取补贴；subsidisedJobs 记录已补贴人次，防止重复领取。
           let hires = 0;
+          const tracking = ensureTracking(policy);
+          tracking.hiringBaseline ??= {};
+          tracking.subsidisedJobs ??= {};
           const companies = world.companies
             .filter((company) => company.cityId === city.id)
             .sort((a, b) => a.id.localeCompare(b.id));
           for (const company of companies) {
             const newHires = Math.max(0, Math.round(context.hiresByCompany[company.id] ?? 0));
-            if (newHires <= 0) continue;
+            // 基线只在政策启动（或该企业首次进入政策视野）时确定，之后不随在岗人数上调：
+            // 否则首月真实入职会被并进基线，净新增恒为 0（v1.4 §五 修复点）。
+            const baseline = tracking.hiringBaseline[company.id] ?? company.employees;
+            tracking.hiringBaseline[company.id] = baseline;
+            const alreadySubsidised = Math.max(0, Math.round(tracking.subsidisedJobs[company.id] ?? 0));
+            const netNew = Math.max(0, company.employees - baseline - alreadySubsidised);
+            const eligible = Math.min(newHires, netNew);
+            if (eligible <= 0) continue;
             const perHire = round2(
               company.wageRate * config.policies.hiring.subsidyRate * leaderScale(world, city.id, 'employment', config),
             );
             if (perHire <= 0) continue;
-            const affordableHires = Math.min(newHires, Math.floor(remainingBudget(policy) / perHire));
+            const affordableHires = Math.min(eligible, Math.floor(remainingBudget(policy) / perHire));
             if (affordableHires <= 0) break;
             const paid = payFromPolicy(
               world,
@@ -378,9 +512,21 @@ export function settlePolicies(
             company.cash = round2(company.cash + paid);
             const covered = Math.min(affordableHires, Math.floor(paid / perHire));
             hires += covered;
+            tracking.subsidisedJobs[company.id] = alreadySubsidised + covered;
             policy.effects.hiresSubsidised = round2((policy.effects.hiresSubsidised ?? 0) + covered);
             policy.effects.paid = round2((policy.effects.paid ?? 0) + paid);
           }
+          execution = {
+            tick: world.time.tick,
+            reason: '按真实净新增岗位发放招聘补贴（先裁后招不重复领取）',
+            fundingSource: 'city.treasury/policySpending',
+            periodMonths: 1,
+            spent: round2(policy.spent - spentBefore),
+            beneficiaries: hires,
+            jobsEffect: hires,
+            fiscalImpact: round2(-(policy.spent - spentBefore)),
+            note: '补贴只覆盖真实新增并维持的岗位；未新增不发放。',
+          };
           if (hires > 0) {
             log.push({
               tick: world.time.tick,
@@ -414,6 +560,17 @@ export function settlePolicies(
           }
           policy.effects.paid = round2((policy.effects.paid ?? 0) + total);
           policy.effects.employeesRetained = employees;
+          execution = {
+            tick: world.time.tick,
+            reason: '补贴在岗岗位以稳定就业（不降薪、不替代真实岗位）',
+            fundingSource: 'city.treasury/policySpending',
+            periodMonths: 1,
+            spent: round2(policy.spent - spentBefore),
+            beneficiaries: employees,
+            jobsEffect: 0,
+            fiscalImpact: round2(-(policy.spent - spentBefore)),
+            note: '稳岗补贴只补贴真实在岗人数，不虚构岗位。',
+          };
           if (total > 0) {
             log.push({
               tick: world.time.tick,
@@ -446,6 +603,18 @@ export function settlePolicies(
           policy.effects.trained = round2((policy.effects.trained ?? 0) + actualTrainees);
           policy.effects.skillGain = Math.round(((policy.effects.skillGain ?? 0) + gain) * 1_000_000) / 1_000_000;
           policy.effects.paid = round2((policy.effects.paid ?? 0) + paid);
+          execution = {
+            tick: world.time.tick,
+            reason: '结构性失业：有真实岗位空缺且技能不匹配时培训',
+            fundingSource: 'city.treasury/policySpending',
+            periodMonths: 1,
+            spent: round2(policy.spent - spentBefore),
+            beneficiaries: actualTrainees,
+            // 培训只提升技能，不虚构就业；就业效果由后续真实招聘产生。
+            jobsEffect: 0,
+            fiscalImpact: round2(-(policy.spent - spentBefore)),
+            note: '培训不是就业；只有后续被真实岗位录用才计入就业。',
+          };
           log.push({
             tick: world.time.tick,
             kind: 'labor',
@@ -473,6 +642,17 @@ export function settlePolicies(
           }
           policy.effects.companiesHelped = distressed.length;
           policy.effects.paid = round2((policy.effects.paid ?? 0) + paidTotal);
+          execution = {
+            tick: world.time.tick,
+            reason: '亏损且现金不足的企业纾困（只按真实工资缺口拨付）',
+            fundingSource: 'city.treasury/policySpending',
+            periodMonths: 1,
+            spent: round2(policy.spent - spentBefore),
+            beneficiaries: distressed.length,
+            jobsEffect: 0,
+            fiscalImpact: round2(-(policy.spent - spentBefore)),
+            note: '纾困资金进入企业现金，不直接创造岗位。',
+          };
           if (paidTotal > 0) {
             log.push({
               tick: world.time.tick,
@@ -503,6 +683,17 @@ export function settlePolicies(
           }
           policy.effects.paid = round2((policy.effects.paid ?? 0) + paidTotal);
           policy.effects.companiesSupported = companies.length;
+          execution = {
+            tick: world.time.tick,
+            reason: `重点产业扶持（目标行业 ${focus}）`,
+            fundingSource: 'city.treasury/policySpending',
+            periodMonths: 1,
+            spent: round2(policy.spent - spentBefore),
+            beneficiaries: companies.length,
+            jobsEffect: 0,
+            fiscalImpact: round2(-(policy.spent - spentBefore)),
+            note: '拨款进入企业现金；产能/就业效果由真实生产与招聘产生。',
+          };
           break;
         }
         case 'researchGrant': {
@@ -543,6 +734,17 @@ export function settlePolicies(
           }
           policy.effects.points = round2((policy.effects.points ?? 0) + actualPoints);
           policy.effects.paid = round2((policy.effects.paid ?? 0) + paid);
+          execution = {
+            tick: world.time.tick,
+            reason: '研发投入：按实际支付换取研究点与科技等级',
+            fundingSource: 'city.treasury/policySpending',
+            periodMonths: 1,
+            spent: round2(policy.spent - spentBefore),
+            beneficiaries: 0,
+            jobsEffect: 0,
+            fiscalImpact: round2(-(policy.spent - spentBefore)),
+            note: `研究点 +${actualPoints}；科技等级提升由真实研究点累积。`,
+          };
           break;
         }
         case 'educationInvestment': {
@@ -559,9 +761,21 @@ export function settlePolicies(
           const actualGain = addWorkforceSkill(city, gain);
           policy.effects.skillGain = Math.round(((policy.effects.skillGain ?? 0) + actualGain) * 1_000_000) / 1_000_000;
           policy.effects.paid = round2((policy.effects.paid ?? 0) + paid);
+          execution = {
+            tick: world.time.tick,
+            reason: '教育投入：按实际支付提升劳动力技能',
+            fundingSource: 'city.treasury/policySpending',
+            periodMonths: 1,
+            spent: round2(policy.spent - spentBefore),
+            beneficiaries: 0,
+            jobsEffect: 0,
+            fiscalImpact: round2(-(policy.spent - spentBefore)),
+            note: `技能 +${actualGain.toFixed(4)}；不虚构就业。`,
+          };
           break;
         }
         case 'unemploymentAid': {
+          // v1.4 §五：记录理论需求/预算/受益/实发/未支付；只有实发进入居民收入。
           const people = city.population.unemployed;
           if (people <= 0) break;
           const extra = round2(config.policies.unemploymentAid.extraPerUnemployed * people);
@@ -571,7 +785,22 @@ export function settlePolicies(
           city.lastMonth.benefitsPaid = round2(city.lastMonth.benefitsPaid + paid);
           city.lastMonth.householdIncome = city.householdIncomeLastMonth;
           policy.effects.paid = round2((policy.effects.paid ?? 0) + paid);
-          policy.effects.peopleHelped = people;
+          const helped = Math.min(people, Math.floor(paid / Math.max(1, config.policies.unemploymentAid.extraPerUnemployed)));
+          policy.effects.peopleHelped = helped;
+          execution = {
+            tick: world.time.tick,
+            reason: '失业救助：有供给但居民买不起时直接补充可支配收入',
+            fundingSource: 'city.treasury/policySpending',
+            periodMonths: 1,
+            spent: paid,
+            beneficiaries: helped,
+            jobsEffect: 0,
+            fiscalImpact: -paid,
+            theoreticalNeed: extra,
+            paid,
+            unpaid: round2(Math.max(0, extra - paid)),
+            note: '未支付部分不计入居民收入；救助不替代真实就业。',
+          };
           break;
         }
         case 'housingSupport': {
@@ -601,6 +830,17 @@ export function settlePolicies(
             policy.effects.unitsBuilt = round2((policy.effects.unitsBuilt ?? 0) + units);
           }
           policy.effects.paid = round2((policy.effects.paid ?? 0) + rentPaid + buildPaid);
+          execution = {
+            tick: world.time.tick,
+            reason: '住房支持：租金补贴与真实住房建设',
+            fundingSource: 'city.treasury/policySpending',
+            periodMonths: 1,
+            spent: round2(policy.spent - spentBefore),
+            beneficiaries: 0,
+            jobsEffect: 0,
+            fiscalImpact: round2(-(policy.spent - spentBefore)),
+            note: `新建住房 ${policy.effects.unitsBuilt ?? 0} 单元；租金补贴进入居民收入。`,
+          };
           log.push({
             tick: world.time.tick,
             kind: 'government',
@@ -613,23 +853,98 @@ export function settlePolicies(
         case 'intercityTradeSupport': {
           // 这三种政策在对应事件（扩产/创办/跨城结算）发生时支出，见相关模块。
           policy.effects.passiveTick = world.time.tick;
+          execution = {
+            tick: world.time.tick,
+            reason: '事件型政策：只在真实扩产/创办/跨城交易发生时按比例支出',
+            fundingSource: 'city.treasury/policySpending（事件发生时）',
+            periodMonths: 1,
+            spent: round2(policy.spent - spentBefore),
+            beneficiaries: 0,
+            jobsEffect: 0,
+            fiscalImpact: round2(-(policy.spent - spentBefore)),
+            note: '本月无对应真实事件时不产生支出。',
+          };
           break;
         }
         case 'publicJobs': {
-          // 岗位在一次启动时设立；此后工资由财政常规支出支付。
+          // v1.4 §五：岗位工资由财政公共工资科目按月真实支付（fiscal.ts publicWages）。
+          // 这里不再次扣财政，只核对“实际在岗（扣除启动基线）”并把支出计入政策预算/追踪，
+          // 避免预扣 + 实付重复扣费，也避免预留资金“消失”。
+          const tracking = ensureTracking(policy);
+          const created = Math.max(0, Math.round(tracking.publicWorksJobs ?? policy.effects.jobsCreated ?? 0));
+          const baselineEmployees = Math.max(0, Math.round(tracking.publicWorksBaselineEmployees ?? 0));
+          const actualEmployees = Math.max(0, city.publicSector.employees - baselineEmployees);
+          const funded = Math.min(created, actualEmployees);
+          const wageRate = Math.max(0, tracking.publicWorksWageRate ?? city.publicSector.wageRate);
+          const monthlyWage = round2(funded * wageRate);
+          const spentBeforeThisCase = policy.spent;
+          policy.spent = round2(Math.min(policy.budget, policy.spent + monthlyWage));
+          const attributed = round2(policy.spent - spentBeforeThisCase);
           policy.effects.jobs = city.publicSector.jobs;
+          policy.effects.publicWagePaid = round2((policy.effects.publicWagePaid ?? 0) + attributed);
+          policy.effects.publicJobsFilled = funded;
+          execution = {
+            tick: world.time.tick,
+            reason: '公共工程：按真实在岗人数支付公共工资（预算预留、不预扣）',
+            fundingSource: tracking.publicWorksFunding ?? 'city.treasury/publicWages',
+            periodMonths: 1,
+            spent: attributed,
+            beneficiaries: funded,
+            jobsEffect: 0,
+            fiscalImpact: -attributed,
+            note: `设立 ${created} 个岗位，实际在岗 ${funded} 人；工资由 fiscal.ts 公共工资科目实付，本记录只做预算归属与核对。`,
+          };
           break;
         }
         default:
           break;
       }
+      // v1.4 §五：每次执行都留下可追溯记录（含本月无支出的事件型政策）。
+      if (!execution) {
+        const spentDelta = round2(policy.spent - spentBefore);
+        execution = {
+          tick: world.time.tick,
+          reason: `本月执行${definition.name}`,
+          fundingSource: 'city.treasury/policySpending',
+          periodMonths: 1,
+          spent: spentDelta,
+          beneficiaries: 0,
+          jobsEffect: 0,
+          fiscalImpact: round2(-spentDelta),
+          note: '本月无真实支出/受益时按 0 记录。',
+        };
+      }
+      recordExecution(policy, execution);
       if (policy.startedTick < world.time.tick) {
         policy.monthsRemaining -= 1;
         if (policy.monthsRemaining <= 0) {
+          // 公共工程到期：撤岗，工资随岗位真实退出。
+          const released = releasePublicWorksJobs(world, policy);
+          if (released > 0) {
+            log.push({
+              tick: world.time.tick,
+              kind: 'government',
+              // 岗位数属市长财政口径。
+              visibility: { scope: 'mayor', cityId: city.id },
+              message: `${city.name} 公共岗位计划到期：撤回 ${released} 个岗位，财政公共工资相应减少。`,
+            });
+          }
           closePolicy(world, policy, world.time.tick, 'completed');
+          continue;
         }
       }
-      void definition;
+      // 效果差可调整停止：连续多个月有支出却无受益/无就业效果。
+      if (policyIneffective(policy, config)) {
+        const released = releasePublicWorksJobs(world, policy);
+        closePolicy(world, policy, world.time.tick, 'cancelled');
+        log.push({
+          tick: world.time.tick,
+          kind: 'government',
+          message: `${city.name} ${definition.name} 连续 ${
+            config.policies.aiLabor.ineffectiveStopMonths
+          } 个月有支出但无受益/无就业效果，已停止${released > 0 ? `（撤回岗位 ${released} 个）` : ''}。`,
+        });
+      }
     }
   }
 }
@@ -663,6 +978,59 @@ export function autoSelectPolicies(
         policyId: null,
         reason: '玩家市长：政策由玩家选择，AI 不自动选择。',
       });
+      continue;
+    }
+    // v1.4 §五：先做经济体检，再按失业档位走“对症政策”；正常档位沿用既有弱项打分。
+    const checkups = ensureEconomicCheckups(world, config);
+    const checkup = checkups.find((entry) => entry.cityId === city.id) ?? null;
+    if (checkup && checkup.tier !== 'normal') {
+      const candidates = rankLaborPolicies(world, city, checkup, config);
+      if (candidates.length === 0) {
+        world.policies.lastSelection.unshift({
+          tick: world.time.tick,
+          cityId: city.id,
+          policyId: null,
+          reason: `AI 高失业决策：${unemploymentTierLabel(checkup.tier)}（失业率 ${(
+            checkup.unemploymentRateAvg3 * 100
+          ).toFixed(1)}%），但预算不足或没有可负担的对症政策（${checkup.budgetNote}）`,
+        });
+        if (world.policies.lastSelection.length > 60) world.policies.lastSelection.splice(60);
+        continue;
+      }
+      let started: PolicyId | null = null;
+      let lastError = '';
+      for (const candidate of candidates) {
+        const result = startPolicy(world, city.id, candidate.policyId, config, {
+          budget: candidate.budget,
+          reason: `AI 高失业决策：${candidate.reason}`,
+          log,
+        });
+        if (result.ok) {
+          started = candidate.policyId;
+          log.push({
+            tick: world.time.tick,
+            kind: 'government',
+            // 预算/失业率细节属市长财政口径。
+            visibility: { scope: 'mayor', cityId: city.id },
+            message: `${city.name} AI 高失业决策：${unemploymentTierLabel(checkup.tier)}（失业率 ${(
+              checkup.unemploymentRateAvg3 * 100
+            ).toFixed(1)}%，${checkup.symptoms.join('、') || '无明显症状'}）→ 启动${
+              policyName(candidate.policyId)
+            }，本月预算上限 ${candidate.budget.toFixed(0)}。`,
+          });
+          break;
+        }
+        lastError = result.error ?? '';
+      }
+      world.policies.lastSelection.unshift({
+        tick: world.time.tick,
+        cityId: city.id,
+        policyId: started,
+        reason: started
+          ? `AI 高失业决策：${unemploymentTierLabel(checkup.tier)}，${candidates.find((entry) => entry.policyId === started)?.reason ?? ''}`
+          : `AI 高失业决策未能启动政策：${lastError}`,
+      });
+      if (world.policies.lastSelection.length > 60) world.policies.lastSelection.splice(60);
       continue;
     }
     const active = activePoliciesFor(world, city.id);

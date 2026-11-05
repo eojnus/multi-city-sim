@@ -470,11 +470,50 @@ export function recomputeProductionPlan(
   // 允许回到由缺货吸收 + 目标库存推出的 desired（仍受 +maxUpAdjust 上限约束），
   // 这与持续下跌的市场（有历史成交、真实需求消失）区分开。
   const recoveringFromZeroSales = salesReference <= 0.01 && demandSignal.extraDemand > 0.01;
+  // v1.4 §6.2：需求恢复通道。±maxUpAdjust 平滑用于避免单月需求尖峰被放大；但如果
+  // 上期计划自身看到的销售参考已经明显高于本期平滑上限（需求持续至少一个月），且企业
+  // 没有紧急状况、现金可支撑工资、设备/劳动/原料仍有富余，继续按 +20% 爬坡会让“有设备、
+  // 有员工、有需求”的企业长期低于需求生产；同时 plannedJobs 由被限速的计划推导，会持续
+  // 裁员并缩小劳动产能，形成“越慢越裁、越裁越慢”的反向锁定（v1.4 岚港能源企业探针：
+  // 销售参考 109,639、计划 88,926、员工从 1,104 降到 249）。此时允许直接恢复到
+  // min(desired, 设备/劳动/原料上限)，目标库存与库存积压仍由 desired 约束。
+  const priorSalesReference = existing?.salesReference ?? 0;
+  const cashBufferMonths = netWageBill > 0 ? company.cash / netWageBill : Number.POSITIVE_INFINITY;
+  const recentProfit = (company.recentProfits ?? []).reduce((total, entry) => total + entry, 0);
+  const financiallyAble =
+    !cashTight && (recentProfit > 0 || cashBufferMonths >= config.company.wageReserveMonths * 3);
+  const recoveryCap = Math.max(
+    0,
+    Math.min(
+      equipmentLimit,
+      laborLimit,
+      Number.isFinite(materialLimit) ? materialLimit : Number.POSITIVE_INFINITY,
+    ),
+  );
+  const recoveryCeiling = base * (1 + planCfg.maxUpAdjust);
+  // v1.4 §6.2 复核：这里的“持续需求”必须来自已实现成交，而不是新企业的初始需求预测。
+  // 新企业首月 salesReference 来自“设备产能 × initialSalesFactor”（见 salesReferenceFor），
+  // 在从未成交前它只是预测；若把它当成持续需求，恢复通道会让完全没有成交的新企业一次性
+  // 把计划/岗位拉到劳动或设备上限（v1.4 12 月探针：t4 一家设备企业 239→3420 人、当月亏损
+  // 1031 万，t5 类似企业 128→1841 人）。因此恢复通道额外要求 salesHistory 里有真实正销量，
+  // 且近月实际销量均值高于上期计划（销量历史全为 0 的企业同样不满足）。
+  const hasRealizedSales = (company.salesHistory ?? []).some((entry) => entry > 0.01);
+  const realizedSalesReference = hasRealizedSales ? salesReference : 0;
+  const demandPersistent =
+    base > 0.01 &&
+    priorSalesReference > base + 0.01 &&
+    realizedSalesReference > base + 0.01;
+  const canReaccelerate =
+    !emergency &&
+    demandPersistent &&
+    desired > recoveryCeiling + 0.01 &&
+    recoveryCap > recoveryCeiling + 0.01 &&
+    financiallyAble;
   if (base > 0) {
     const lower = base * (1 - (emergency ? planCfg.emergencyDownAdjust : planCfg.maxDownAdjust));
-    const upper = base * (1 + planCfg.maxUpAdjust);
+    const upper = recoveryCeiling;
     const floor = recoveringFromZeroSales ? Math.min(lower, desired) : lower;
-    smoothed = clamp(desired, floor, upper);
+    smoothed = canReaccelerate ? Math.min(desired, recoveryCap) : clamp(desired, floor, upper);
   } else {
     smoothed = desired;
   }
@@ -491,17 +530,22 @@ export function recomputeProductionPlan(
   if (!Number.isFinite(intended)) intended = equipmentLimit;
   intended = Math.max(0, intended);
   const plannedOutput = round2(Math.max(0, Math.min(intended, laborLimit)));
+  // v1.4 §6.2：恢复通道下，岗位需求按“需求可支撑的产出”而不是被平滑限速的本月计划推导，
+  // 否则企业在爬坡期会因 plannedJobs < 现有人数而持续裁员，劳动产能反而缩小。
+  const jobOutputTarget = canReaccelerate
+    ? Math.max(intended, Math.min(desired, equipmentLimit))
+    : intended;
   const rawPlannedJobs =
     laborLimit > 0 && company.employees > 0
       ? Math.max(
           0,
           Math.ceil(
-            intended / Math.max(1e-6, laborLimit / Math.max(1, company.employees)),
+            jobOutputTarget / Math.max(1e-6, laborLimit / Math.max(1, company.employees)),
           ),
         )
       : Math.max(
           0,
-          Math.ceil(intended / outputPerEmployee(world, company, config)),
+          Math.ceil(jobOutputTarget / outputPerEmployee(world, company, config)),
         );
   // v1.2 §6：岗位需求必须被“设备产能可支撑的岗位数”封顶（设备产能 ÷ 人均产出）。
   // 人均产出用劳动产能口径（含技术/技能/政策/1.08 系数），不得用 laborLimit / 现有员工数
@@ -556,6 +600,11 @@ export function recomputeProductionPlan(
   if (recoveringFromZeroSales) {
     reasons.push(
       `近 ${historyMonths} 月无实际成交，但存在 ${demandSignal.extraDemand.toFixed(2)} 的有效缺货份额：按缺货信号恢复计划，不因历史零销量锁死（上限仍为 +${(planCfg.maxUpAdjust * 100).toFixed(0)}%）`,
+    );
+  }
+  if (canReaccelerate) {
+    reasons.push(
+      `需求持续高于上期限速（上期计划 ${base.toFixed(2)} / 上期销售参考 ${priorSalesReference.toFixed(2)}）：本月按需求恢复至 ${smoothed.toFixed(2)}（设备上限 ${equipmentLimit.toFixed(2)}、劳动上限 ${laborLimit.toFixed(2)}、原料可支撑 ${Number.isFinite(materialLimit) ? materialLimit.toFixed(2) : '不受限'}），不再受 +${(planCfg.maxUpAdjust * 100).toFixed(0)}% 平滑压制`,
     );
   }
   if (bottleneck === 'labor') {

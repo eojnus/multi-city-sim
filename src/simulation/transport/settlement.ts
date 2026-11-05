@@ -67,8 +67,17 @@ function refundIntercityBuyer(
   buyerCompany.lastMonth.inputCost = round2(
     Math.max(0, buyerCompany.lastMonth.inputCost - refund),
   );
-  // v1.3：退款是采购价的冲减，存货账面成本同步下调（货已售出/消耗时最多冲减到 0）。
-  adjustInventoryCost(buyerCompany, sale.good, -refund);
+  // v1.3/v1.4 §6.6：退款是采购价的冲减，先冲减该商品剩余账面成本（最多到 0，不产生负成本）。
+  // 货已售出/耗用时账面成本可能不足以吸收整笔退款：超出部分是真实的采购退款收益，
+  // 必须计入当期利润（refundGain），否则这笔钱只出现在现金流里，利润与现金流口径不一致
+  // （v1.4 探针：892 company-month 中 8 例，单例 4.32M/当月采购 48.86M）。
+  const absorbed = adjustInventoryCost(buyerCompany, sale.good, -refund);
+  const unabsorbed = round2(refund + absorbed);
+  if (unabsorbed > 0.005) {
+    buyerCompany.lastMonth.refundGain = round2(
+      (buyerCompany.lastMonth.refundGain ?? 0) + unabsorbed,
+    );
+  }
   return 0;
 }
 
