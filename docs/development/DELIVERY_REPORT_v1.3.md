@@ -138,6 +138,10 @@ node scripts/acceptance-v09.cjs   # 需先启动 Electron 依赖，Windows 下�
 ## 9. Git 与 SHA
 
 - 基线：`09a8d1b`（v1.2）；main：`6c45000`（未改动）。
-- 本轮提交：见 `git log` 与最终交付回复（提交后补写完整 SHA）。
-- 工作区：提交前包含 src/tests/scripts/docs/evidence 改动；提交后应为干净。
+- 本轮提交（本地 = 远程 `origin/feature/stock-market-ui-tax`）：
+  - `0dde78d` feat(v1.3)：模拟层 + 测试（src + tests，含版本 1.3.0）
+  - `3deb27a` test(acceptance)：72 月报告脚本 + 桌面证据 `docs/evidence_v1.3`
+  - `0c80ab2` docs(v1.3)：交付报告 + README + 1.3.0 版本标识
+- 最终本地/远程 SHA：`0c80ab214b159b23805d54fd71799dee3f951415`
+- 工作区：干净；PAT 仅以环境变量使用并已删除临时文件（建议在 GitHub 撤销该 token）。
 - 未合并 main、未 rebase/amend/force、未改写已推送历史；PAT 仅以环境变量使用，未落盘。
