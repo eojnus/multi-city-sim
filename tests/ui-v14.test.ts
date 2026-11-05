@@ -85,6 +85,9 @@ function foodGapWithoutEquipment(world: WorldState, cityId = 'lanport'): void {
 describe('v1.4 居民/投资面板：有效份额、占比、净资产与每份净值', () => {
   it('人口标签渲染依赖数据，展示全部有效份额（含 openingShares）与净资产口径', () => {
     const store = createStore();
+    // v1.4：openingShares 在首次结算/旧档读取时补齐（不在 create 时预写，保持 v1.2 股息归属语义）；
+    // 面板在真实游戏里总是读取已结算的世界，这里推进 1 月后再断言（与桌面验收 t1 一致）。
+    store.tick();
     store.selectCity('lanport');
     const report = investorFundingReport(store.world).find((entry) => entry.cityId === 'lanport');
     expect(report).toBeTruthy();
