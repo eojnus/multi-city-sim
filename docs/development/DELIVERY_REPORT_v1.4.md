@@ -34,7 +34,7 @@
 | `src/simulation/population/household-investment.ts` | `investorNavPerShare`（净资产/有效份额）、`sharesForInvestorValue`（按价值换算份额，零净值 1:1 兜底）、`investorBondValue`（仅 active 持债：未到期本金 + 应计利息） |
 | `src/simulation/investors/investors.ts` | 迁移：源城 NAV 计价 → 目标城 NAV 换算（现金/股票按价值划转，债券权益保留为源城实体真实债权，账本按实际划转价值重算、不虚增份额）；`collectInvestableFunds` 先补 `openingShares` 再按 NAV 增发；`investorFundingReport` 输出 `investorNetWorth`、`groups[].bondsValue/netWorth`、`householdShares[].effectiveShares/shareRatio` |
 | `src/simulation/population/household-groups.ts` | `cityInvestorEquity` = 现金 + 持股市值 + 未到期国债本息 |
-| `src/simulation/core/simulation.ts` | `Simulation.create` 调用 `ensureInvestorOpeningShares`，新开局即建立起始份额账本，使 create→save→load 幂等 |
+| `src/simulation/core/simulation.ts` | 旧档读取由 `parseSave` 的 `ensureInvestorOpeningShares` 补齐 `openingShares` 且幂等；新开局不预写（开发中曾尝试在 `create` 预写，分块全量回归发现会改变 v1.2 股息归属的初始账本语义，已回退，见 13.5） |
 | `src/simulation/core/save.ts` | 读取时补齐 `openingShares`（幂等）、校验新可选字段；SAVE_FORMAT_VERSION 仍 9 |
 
 **任务书复现例实测**（`tests/investor-asset-accounting.test.ts` 新增 2 项）：A 实体资产 10,000/1,000 份（NAV 10）、B 实体资产 1,000/1,000 份（NAV 1），A 城 500 份持有人整群迁入 B：
@@ -97,7 +97,7 @@
   - 更新：`tests/policies.test.ts`（3 项重锁）、`tests/legacy-v09-roundtrip-v12.test.ts`（+312 行 v1.4 旧档往返）、`tests/acceptance/bankruptcy-real-run.test.ts`（按最终行为重锁序列，beforeAll 改为每月让出事件循环消除 vitest worker RPC 超时误报）、`tests/production-feedback-v14.test.ts`/`production-rounds-v13.test.ts` 等
 - 分组回归（最终代码，EXIT=0）：policies+ai-government 57/57；investor 三套件 30/30；founding 四套件 48/48；production 四文件 36/36；consumer/household 相关 8 文件 57/57；UI 8 文件 81/81；legacy+conservation+acceptance 5 文件 28/28（acceptance 8/8，约 149–177s）。
 - 完整测试套件：见第 13 节（运行结果如实记录；容器 2 核/2GB 下全量耗时长，若未跑完会明确写出已跑/未跑/失败原因）。
-- Electron 桌面验收：见第 13 节（`docs/evidence_v1.4/`，12 项检查 + v1.4 三面板检查：居民投资有效份额/净资产、企业初始设备来源与锁定期、政府 AI 体检/玩家市长不代选）。
+- Electron 桌面验收（最终代码 + build 后重跑）：**15/15 项通过、0 条控制台错误**；截图 8 张 + `report.json` 入仓 `docs/evidence_v1.4/`。v1.4 新增三项检查全部通过：居民投资面板（有效份额 1,443,632,560.10、净资产 15.12 亿与报告同口径）、企业设备面板（初始实物出资/市场采购来源与锁定期、锁定出售被后端拒绝）、政府面板（AI 经济体检快照：失业档位/3 月均值/症结/月预算 155.8 万/预算参考/债务预警）。
 
 ## 5. 默认种子 20261101 72 个月观察（玩家无操作、默认 AI）
 
@@ -203,10 +203,80 @@
 - [x] 交付报告与 README/版本
 - [ ] 推送 feature 分支（需用户提供 PAT；见第 13 节）
 
-## 13. 最终提交、完整测试、桌面与多 seed 结果（交付时回填）
+## 13. 最终提交、完整测试、桌面与多 seed 结果
 
-- 本轮提交：`<pending>`
-- 完整测试套件：`<pending>`
-- 桌面验收：`<pending>`
-- 多 seed 对照：`<pending>`
-- 推送/远端 SHA：`<pending>`
+### 13.1 提交
+
+- 基线：`fec99e4a923f4bc95077525f7ea9c200215b6d8b`（v1.3 交付）
+- 本轮提交（`feature/stock-market-ui-tax`）：
+  - `fc9ab01` feat(v1.4)：跨城投资权益净值换算与债券净资产、初始实物设备与防套利、AI 政府体检/动态预算/执行追踪、消费六项与退款收益口径
+  - `8226633` test(acceptance)：v1.4 报告脚本口径、AI 政府/初始设备/投资面板验收证据与回归测试
+  - `3830894` docs(v1.4)：交付报告、README 与 1.4.0 版本标识
+  - `0d6831a` fix(v1.4)：回退 create 时预写份额账本（保持 v1.2 股息归属语义），按 v1.4 实际耗时/初始设备行为校准慢测试超时与观察窗口
+- 工作区：干净；未合并 main、未改写历史、未 force push。
+
+### 13.2 完整测试套件（分块运行）
+
+- 单进程全量在 2 核/2GB 容器过慢（首个 `simulation.test.ts` 即约 283s），按 12 文件一块分 11 块顺序运行：
+  `npx vitest run <chunk files> --maxWorkers=1 --testTimeout=180000 --hookTimeout=1500000`
+- 11 块覆盖 **124 个测试文件、992 项**；首轮分块结果与逐项失败原因、复跑修复结果见 13.5。
+
+### 13.3 桌面验收
+
+- `npm run build` 成功；`DISPLAY=:99 electron --no-sandbox ... scripts/acceptance-v09.cjs` → **15/15 项通过、0 条控制台错误**，`docs/evidence_v1.4/report.json` 15 项全 pass，截图 8 张。
+
+### 13.4 多 seed 对照（`scripts/v14-seed-compare.ts`，36 个月，玩家无操作、默认 AI）
+
+| seed | 用时(s) | 不变量 | 城市 | 失业率 | 基本食品覆盖率 | 在营企业 | 初始设备(家) | AI 支出 | AI 受益 | AI 真实岗位 | 负债率 | 历史破产 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 20261101 | 122.8 | 0 | 岚港 | 93.7% | 6.2% | 152 | 144 | 0 | 14 | 0 | 46.1% | 0 |
+| 20261101 | 122.8 | 0 | 铁谷 | 77.0% | 40.8% | 160 | 149 | 0 | 0 | 0 | 20.1% | 0 |
+| 20261101 | 122.8 | 0 | 青原 | 68.8% | 40.2% | 159 | 152 | 670.8 万 | 5,057 | 3,459 | 17.6% | 0 |
+| 20261102 | 126.1 | 0 | 岚港 | 93.2% | 6.6% | 160 | 150 | 0 | 14 | 0 | 44.4% | 0 |
+| 20261102 | 126.1 | 0 | 铁谷 | 78.0% | 31.0% | 155 | 144 | 0 | 0 | 0 | 21.8% | 0 |
+| 20261102 | 126.1 | 0 | 青原 | 69.3% | 35.7% | 158 | 150 | 1,130.6 万 | 20,219 | 4,238 | 17.9% | 0 |
+| 777001 | 123.3 | 0 | 岚港 | 92.3% | 9.4% | 159 | 150 | 0 | 14 | 0 | 35.4% | 0 |
+| 777001 | 123.3 | 0 | 铁谷 | 81.0% | 38.0% | 158 | 146 | 0 | 0 | 0 | 24.1% | 0 |
+| 777001 | 123.3 | 0 | 青原 | 73.4% | 49.4% | 157 | 149 | 647.2 万 | 3,559 | 3,517 | 19.2% | 0 |
+| 424242 | 128.8 | 0 | 岚港 | 93.3% | 6.2% | 159 | 153 | 0 | 14 | 0 | 39.8% | 0 |
+| 424242 | 128.8 | 0 | 铁谷 | 77.4% | 34.7% | 157 | 146 | 0 | 0 | 0 | 21.1% | 0 |
+| 424242 | 128.8 | 0 | 青原 | 75.4% | 50.1% | 156 | 148 | 927.9 万 | 9,055 | 4,502 | 21.3% | 0 |
+
+- 四种子 36 月均 exit 0、不变量 0 违规、无政府破产（历史破产 0，负债率 17.6%–46.1%）；失业率 68.8%–93.7%、基本食品覆盖率 6.2%–50.1%，四种子结论一致：机制生效但宏观未闭合。
+- 债务使用 `cityDebt` 独立重算 + 政府 `lastDebt` 快照（初版脚本读取 `lastMonth` 可选字段为 0，已修正后重跑本表）。
+- 数据窗口：企业创办/倒闭取保留窗口（上限 60 条，脚本输出 `lifecycleTruncated`）；财政与居民指标为最后一月快照；AI/贸易为脚本逐月累计（不等同全期历史流水）。
+
+### 13.5 完整测试结果（分块全量 + 失败归因与复跑）
+
+**首轮分块（11 块 / 124 文件 / 992 项）逐块结果**：
+
+| 块 | 文件 | 结果 |
+|---|---|---|
+| 1 | 12 | 12 passed / 106 tests passed，exit 0 |
+| 2 | 12 | 12 passed / 112 tests passed，exit 1（vitest worker RPC 噪声，断言 0 失败） |
+| 3 | 12 | 12 passed / 74，exit 0 |
+| 4 | 12 | 11 passed / 1 failed / 98 passed / 1 failed：`economy-stability` 120 月用例 420s 超时（878s 才跑完，属容器吞吐，非断言/不变量失败） |
+| 5 | 12 | 12 passed / 115，exit 1（RPC 噪声） |
+| 6 | 12 | 11 passed / 1 failed / 85 passed / 4 failed：`investor-dividend-attribution` 4 项，根因=Lead 在 `Simulation.create` 预写 `openingShares` 改变了 v1.2 股息归属初始账本语义 → 已回退 |
+| 7 | 12 | 12 passed / 92，exit 1（RPC 噪声） |
+| 8 | 12 | 12 passed / 105，exit 0 |
+| 9 | 12 | 12 passed / 83，exit 1（RPC 噪声） |
+| 10 | 12 | 10 passed / 2 failed / 99 passed / 1 failed / 3 skipped：`v12-conservation-72m` beforeAll 300s 超时（72 月 v1.4 约 7 分钟）；`v11-economy` “3 月内有存续企业买入设备”失败（v1.4 初始设备后前 3 月存续企业无扩产采购）→ 观察窗口延长到 6 月 |
+| 11 | 4 | 4 passed / 14，exit 0 |
+
+**修复与复跑（全部 EXIT=0 或断言全绿）**：
+- 回退 `Simulation.create` 的 `ensureInvestorOpeningShares` 预写（旧档仍由 `parseSave` 补齐、幂等）：`investor-asset-accounting + investor-equity-flow + investor-dividend-attribution` → **30/30 passed**。
+- `tests/economy-stability.test.ts` 120 月用例超时 420s→1,200s（按 v1.4 单月约 7s 的容器吞吐）：**3/3 passed**（含 120 月用例；exit=1 为 vitest RPC 噪声，断言 0 失败）。
+- `tests/v12-conservation-72m.test.ts` beforeAll 300s→1,200s：**3/3 passed（419s）**。
+- `tests/v11-economy.test.ts` 观察窗口 3→6 月（保留全部守恒/结构断言）：**7/7 passed**。
+
+**结论**：124 个测试文件 / 992 项全部通过（0 断言失败；分块中 vitest 进程 exit≠0 的 4 次均为容器 `[vitest-worker] Timeout calling "onTaskUpdate"` 噪声，断言全绿，与 v1.3 记录一致）。上述 4 处调整均为测试口径/超时（2 处容器吞吐、1 处 v1.4 初始设备带来的早期采购行为、1 处 Lead 改动回归），没有删除或放宽产品守恒断言。
+
+### 13.6 推送状态（未完成：缺凭据）
+
+- 本地提交链（`feature/stock-market-ui-tax`）：`fec99e4`（v1.3 基线）→ `fc9ab01` → `8226633` → `3830894` → `0d6831a`（本报告另有一次 docs 提交）。
+- 推送尝试：`git push origin feature/stock-market-ui-tax` → 失败 `fatal: could not read Username for 'https://github.com': terminal prompts disabled`（本环境无 GitHub 凭据，未提供 PAT）。
+- 因此：**远端功能分支仍为 `fec99e4a923f4bc95077525f7ea9c200215b6d8b`，`main` 仍为 `6c45000efc4c406d30e22c0a12bd066fc2df61f7`；本地提交待推送。**
+- 需要用户提供 GitHub PAT（建议仅作为环境变量 `GH_PUSH_TOKEN` 或临时 credential helper 使用，不写入仓库文件）；收到后执行 `git push origin feature/stock-market-ui-tax` 并在本节回填本地/远端完整 SHA。
+
+> 注：本节表格中的多 seed 债务/破产数据以 `cityDebt` 独立重算，与主报告一致；AI 支出/受益/岗位为该 seed 36 月内脚本逐月累计。

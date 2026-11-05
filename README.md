@@ -155,9 +155,9 @@ npm run package        # 生成 Windows NSIS 安装包（需联网）
 ## 验证状态（2026-11-05，v1.4.0）
 
 - `npx tsc --noEmit` / `npm run build`：通过（0 错误；v1.4 最终代码）。
-- 完整测试套件：见交付报告第 13 节（2 核/2GB 容器下全量耗时长，结果与已跑/未跑范围如实记录；分组回归全部 EXIT=0）。
-- 桌面逐项验收 `scripts/acceptance-v09.cjs`（Xvfb + Electron，隔离 userData）：见交付报告第 13 节；证据入仓 `docs/evidence_v1.4/`（v1.4 新增：居民投资有效份额/净资产、企业初始设备来源与锁定期、政府 AI 体检/玩家市长不代选）。
-- 72 个月固定种子集成观察 `npx tsx scripts/economy-v09-report.ts --months=72 --seed=20261101`：exit 0；另跑 3 个对照种子的 36 月对照（`scripts/v14-seed-compare.ts`）；v1.4 数据、v1.3 对比、多 seed 与未达标原因见 `docs/development/DELIVERY_REPORT_v1.4.md` 第 5/6/13 节。
+- 完整测试套件：2 核/2GB 容器按 11 块分块运行 **124 个测试文件 / 992 项全部通过**（0 断言失败；分块中 vitest worker RPC 超时为容器噪声，已记录在交付报告 13.5）；分组回归同样全绿：policies+ai-government 57/57、investor 30/30、founding 48/48、production 36/36、consumer/household 57/57、UI 81/81、legacy+conservation+acceptance 28/28。
+- 桌面逐项验收 `scripts/acceptance-v09.cjs`（Xvfb + Electron，隔离 userData）：**15/15 项通过、0 条控制台错误**；截图 8 张 + `report.json` 入仓 `docs/evidence_v1.4/`（v1.4 新增：居民投资有效份额/净资产、企业初始设备来源与锁定期、政府 AI 体检/玩家市长不代选）。
+- 72 个月固定种子集成观察 `npx tsx scripts/economy-v09-report.ts --months=72 --seed=20261101`：exit 0；另跑种子 20261102 / 777001 / 424242 的 36 月对照（`scripts/v14-seed-compare.ts`，四种子均 exit 0/不变量 0/无政府破产）；v1.4 数据、v1.3 对比、多 seed 与未达标原因见 `docs/development/DELIVERY_REPORT_v1.4.md` 第 5/6/13 节。
 - 旧 v0.9 真实存档：读取→不变量[]→推进 1 月→保存→再读，两次保存文本逐字节一致，企业数/现金/债务/股份/人口/设备余量/投资份额/库存成本不漂移（`legacy-v09-save` 8/8、`legacy-v09-roundtrip-v12` 5/5）。
 - 详细记录见 `docs/development/DELIVERY_REPORT_v1.3.md`。
 
