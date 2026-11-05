@@ -287,7 +287,8 @@
 - 需要用户提供 GitHub PAT（建议仅作为环境变量 `GH_PUSH_TOKEN` 或临时 credential helper 使用，不写入仓库文件）；收到后执行 `git push origin feature/stock-market-ui-tax` 并在本节回填本地/远端完整 SHA。
 - **无凭据备用交付**（按既定“无凭据给 bundle”规则）：
   - `git bundle`：`/workspace/Coding/multi-city-sim-v1.4-commits.bundle`（11 MB，含 `fec99e4..HEAD` 全部提交，生成于最终 docs 提交之后；在仓库内 `git fetch <bundle> feature/stock-market-ui-tax` 即可得到同样提交）。
-  - 补丁系列：`/workspace/Coding/patches-v1.4/0001..0007.patch`（`git format-patch` 生成，可 `git am` 依序应用）。
+  - 补丁系列：`/workspace/Coding/patches-v1.4/0001..00NN.patch`（`git format-patch fec99e4..HEAD` 生成，可 `git am` 依序应用）。
+  - 完整可克隆 bundle（含全部历史，68 MB）：`/workspace/Coding/multi-city-sim-v1.4-full.bundle`（已实测 `git clone` 成功、HEAD 与本地一致）。
   - 以上 bundle/patch 与本地 HEAD 一致，可复现同一提交链；推送后本节回填远端完整 SHA。
 
 > 注：本节表格中的多 seed 债务/破产数据以 `cityDebt` 独立重算，与主报告一致；AI 支出/受益/岗位为该 seed 36 月内脚本逐月累计。
