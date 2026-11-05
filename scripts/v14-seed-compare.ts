@@ -11,6 +11,7 @@
 import { DEMO_CONFIG } from '../src/data/config';
 import { GOODS } from '../src/data/demo-data';
 import { Simulation } from '../src/simulation/core/simulation';
+import { cityDebt } from '../src/simulation/government/metrics';
 import type { City, WorldState } from '../src/simulation/contracts/types';
 
 function argNumber(name: string, fallback: number): number {
@@ -144,8 +145,9 @@ function cityReport(world: WorldState, city: City, ai: AccumulatedAi, trade: Acc
       bondPrincipalPaid: month.bondPrincipalPaid ?? 0,
       bankAdvance: month.bankAdvanceThisMonth ?? 0,
       treasury: round2(city.treasury),
-      totalDebt: round2(month.totalDebtAtMonthEnd ?? 0),
-      debtRatio: month.debtRatioAtMonthEnd ?? 0,
+      // 月末债务/负债率以政府 lastDebt 快照 + 独立重算为准；lastMonth 的可选字段在部分月份未填充。
+      totalDebt: round2(cityDebt(world, city.id).totalDebt),
+      debtRatio: city.government?.lastDebt?.debtRatio ?? 0,
       historicalBankruptcies: city.government.records.length,
     },
     initialEquipment: {

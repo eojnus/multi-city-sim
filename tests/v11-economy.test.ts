@@ -346,7 +346,9 @@ describe('v1.1 §9 横切：设备自然生产与真实交易', () => {
     let produced = 0;
     let sold = 0;
     let capitalized = 0;
-    for (let month = 1; month <= 3; month += 1) {
+    // v1.4 §4 给新企业自带 1 台实物设备，前 3 个月存续企业未必发生扩产采购；
+    // 观察窗口延长到 6 个月以覆盖真实市场扩产（成交/资本化/台数增量断言保留）。
+    for (let month = 1; month <= 6; month += 1) {
       expect(sim.tick().ok).toBe(true);
       produced += sum(
         world.lastTick.productionRecords

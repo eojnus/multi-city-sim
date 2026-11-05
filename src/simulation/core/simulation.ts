@@ -46,7 +46,6 @@ import {
 import {
   autoDecideFinancingOffers,
   collectInvestableFunds,
-  ensureInvestorOpeningShares,
   maybeCreateCompanyFinancing,
   planCompanyOrders,
   planInvestorOrders,
@@ -190,12 +189,9 @@ export class Simulation {
   }
 
   static create(config: DemoConfig = DEMO_CONFIG): Simulation {
-    const world = createInitialWorld(config);
-    // v1.4 §3.5：新开局即按人口把“开局无主净资产”记为各群体 openingShares，
-    // 使 create → serialize → parse 的份额账本幂等（旧档仍由 parseSave 补齐）。
-    // 只记录权益归属，不产生现金、不改居民现有资产与统计。
-    ensureInvestorOpeningShares(world);
-    return new Simulation(world, config);
+    // v1.4 §3.5 备注：新开局不在 create 时预写 openingShares（会改变 v1.2 股息归属测试的
+    // 初始账本语义）；旧档读取时由 parseSave 的 ensureInvestorOpeningShares 补齐，幂等。
+    return new Simulation(createInitialWorld(config), config);
   }
 
   get dateLabel(): string {

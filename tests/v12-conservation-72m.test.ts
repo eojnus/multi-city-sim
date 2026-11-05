@@ -149,6 +149,7 @@ function auditMonth(world: WorldState, tick: number): string[] {
   return found;
 }
 
+// v1.4 下 72 月模拟在 2 核/2GB 容器约 10 分钟，超过默认 hook 超时；提高上限。
 beforeAll(async () => {
   simulation = Simulation.create(DEMO_CONFIG);
   for (let month = 0; month < MONTHS; month += 1) {
@@ -164,7 +165,7 @@ beforeAll(async () => {
     // 保证容器低内存下不产生 unhandled error（断言本身仍逐月执行）。
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
-}, 300_000);
+}, 1_200_000);
 
 describe('v1.2 72 月观察口径守恒（seed 20261101，玩家无操作，默认 AI）', () => {
   it('72 月逐月结算成功，人口/企业数/市场/股份/贷款/现金流结构无违规', () => {
