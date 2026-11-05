@@ -272,7 +272,12 @@
 - `tests/v12-conservation-72m.test.ts` beforeAll 300s→1,200s：**3/3 passed（419s）**。
 - `tests/v11-economy.test.ts` 观察窗口 3→6 月（保留全部守恒/结构断言）：**7/7 passed**。
 
-**结论**：124 个测试文件 / 992 项全部通过（0 断言失败；分块中 vitest 进程 exit≠0 的 4 次均为容器 `[vitest-worker] Timeout calling "onTaskUpdate"` 噪声，断言全绿，与 v1.3 记录一致）。上述 4 处调整均为测试口径/超时（2 处容器吞吐、1 处 v1.4 初始设备带来的早期采购行为、1 处 Lead 改动回归），没有删除或放宽产品守恒断言。
+**最终代码复核补充（回退 create 预写后）**：分块之后在最终代码上复跑发现 `tests/ui-v14.test.ts` 有 1 项用例仍依赖“create 时预写 openingShares”：其 setup 未推进世界就断言有效份额 >0。已按 v1.4 语义改为推进 1 月后断言（真实游戏/桌面验收也是读取已结算世界；openingShares 由首次结算或旧档读取补齐）。复跑结果：
+- `tests/ui-v14.test.ts` → **11/11 passed**；
+- 受影响块 10（transport/ui/v11/v12 共 12 文件）在最终代码上整体复跑 → **12 files / 103 tests passed，exit 0**（含 `v12-conservation-72m` 72  months 与 `ui-v14`）；
+- 其余块不受该回退影响（`investor-*` 30/30、`v11-economy` 7/7、`economy-stability` 3/3 已分别复跑）。
+
+**结论**：124 个测试文件 / 992 项全部通过（0 断言失败；分块中 vitest 进程 exit≠0 的 4 次均为容器 `[vitest-worker] Timeout calling "onTaskUpdate"` 噪声，断言全绿，与 v1.3 记录一致）。上述调整均为测试口径/超时/setup（2 处容器吞吐、1 处 v1.4 初始设备带来的早期采购行为、1 处 Lead 改动回归、1 处 ui-v14 setup），没有删除或放宽产品守恒断言。
 
 ### 13.6 推送状态（未完成：缺凭据）
 
