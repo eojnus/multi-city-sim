@@ -5,7 +5,7 @@
  * 唯一的人工构造：把两家企业的经营者临时设为玩家（`governance.controls`），
  * 以便在界面上真实执行设备买卖——这是“玩家经营权限”的测试前置，不改变任何经济数值。
  *
- * 证据截图与 JSON 同时写入 artifacts/（gitignore）与 docs/evidence_v1.2/（入仓）。
+ * 证据截图与 JSON 同时写入 artifacts/（gitignore）与 docs/evidence_v1.3/（入仓）。
  *
  * 用法：Xvfb :99 & DISPLAY=:99 node_modules/electron/dist/electron --no-sandbox \
  *        --disable-dev-shm-usage --enable-unsafe-swiftshader scripts/acceptance-v09.cjs
@@ -17,7 +17,7 @@ const { registerSaveHandlers } = require('../dist/electron/saveIpc.js');
 
 const root = path.resolve(__dirname, '..');
 const artifacts = path.join(root, 'artifacts', 'acceptance-v09');
-const evidence = path.join(root, 'docs', 'evidence_v1.2');
+const evidence = path.join(root, 'docs', 'evidence_v1.3');
 fs.mkdirSync(artifacts, { recursive: true });
 fs.mkdirSync(evidence, { recursive: true });
 const userData = path.join(artifacts, 'electron-user-data');

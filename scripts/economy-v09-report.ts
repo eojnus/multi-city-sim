@@ -2,7 +2,7 @@
 //
 // 用法：npx tsx scripts/economy-v09-report.ts [--months=72] [--checkpoints=1,12,24,36,72]
 //
-// 固定条件：Simulation.create(DEMO_CONFIG)、默认种子、玩家无操作、默认 AI。
+// 固定条件：Simulation.create(config)、种子默认 20261101（--seed 可设）、玩家无操作、默认 AI。
 // 面向《经济循环完善计划书》§8 的观察口径：城市（GDP/运营收支/财政/贷款/债券/总负债/债务-GDP/
 // 破产与重选）、企业（成立/倒闭/设备/计划产量/欠薪）、居民（消费/消费贷/存款/失业）、银行、
 // 设备市场，以及“经营改善”与“借款/垫付/勾销”三者的区分。仅一次固定种子，不做调参。
@@ -18,7 +18,7 @@ import {
 } from '../src/simulation/government/metrics';
 import { equipmentUnits } from '../src/simulation/equipment/equipment';
 import { GOODS } from '../src/data/demo-data';
-import { foundingAttempts } from '../src/simulation/companies/founding';
+import { foundingAttempts, foundingAttemptsTruncated } from '../src/simulation/companies/founding';
 
 function argNumber(flag: string, fallback: number): number {
   const raw = process.argv.find((arg) => arg.startsWith(`${flag}=`));
@@ -56,6 +56,7 @@ function num(value: number, digits = 0): string {
 }
 
 const MONTHS = argNumber('--months', 72);
+const SEED = argNumber('--seed', DEMO_CONFIG.simulation.seed);
 const CHECKPOINTS = argList('--checkpoints', [1, 12, 24, 36, 72]).filter(
   (tick) => tick <= MONTHS,
 );
@@ -104,6 +105,138 @@ function cityCumulative(world: WorldState, cityId: string): Cumulative {
  * 财政流水的保留窗口：`recordFiscal` 只保留最近 `policies.ledgerLimit`（800）条，
  * 因此这里只能给出“窗口内累计”，不能冒充全期累计。账本一旦达到上限，更早月份不可得。
  */
+function investorEquityStats(world: WorldState, cityId: string) {
+  const groups = world.households.groups.filter((group) => group.cityId === cityId);
+  let contributed = 0;
+  let opening = 0;
+  let holders = 0;
+  let zeroPeopleWithShares = 0;
+  let zeroPeopleShares = 0;
+  for (const group of groups) {
+    const ledger = group.investorLedger;
+    if (!ledger) continue;
+    const owned = ledger.shares + (ledger.openingShares ?? 0);
+    contributed += ledger.shares;
+    opening += ledger.openingShares ?? 0;
+    if (owned > 0.01) holders += 1;
+    if (group.people <= 0 && owned > 0.01) {
+      zeroPeopleWithShares += 1;
+      zeroPeopleShares += owned;
+    }
+  }
+  const entityCash = world.investors
+    .filter((investor) => investor.cityId === cityId)
+    .reduce((sum, investor) => sum + investor.cash, 0);
+  return { contributed, opening, holders, groups: groups.length, zeroPeopleWithShares, zeroPeopleShares, entityCash };
+}
+
+function unemployedConsumption(world: WorldState, cityId: string) {
+  const groups = world.households.groups.filter(
+    (group) => group.cityId === cityId && group.occupation === 'unemployed',
+  );
+  const total = {
+    people: 0,
+    cash: 0,
+    income: 0,
+    budget: 0,
+    consumption: 0,
+    desired: 0,
+    unmetFunding: 0,
+    depositWithdrawn: 0,
+    loanFinanced: 0,
+  };
+  for (const group of groups) {
+    total.people += group.people;
+    total.cash += group.cash;
+    total.income += group.lastMonth.income;
+    total.budget += group.lastMonth.budget ?? 0;
+    total.consumption += group.lastMonth.consumption;
+    total.desired += group.lastMonth.desiredConsumption;
+    total.unmetFunding += group.lastMonth.unmetFunding ?? 0;
+    total.depositWithdrawn += group.lastMonth.depositWithdrawn ?? 0;
+    total.loanFinanced += group.lastMonth.loanFinancedConsumption ?? 0;
+  }
+  return total;
+}
+
+function companyCostStats(world: WorldState, cityId: string) {
+  const rows = world.companies.filter((company) => company.cityId === cityId);
+  const sum = (pick: (company: Company) => number) =>
+    rows.reduce((total, company) => total + pick(company), 0);
+  const inventoryValue = rows.reduce(
+    (total, company) =>
+      total +
+      Object.values(company.inventoryCost ?? {}).reduce((s, cost) => s + (cost ?? 0), 0),
+    0,
+  );
+  return {
+    revenue: sum((company) => company.lastMonth.revenue),
+    cogs: sum((company) => company.lastMonth.cogs ?? 0),
+    inputCost: sum((company) => company.lastMonth.inputCost),
+    wages: sum((company) => company.lastMonth.wagesPaid),
+    profit: sum((company) => company.lastMonth.profit),
+    cashFlow: sum((company) => company.lastMonth.operatingCashFlow ?? 0),
+    inventoryValue,
+  };
+}
+
+function foodChainStats(world: WorldState, city: City) {
+  const companies = world.companies.filter((company) => company.cityId === city.id);
+  const round = (value: number) => Math.round(value * 100) / 100;
+  const aggregate = (output: GoodId) => {
+    const rows = companies.filter((company) => company.recipeOutput === output);
+    const sum = (pick: (company: Company) => number) =>
+      round(rows.reduce((total, company) => total + pick(company), 0));
+    return {
+      count: rows.length,
+      capacity: sum((company) => company.capacity),
+      planned: sum((company) => company.productionPlan?.plannedOutput ?? 0),
+      produced: sum((company) => company.lastMonth.produced),
+      sold: sum((company) => company.lastMonth.sold),
+      cash: sum((company) => company.cash),
+      arrears: sum((company) => company.lastMonth.wageArrears),
+      profit: sum((company) => company.lastMonth.profit),
+      warehouses: sum((company) => company.inventory[output] ?? 0),
+    };
+  };
+  return {
+    food: aggregate('food'),
+    grain: aggregate('grain'),
+    energy: aggregate('energy'),
+    grainMarket: city.market['grain'],
+    foodMarket: city.market['food'],
+    energyMarket: city.market['energy'],
+  };
+}
+
+function governmentFiscalDetail(world: WorldState, cityId: string) {
+  const entries = world.fiscal.ledger.filter((entry) => entry.cityId === cityId);
+  const limit = DEMO_CONFIG.policies.ledgerLimit;
+  const sum = (kinds: string[]) =>
+    entries
+      .filter((entry) => kinds.includes(entry.kind))
+      .reduce((total, entry) => total + entry.amount, 0);
+  const result = {
+    entries: entries.length,
+    limit,
+    truncated: entries.length >= limit,
+    tax:
+      sum(['incomeTax', 'corporateTax', 'consumptionTax', 'dividendTax']),
+    transportBonus: sum(['transportTaxBonus']),
+    publicWages: sum(['publicWages']),
+    benefits: sum(['benefits']),
+    policySpending: sum(['policySpending', 'policyTransfer']),
+    transport: sum(['transportConstruction', 'transportMaintenance']),
+    loanProceeds: sum(['governmentLoanProceeds']),
+    loanRepayment: sum(['governmentLoanRepayment', 'governmentLoanInterest']),
+    bondProceeds: sum(['bondIssuanceProceeds']),
+    bondService: sum(['bondInterest', 'bondPrincipal']),
+    bankAdvance: sum(['bankAdvance']),
+    writtenOff: sum(['debtWriteOff', 'debtForgiven']),
+  };
+  return result;
+}
+
 function fiscalWindow(world: WorldState, cityId: string) {
   const entries = world.fiscal.ledger.filter((entry) => entry.cityId === cityId);
   const startTick = entries.length > 0 ? Math.min(...entries.map((entry) => entry.tick)) : null;
@@ -456,6 +589,29 @@ function printCheckpoint(world: WorldState) {
     console.log(
       `负债 ${money(info.debt.totalDebt)}（${pct(info.debt.totalDebt / Math.max(1, info.gdp12))} of 12M GDP）｜银行借款 ${money(info.debt.bankLoanPrincipal)}｜债券 ${money(info.debt.bondPrincipalOutstanding)}｜欠息 ${money(info.debt.loanAccruedInterest + info.debt.bondAccruedInterest)}`,
     );
+    const cost = companyCostStats(world, city.id);
+    console.log(
+      `企业成本 营收 ${money(cost.revenue)}｜售出成本 COGS ${money(cost.cogs)}｜原料现金支出 ${money(cost.inputCost)}｜工资 ${money(cost.wages)}｜利润 ${money(cost.profit)}｜经营现金流 ${money(cost.cashFlow)}｜期末存货账面 ${money(cost.inventoryValue)}`,
+    );
+    const chain = foodChainStats(world, city);
+    console.log(
+      `食品链 食品厂 ${chain.food.count} 家 产能 ${num(chain.food.capacity)} 计划 ${num(chain.food.planned)} 产 ${num(chain.food.produced)} 售 ${num(chain.food.sold)} 现金 ${money(chain.food.cash)} 欠薪 ${money(chain.food.arrears)} 利润 ${money(chain.food.profit)}｜粮食厂 ${chain.grain.count} 家 产能 ${num(chain.grain.capacity)} 计划 ${num(chain.grain.planned)} 产 ${num(chain.grain.produced)} 售 ${num(chain.grain.sold)} 欠薪 ${money(chain.grain.arrears)}｜能源厂 ${chain.energy.count} 家 产 ${num(chain.energy.produced)} 售 ${num(chain.energy.sold)} 欠薪 ${money(chain.energy.arrears)}`,
+    );
+    console.log(
+      `谷食物流 谷物 价 ${num(chain.grainMarket?.price)} 需求 ${num(chain.grainMarket?.producerRequired)} 成交 ${num(chain.grainMarket?.sold)} 库存 ${num(chain.grainMarket?.closingStock)} 进口 ${num(chain.grainMarket?.intercityImported)}｜食品 价 ${num(chain.foodMarket?.price)} 成交 ${num(chain.foodMarket?.sold)} 需求 ${num(chain.foodMarket?.consumerDemand)} 库存 ${num(chain.foodMarket?.closingStock)} 进口 ${num(chain.foodMarket?.intercityImported)}｜能源 价 ${num(chain.energyMarket?.price)} 成交 ${num(chain.energyMarket?.sold)} 库存 ${num(chain.energyMarket?.closingStock)}`,
+    );
+    const gov = governmentFiscalDetail(world, city.id);
+    console.log(
+      `财政明细（窗口 ${gov.entries}/${gov.limit} 条${gov.truncated ? '，已触达账本上限、更早流水被裁剪' : ''}）税收 ${money(gov.tax)}（含交通加成 ${money(gov.transportBonus)}）｜公共工资 ${money(gov.publicWages)}｜福利 ${money(gov.benefits)}｜政策 ${money(gov.policySpending)}｜交通 ${money(gov.transport)}｜政府贷款 ${money(gov.loanProceeds)}/还本息 ${money(gov.loanRepayment)}｜发债 ${money(gov.bondProceeds)}/付本息 ${money(gov.bondService)}｜银行垫付 ${money(gov.bankAdvance)}｜勾销 ${money(gov.writtenOff)}`,
+    );
+    const equity = investorEquityStats(world, city.id);
+    console.log(
+      `居民投资权益 有效份额 ${num(equity.contributed + equity.opening)}（累计投入 ${num(equity.contributed)} + 开局 ${num(equity.opening)}）｜持有人 ${equity.holders}/${equity.groups} 群体｜实体现金 ${money(equity.entityCash)}｜零人仍持份 ${equity.zeroPeopleWithShares}（${num(equity.zeroPeopleShares)} 份）`,
+    );
+    const jobless = unemployedConsumption(world, city.id);
+    console.log(
+      `失业群体 人口 ${num(jobless.people)}｜现金 ${money(jobless.cash)}｜收入 ${money(jobless.income)}｜预算 ${money(jobless.budget)}｜成交 ${money(jobless.consumption)}/期望 ${money(jobless.desired)}｜资金不足 ${money(jobless.unmetFunding)}｜存款提取 ${money(jobless.depositWithdrawn)}｜贷款支持 ${money(jobless.loanFinanced)}`,
+    );
     console.log(
       `破产 当前${info.bankrupt ? `是（tick ${info.bankruptcy?.tick ?? '?'}）` : '否'}｜${historyText}${info.history.truncated ? `（破产记录已达上限 ${info.history.maxRecords}，可能已截断更早记录）` : ''}｜税收窗口 ${info.taxes.months}/${info.taxes.windowMonths} 月：收入 ${money(info.taxes.tax)}｜交通加成 ${money(info.taxes.bonus)}｜交通损耗 ${money(info.taxes.loss)}`,
     );
@@ -608,14 +764,21 @@ function printSummary(world: WorldState) {
   for (const attempt of rejected) {
     for (const obstacle of attempt.obstacles) obstacles.set(obstacle.kind, (obstacles.get(obstacle.kind) ?? 0) + 1);
   }
+  const truncatedAttempts = foundingAttemptsTruncated(world);
   console.log(
-    `创业尝试累计 ${attemptLog.length} 次（成立 ${attemptLog.length - rejected.length} / 被拒 ${rejected.length}）｜障碍 ${[...obstacles.entries()]
+    `创业尝试累计（保留最近 ${attemptLog.length} 条${truncatedAttempts > 0 ? `，更早 ${truncatedAttempts} 条已按记录上限裁剪` : ''}）成立 ${attemptLog.length - rejected.length} / 被拒 ${rejected.length}｜障碍 ${[...obstacles.entries()]
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
       .map(([kind, count]) => `${kind}×${count}`)
       .join(' / ') || '无'}`,
   );
+  const foodGood = GOODS.find((good) => good.id === 'food');
   for (const city of world.cities) {
     const satisfaction = foodSatisfaction(world, city);
+    const basicNeed = Math.round(city.population.total * (foodGood?.perCapitaMonthlyNeed ?? 0) * 100) / 100;
+    const coverage = basicNeed > 0 ? city.market['food']?.sold / basicNeed : null;
+    console.log(
+      `基本食品需要量 ${num(basicNeed)} 件/月（人均 ${foodGood?.perCapitaMonthlyNeed ?? 0}×人口 ${num(city.population.total)}）｜成交覆盖 ${coverage === null ? '—' : `${(coverage * 100).toFixed(1)}%`}（注意：有效需求受预算限制，覆盖低说明“买得起的需求”之外仍有基本面缺口）`,
+    );
     const initial = initialEmployment.get(city.id);
     // 失业率口径 = 失业 / 劳动力（就业+失业），与 checkpoint 的“失业率”一致。
     const laborForce = city.population.employed + city.population.unemployed;
@@ -696,7 +859,9 @@ function accumulateEquipmentFlow(world: WorldState): void {
   }
 }
 
-const simulation = Simulation.create(DEMO_CONFIG);
+const runtimeConfig = { ...DEMO_CONFIG, simulation: { ...DEMO_CONFIG.simulation, seed: SEED } } as typeof DEMO_CONFIG;
+console.log(`\n# v1.3 经济观察｜种子 ${SEED}｜观察 ${MONTHS} 月｜当日检查点 ${CHECKPOINTS.join('/')}`);
+const simulation = Simulation.create(runtimeConfig);
 for (let month = 1; month <= MONTHS; month += 1) {
   simulation.tick();
   accumulateEquipmentFlow(simulation.state);
