@@ -433,16 +433,38 @@ describe('居民投资份额与股息归属（v1.2 §1）', () => {
 
     const moved = transferInvestorAssetsForMigration(world, from.id, to.id, moving, moving);
 
+    // v1.4 §3：迁移按净值计价——迁出者带走 valueMoved = 迁出份额 × 源城净值/份额，
+    // 目标城按自己的净值/份额换算份额（不再 1:1 增发，两城净值不同时不会无偿转移价值）。
+    const fromSharesTotal = round2(
+      householdGroups(world, from.id).reduce(
+        (sum, group) => sum + effectiveInvestorShares(group.investorLedger),
+        0,
+      ),
+    );
+    const toSharesTotal = round2(
+      householdGroups(world, to.id).reduce(
+        (sum, group) => sum + effectiveInvestorShares(group.investorLedger),
+        0,
+      ),
+    );
+    const fromNav = fromSharesTotal > 0 ? cityInvestorEquity(world, from.id) / fromSharesTotal : 0;
+    const toNav = toSharesTotal > 0 ? cityInvestorEquity(world, to.id) / toSharesTotal : 0;
+    const expectedValueMoved = round2(expectedMoved * fromNav);
+    const expectedDestShares = toNav > 0 ? round2(expectedValueMoved / toNav) : expectedValueMoved;
+
     // 迁出比例 = moving / 源群体人数：有效份额按比例迁移，账本合计守恒。
     expect(moved.effectiveSharesMoved).toBeCloseTo(expectedMoved, 2);
     expect(effectiveInvestorShares(source.investorLedger)).toBeCloseTo(
       sourceSharesBefore - expectedMoved,
       2,
     );
+    expect(moved.valueMoved).toBeCloseTo(expectedValueMoved, 2);
+    expect(moved.targetSharesAdded).toBeCloseTo(expectedDestShares, 2);
     expect(effectiveInvestorShares(destination.investorLedger)).toBeCloseTo(
-      destSharesBefore + expectedMoved,
+      destSharesBefore + expectedDestShares,
       2,
     );
+    expect(moved.targetSharesAdded * toNav).toBeCloseTo(expectedValueMoved, 1);
     // 累计投入按同一比例随人转移（不是新投入）。
     const expectedContributed = round2(400 * (moving / sourcePeople));
     expect(source.investorLedger.contributed).toBeCloseTo(400 - expectedContributed, 2);

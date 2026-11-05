@@ -138,7 +138,10 @@ describe('v1.0 创业评估：最小可行规模档位', () => {
     );
     const byUnits = new Map(assessment.scaleTiers.map((tier) => [tier.units, tier]));
     for (const tier of assessment.scaleTiers) {
-      expect(tier.equipmentCost).toBeCloseTo(unitPrice * tier.units, 2);
+      // v1.4：每档最小可行规模自带 1 台实物出资，只有超出部分需要市场真实购买。
+      expect(tier.equipmentCost).toBeCloseTo(unitPrice * tier.marketUnits, 2);
+      expect(tier.equipmentValue).toBeCloseTo(unitPrice * tier.units, 2);
+      expect(tier.inKindUnits).toBe(Math.min(1, tier.units));
       expect(tier.jobs).toBeGreaterThan(0);
       expect(tier.firstBatchInputCost).toBeGreaterThan(0);
       expect(tier.workingCapital).toBeGreaterThan(0);
@@ -174,7 +177,7 @@ describe('v1.0 创业评估：最小可行规模档位', () => {
 });
 
 describe('v1.0 创办失败：设备/资本/授信障碍', () => {
-  it('设备不可得时失败并记录 equipment 障碍，不产生资金/企业/股份副作用', () => {
+  it('设备市场不可得时以 1 台实物出资成立，不消耗市场库存/不产生现金流出', () => {
     const world = newWorld();
     makeRich(world);
     seedGap(world, 'lanport', 'food');
@@ -192,14 +195,19 @@ describe('v1.0 创办失败：设备/资本/授信障碍', () => {
       { cityId: 'lanport', recipeOutput: 'food', log } as never,
       DEMO_CONFIG,
     );
-    expect(result.ok).toBe(false);
-    expect(result.error ?? '').toContain('设备');
-    expect(world.companies.length).toBe(companiesBefore);
+    // v1.4 §4：本地/政府/跨城设备都不可得时，创办者从模拟范围外带入最小可行规模实物设备，
+    // 因此创办仍可成立；不消耗市场库存、不产生现金流出。
+    expect(result.ok, result.error).toBe(true);
+    const company = world.companies.find((entry) => entry.id === result.companyId)!;
+    expect(company.equipment.industry).toBe(1);
+    expect(company.initialEquipment?.source).toBe('founderInKind');
+    expect(world.companies.length).toBe(companiesBefore + 1);
+    expect(world.equipmentMarket.initialStock).toEqual({ farm: 0, industry: 0, energy: 0 });
     expect(totalOwnedCash(world)).toBeCloseTo(cashBefore, 2);
-    expect(world.lifecycle.foundings).toHaveLength(0);
+    expect(world.lifecycle.foundings).toHaveLength(1);
     const attempt = foundingAttempts(world).at(-1)!;
-    expect(attempt.outcome).toBe('rejected');
-    expect(attempt.obstacles.some((obstacle) => obstacle.kind === 'equipment')).toBe(true);
+    expect(attempt.outcome).toBe('founded');
+    expect(attempt.inKindUnits).toBe(1);
     expect(attempt.cityId).toBe('lanport');
     expect(attempt.output).toBe('food');
   });

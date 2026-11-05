@@ -15,6 +15,14 @@ import { Simulation } from '../src/simulation/core/simulation';
 import { parseSave, serializeSave } from '../src/simulation/core/save';
 import { checkInvariants } from '../src/simulation/core/invariants';
 import { equipmentCapacityFor } from '../src/simulation/equipment/equipment';
+import { cityInvestorEquity } from '../src/simulation/population/household-groups';
+import {
+  effectiveInvestorShares,
+  investorBondValue,
+} from '../src/simulation/population/household-investment';
+import { companySharePrice } from '../src/simulation/companies/company';
+import { cityMarketPrices } from '../src/simulation/markets/markets';
+import { round2 } from '../src/simulation/core/math';
 import { DEMO_CONFIG } from '../src/data/config';
 import type {
   HouseholdInvestorLedger,
@@ -64,10 +72,38 @@ function ledgerSnapshot(ledger?: HouseholdInvestorLedger) {
   return {
     contributed: ledger.contributed,
     shares: ledger.shares,
+    // v1.4 §3：有效份额 = shares + openingShares；往返后起始份额不得重算/漂移。
+    openingShares: ledger.openingShares ?? null,
+    effectiveShares: effectiveInvestorShares(ledger),
     dividends: ledger.dividends,
     lastContributionTick: ledger.lastContributionTick,
     lastDividendTick: ledger.lastDividendTick,
   };
+}
+
+/** 金额近似比较（分币级尾差容忍 0.11 元，覆盖多次 round2 的累计舍入）。 */
+function expectMoneyClose(actual: number, expected: number): void {
+  expect(Math.abs(actual - expected)).toBeLessThan(0.11);
+}
+
+/** 独立重算本城投资实体净资产 = 现金 + 持股市值 + 债券估值（v1.4 §3 口径）。 */
+function recomputeCityInvestorNetWorth(world: WorldState, cityId: string): number {
+  let cash = 0;
+  let holdings = 0;
+  let bonds = 0;
+  for (const investor of world.investors.filter((entry) => entry.cityId === cityId)) {
+    cash += investor.cash;
+    bonds += investorBondValue(world, investor.id);
+    for (const holding of world.securities.holdings) {
+      if (holding.holder.type !== 'investorGroup' || holding.holder.id !== investor.id) continue;
+      const company = world.companies.find((entry) => entry.id === holding.companyId);
+      if (!company) continue;
+      const city = world.cities.find((entry) => entry.id === company.cityId);
+      if (!city) continue;
+      holdings += holding.shares * companySharePrice(company, cityMarketPrices(city));
+    }
+  }
+  return round2(cash + holdings + bonds);
 }
 
 /**
@@ -325,5 +361,281 @@ describe('v1.2 旧 v0.9 真实档完整往返（读取 → 推进 1 月 → 保�
     ).toEqual(
       simulation.state.households.groups.map((group) => ledgerSnapshot(group.investorLedger)),
     );
+  });
+});
+
+// ---------------------------------------------------------------- v1.4 §7：新可选字段往返
+//
+// v1.4 新增字段全部是“可选、旧档缺省合法”：
+// - company.initialEquipment / lifecycle.foundings[].initialEquipment（§4 实物出资）
+// - policies.checkups（§5 AI 经济体检）与 active policy.tracking（§5 执行追踪）
+// - investorLedger.openingShares（v1.2 已有，v1.4 §3 起计入债券估值的无主净资产归属）
+// 旧 v0.9 真实档既没有这些字段，也不应被追溯补发/改写；推进一个月后新字段落盘，
+// 必须能完整往返且二次序列化逐字节稳定（归一化幂等、不重复记账）。
+describe('v1.4 旧 v0.9 真实档：新可选字段往返与归一化幂等', () => {
+  it('fixture 确无 v1.4 可选字段；读取不追溯补发、不改资金/债务/股份/人口/债券', () => {
+    // 先证明 fixture 是真实旧档：所有 v1.4 可选字段在原始 JSON 中都不存在。
+    for (const company of RAW_WORLD.companies as any[]) {
+      expect(company.initialEquipment).toBeUndefined();
+    }
+    expect(RAW_WORLD.policies.checkups).toBeUndefined();
+    for (const policy of RAW_WORLD.policies.active as any[]) {
+      expect(policy.tracking).toBeUndefined();
+    }
+    for (const founding of RAW_WORLD.lifecycle.foundings as any[]) {
+      expect(founding.initialEquipment).toBeUndefined();
+    }
+    for (const group of RAW_WORLD.households.groups as any[]) {
+      expect(group.investorLedger).toBeUndefined();
+    }
+
+    const world = loadLegacy();
+    const rawCompanies = RAW_WORLD.companies as any[];
+
+    // 旧档不乘人口、不追加开局企业。
+    expect(world.time.tick).toBe(RAW_WORLD.time.tick);
+    expect(world.cities.map((city) => [city.id, city.population.total])).toEqual(
+      RAW_WORLD.cities.map((city: any) => [city.id, city.population.total]),
+    );
+    expect(world.companies.map((company) => company.id)).toEqual(
+      rawCompanies.map((company: any) => company.id),
+    );
+    expect(sum(world.companies.map((company) => company.cash))).toBeCloseTo(
+      sum(rawCompanies.map((company) => company.cash)),
+      2,
+    );
+    expect(sum(world.companies.map((company) => company.debt))).toBeCloseTo(
+      sum(rawCompanies.map((company) => company.debt)),
+      2,
+    );
+    expect(sum(world.companies.map((company) => company.totalShares))).toBe(
+      sum(rawCompanies.map((company) => company.totalShares)),
+    );
+    expect(world.seed).toBe(RAW_WORLD.seed);
+    expect(world.rngState).toBe(RAW_WORLD.rngState);
+
+    // 读取不得“追溯补发”v1.4 字段：旧企业/旧创办记录没有实物出资，旧档也没有体检记录。
+    expect(world.companies.every((company) => company.initialEquipment === undefined)).toBe(true);
+    expect(world.policies.checkups ?? []).toHaveLength(0);
+    expect(world.policies.active.every((policy) => policy.tracking === undefined)).toBe(true);
+    expect(
+      world.lifecycle!.foundings.every((founding) => founding.initialEquipment === undefined),
+    ).toBe(true);
+
+    // 债券估值口径（v1.4 §3）：旧档 17 笔居民投资实体持债按“未到期本金 + 已计提未付利息”计入，
+    // 且只读聚合不产生现金/不改变持债状态。
+    const rawInvestorHoldings = (RAW_WORLD.bonds.holdings as any[]).filter(
+      (holding) => holding.holder.kind === 'investorGroup' && holding.status === 'active',
+    );
+    expect(rawInvestorHoldings.length).toBeGreaterThan(0);
+    const rawBondValue = sum(
+      rawInvestorHoldings.map(
+        (holding) => Math.max(0, holding.principal) + Math.max(0, holding.accruedInterest),
+      ),
+    );
+    const loadedBondValue = sum(
+      world.investors.map((investor) => investorBondValue(world, investor.id)),
+    );
+    expectMoneyClose(loadedBondValue, round2(rawBondValue));
+    expect(sum(world.investors.map((investor) => investor.cash))).toBeCloseTo(
+      sum((RAW_WORLD.investors as any[]).map((investor) => investor.cash)),
+      2,
+    );
+    expect(
+      world.bonds!.holdings.filter((holding) => holding.status === 'active'),
+    ).toHaveLength(
+      (RAW_WORLD.bonds.holdings as any[]).filter((holding) => holding.status === 'active').length,
+    );
+    expect(checkInvariants(world)).toEqual([]);
+  });
+
+  it('openingShares 一次性补齐且计入债券估值：有效份额 = 无主净资产，重复读取不重算', () => {
+    const world = loadLegacy();
+    for (const city of world.cities) {
+      const groups = world.households.groups.filter((group) => group.cityId === city.id);
+      expect(groups.length).toBeGreaterThan(0);
+      for (const group of groups) {
+        // 旧档读取后账本必须初始化，openingShares 显式写入（含 0），不能缺省。
+        expect(group.investorLedger).toBeDefined();
+        expect(group.investorLedger!.openingShares).toBeDefined();
+        expect(Number.isFinite(group.investorLedger!.openingShares)).toBe(true);
+        expect(group.investorLedger!.openingShares!).toBeGreaterThanOrEqual(0);
+      }
+      const contributed = round2(sum(groups.map((group) => Math.max(0, group.investorLedger?.shares ?? 0))));
+      const opening = round2(sum(groups.map((group) => Math.max(0, group.investorLedger?.openingShares ?? 0))));
+      const effective = round2(sum(groups.map((group) => effectiveInvestorShares(group.investorLedger))));
+      // 有效份额合计 = 历史投入份额 + 起始份额，且差额恰好是无主旧资产（含债券估值）。
+      expectMoneyClose(effective, round2(contributed + opening));
+      expectMoneyClose(opening, round2(Math.max(0, cityInvestorEquity(world, city.id) - contributed)));
+      // 独立重算净资产（现金 + 股票市值 + 债券估值），确保债券估值没有被漏计或重复计。
+      expectMoneyClose(cityInvestorEquity(world, city.id), recomputeCityInvestorNetWorth(world, city.id));
+    }
+
+    // 归一化幂等：保存 → 再读取 → 再保存，文本逐字节一致，openingShares/债券估值不漂移。
+    const firstText = serializeSave(world, SAVED_AT);
+    const second = parseOrThrow(firstText);
+    const secondText = serializeSave(second, SAVED_AT);
+    expect(secondText).toBe(firstText);
+    expect(second.households.groups.map((group) => ledgerSnapshot(group.investorLedger))).toEqual(
+      world.households.groups.map((group) => ledgerSnapshot(group.investorLedger)),
+    );
+    expect(second.investors.map((investor) => investorBondValue(second, investor.id))).toEqual(
+      world.investors.map((investor) => investorBondValue(world, investor.id)),
+    );
+    expect(checkInvariants(second)).toEqual([]);
+  });
+
+  it('推进 1 月：checkups/tracking/initialEquipment 落盘并可完整往返、二次序列化稳定', () => {
+    const world = loadLegacy();
+    const bondValueBefore = world.investors.map((investor) => investorBondValue(world, investor.id));
+
+    const simulation = new Simulation(world, DEMO_CONFIG);
+    const tickResult = simulation.tick();
+    expect(tickResult.ok, tickResult.ok ? '' : tickResult.error).toBe(true);
+    const advanced = simulation.state;
+    const tick = advanced.time.tick;
+    expect(tick).toBe(RAW_WORLD.time.tick + 1);
+    expect(checkInvariants(advanced)).toEqual([]);
+
+    // 1) §5 经济体检：本月每城一条，档位/预算/症状字段可核验。
+    const checkups = advanced.policies.checkups ?? [];
+    expect(checkups.length).toBeGreaterThanOrEqual(advanced.cities.length);
+    for (const city of advanced.cities) {
+      const checkup = checkups.find((entry) => entry.cityId === city.id && entry.tick === tick);
+      expect(checkup, `${city.id} 缺少本月体检`).toBeDefined();
+      expect(checkup!.laborForce).toBeGreaterThan(0);
+      expect(checkup!.unemploymentRate).toBeGreaterThanOrEqual(0);
+      expect(checkup!.unemploymentRate).toBeLessThanOrEqual(1);
+      expect(Number.isFinite(checkup!.budget)).toBe(true);
+      expect(checkup!.budget).toBeGreaterThanOrEqual(0);
+      expect(['normal', 'strained', 'severe', 'crisis']).toContain(checkup!.tier);
+      expect(checkup!.taxMonthsReal + checkup!.taxMonthsEstimated).toBe(12);
+    }
+
+    // 2) §5 执行追踪：本月结算过的在行政策留下 runs，记录金额不重复计支出。
+    const tracked = advanced.policies.active.filter((policy) => (policy.tracking?.runs.length ?? 0) > 0);
+    expect(tracked.length).toBeGreaterThan(0);
+    for (const policy of advanced.policies.active) {
+      const runs = policy.tracking?.runs ?? [];
+      for (const run of runs) {
+        expect(Number.isFinite(run.spent)).toBe(true);
+        expect(run.spent).toBeGreaterThanOrEqual(-0.01);
+        expect(run.spent).toBeLessThanOrEqual(policy.budget + 0.01);
+        expect(Number.isFinite(run.fiscalImpact)).toBe(true);
+        if (run.spent > 0.01) expect(run.fiscalImpact).toBeLessThanOrEqual(0);
+        expect(run.periodMonths).toBeGreaterThanOrEqual(1);
+      }
+      // 执行记录只做“归属”，不得比政策实际支出记更多（防重复记账/重复扣费）。
+      expect(sum(runs.map((run) => run.spent))).toBeLessThanOrEqual(policy.spent + 0.11);
+    }
+
+    // 3) §4 实物出资：本月新创办企业各 1 台、且只记一次。
+    const newFoundings = advanced.lifecycle!.foundings.filter((founding) => founding.tick === tick);
+    expect(newFoundings.length).toBeGreaterThan(0);
+    for (const founding of newFoundings) {
+      expect(founding.initialEquipment, `${founding.companyId} 缺少实物出资记录`).toBeDefined();
+      const grant = founding.initialEquipment!;
+      expect(grant.source).toBe('founderInKind');
+      expect(grant.units).toBeGreaterThanOrEqual(1);
+      expect(grant.valuation).toBeGreaterThan(0);
+      expect(grant.grantedTick).toBe(tick);
+      expect(grant.lockUntilTick).toBe(tick + 12);
+      const company = advanced.companies.find((entry) => entry.id === founding.companyId);
+      expect(company, `${founding.companyId} 创办后不存在`).toBeDefined();
+      // 实物出资只计一次：企业设备台数 ≥ 实物出资台数，产能按台数独立推导一致。
+      expect(company!.initialEquipment).toEqual(grant);
+      expect(company!.equipment[grant.kind]).toBeGreaterThanOrEqual(grant.units);
+      expect(company!.equipmentCapacity).toBeCloseTo(
+        equipmentCapacityFor(advanced, company!, DEMO_CONFIG),
+        2,
+      );
+    }
+    // 旧企业不因读取/推进被追溯补发实物出资（只有本月新创办企业带该字段）。
+    const newCompanyIds = new Set(newFoundings.map((founding) => founding.companyId));
+    for (const company of advanced.companies) {
+      if (company.initialEquipment) expect(newCompanyIds.has(company.id)).toBe(true);
+    }
+
+    // 4) 人口没有被推进再次乘 5；旧档投资份额与债券估值不变。
+    for (const city of advanced.cities) {
+      const raw = (RAW_WORLD.cities as any[]).find((entry) => entry.id === city.id)!;
+      expect(city.population.total).toBeGreaterThan(raw.population.total * 0.9);
+      expect(city.population.total).toBeLessThan(raw.population.total * 1.2);
+    }
+    // 迁移/人口变动只会在群体间转移有效份额（含 openingShares），不会产生负值或缺失账本。
+    for (const group of advanced.households.groups) {
+      expect(group.investorLedger).toBeDefined();
+      expect(group.investorLedger!.openingShares).toBeDefined();
+      expect(group.investorLedger!.openingShares!).toBeGreaterThanOrEqual(-0.01);
+      expect(Number.isFinite(group.investorLedger!.openingShares)).toBe(true);
+    }
+    // 债券估值只读聚合：每笔投资实体净资产仍等于“未到期本金 + 已计提未付利息”，不产生新债。
+    const rawActiveHoldings = advanced.bonds!.holdings.filter(
+      (holding) => holding.holder.kind === 'investorGroup' && holding.status === 'active',
+    );
+    const independentBondValue = round2(
+      sum(
+        rawActiveHoldings.map(
+          (holding) => Math.max(0, holding.principal) + Math.max(0, holding.accruedInterest),
+        ),
+      ),
+    );
+    expectMoneyClose(
+      sum(advanced.investors.map((investor) => investorBondValue(advanced, investor.id))),
+      independentBondValue,
+    );
+    for (const [index, value] of advanced.investors
+      .map((investor) => investorBondValue(advanced, investor.id))
+      .entries()) {
+      expect(value).toBeGreaterThanOrEqual(0);
+      expect(Number.isFinite(bondValueBefore[index])).toBe(true);
+    }
+
+    // 5) 保存 → 再读取：v1.4 新字段完整保留，结构/金额/债务/股份不重复变化。
+    const savedText = serializeSave(advanced, SAVED_AT);
+    const reloaded = parseOrThrow(savedText);
+    expect(reloaded.policies.checkups).toEqual(advanced.policies.checkups);
+    expect(
+      reloaded.policies.active.map((policy) => policy.tracking ?? null),
+    ).toEqual(advanced.policies.active.map((policy) => policy.tracking ?? null));
+    expect(
+      reloaded.companies
+        .filter((company) => company.initialEquipment)
+        .map((company) => [company.id, company.initialEquipment]),
+    ).toEqual(
+      advanced.companies
+        .filter((company) => company.initialEquipment)
+        .map((company) => [company.id, company.initialEquipment]),
+    );
+    expect(
+      reloaded.lifecycle!.foundings
+        .filter((founding) => founding.initialEquipment)
+        .map((founding) => [founding.companyId, founding.initialEquipment]),
+    ).toEqual(
+      advanced.lifecycle!.foundings
+        .filter((founding) => founding.initialEquipment)
+        .map((founding) => [founding.companyId, founding.initialEquipment]),
+    );
+    expect(reloaded.households.groups.map((group) => ledgerSnapshot(group.investorLedger))).toEqual(
+      advanced.households.groups.map((group) => ledgerSnapshot(group.investorLedger)),
+    );
+    expect(reloaded.investors.map((investor) => investorBondValue(reloaded, investor.id))).toEqual(
+      advanced.investors.map((investor) => investorBondValue(advanced, investor.id)),
+    );
+    expect(sum(reloaded.companies.map((company) => company.cash))).toBeCloseTo(
+      sum(advanced.companies.map((company) => company.cash)),
+      2,
+    );
+    expect(sum(reloaded.companies.map((company) => company.debt))).toBeCloseTo(
+      sum(advanced.companies.map((company) => company.debt)),
+      2,
+    );
+    expect(sum(reloaded.companies.map((company) => company.totalShares))).toBe(
+      sum(advanced.companies.map((company) => company.totalShares)),
+    );
+    expect(checkInvariants(reloaded)).toEqual([]);
+
+    // 6) 二次序列化逐字节稳定（归一化幂等，不重复补字段/重复迁移）。
+    expect(serializeSave(reloaded, SAVED_AT)).toBe(savedText);
   });
 });

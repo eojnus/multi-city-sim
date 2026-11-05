@@ -27,6 +27,7 @@ import { emptyInventoryCost } from '../src/simulation/finance/inventory-cost';
 import { runInputPurchasing, runProduction } from '../src/simulation/production/production';
 import { createWorldLedgers } from '../src/simulation/markets/markets';
 import { RECIPES } from '../src/data/demo-data';
+import { GOODS } from '../src/data/demo-data';
 
 const GRAIN_PER_FOOD =
   RECIPES.food.inputs.find((entry) => entry.good === 'grain')?.qty ?? 0.62;
@@ -272,5 +273,121 @@ describe('月内两轮采购+生产（v1.3 §4）', () => {
     expect(remoteLedger.intercityImported).toBeGreaterThan(0);
     expect(remoteLedger.intercityImported).toBeLessThanOrEqual(demandAfterRound1.remote + 0.05);
     expect(localLedger.sold + remoteLedger.intercityImported).toBeLessThanOrEqual(1000 + 0.05);
+  });
+
+  it('整月 tick：轮次 1 与 2 的已记需求完全一致（需求只在第 1 轮记账，不重复）', () => {
+    const one = Simulation.create(configWithRounds(1));
+    const two = Simulation.create(configWithRounds(2));
+    expect(one.tick().ok).toBe(true);
+    expect(two.tick().ok).toBe(true);
+
+    const differences: string[] = [];
+    for (const cityOne of one.state.cities) {
+      const cityTwo = two.state.cities.find((city) => city.id === cityOne.id)!;
+      for (const good of GOODS) {
+        const a = cityOne.market[good.id];
+        const b = cityTwo.market[good.id];
+        const fields: [string, number, number][] = [
+          ['producerRequired', a.producerRequired, b.producerRequired],
+          ['producerDemand', a.producerDemand, b.producerDemand],
+          ['unmetFunding', a.unmetFunding, b.unmetFunding],
+        ];
+        for (const [field, left, right] of fields) {
+          if (Math.abs(left - right) > 0.01) {
+            differences.push(`${cityOne.id}/${good.id}/${field}: ${left} vs ${right}`);
+          }
+        }
+        // 两轮补料只会把第 1 轮缺货补上，不会增加或重复记录未满足需求。
+        expect(b.unmetDemand).toBeLessThanOrEqual(a.unmetDemand + 0.05);
+      }
+    }
+    expect(differences).toEqual([]);
+  });
+
+  it('整月 tick：账本守恒（不超卖、成交不超需求、生产者口径 requirement 恒等式）', () => {
+    for (const rounds of [1, 2]) {
+      const sim = Simulation.create(configWithRounds(rounds));
+      expect(sim.tick().ok).toBe(true);
+      const producerGoods = new Set(
+        GOODS.filter((good) => good.category === 'producer').map((good) => good.id),
+      );
+      for (const city of sim.state.cities) {
+        for (const good of GOODS) {
+          const market = city.market[good.id];
+          const label = `${city.id}/${good.id}（${rounds} 轮）`;
+          // 不超卖：本地成交不超过本地供给 + 跨城进口；成交不超过需求。
+          expect(market.sold).toBeLessThanOrEqual(
+            market.supply + market.intercityImported + 0.05,
+          );
+          expect(market.sold + market.intercityImported).toBeLessThanOrEqual(
+            market.demand + 0.05,
+          );
+          expect(market.unmetDemand).toBeGreaterThanOrEqual(-0.01);
+          // 第 2 轮本地产出的成交会把 supply 兜底到 sold，保证上面的不变量恒成立。
+          if (market.sold > 0) expect(market.supply).toBeGreaterThan(0);
+          // 生产者商品：计划需求 − 实际成交（本地 + 跨城）= 缺货 + 资金缺口，本地/跨城同口径。
+          if (producerGoods.has(good.id)) {
+            const residual = round2(
+              market.producerRequired - market.sold - market.intercityImported,
+            );
+            const unmet = round2(market.unmetDemand + market.unmetFunding);
+            expect(
+              Math.abs(residual - unmet),
+              `${label}: ${residual} vs ${unmet}`,
+            ).toBeLessThanOrEqual(0.06);
+          }
+        }
+      }
+    }
+  });
+
+  it('第 2 轮成交以第 1 轮未满足额封顶，本地成交把 supply 兜底到 sold（不超卖）', () => {
+    const world = newWorld();
+    isolate(world);
+    const seller = companyIn(world, 'ironvale', 'grain');
+    const buyer = companyIn(world, 'ironvale', 'food');
+    const tick = world.time.tick;
+    // 月初粮食可售 500（第 1 轮卖完），第 1 轮后才会“多出”本月新可供的 100。
+    seller.inventory.grain = 500;
+    seller.inventoryCost = emptyInventoryCost();
+    seller.inventoryCost.grain = 0;
+    seller.productionPlan = null; // 卖方本月不生产，只卖期初库存
+    seller.cash = 1_000_000;
+    setCompanyEmployees(seller, 0);
+    buyer.productionPlan = planOf(tick, 1000); // 需要粮食 620
+    buyer.cash = 10_000_000;
+    setCompanyEmployees(buyer, 2000);
+    const ledgers = createWorldLedgers(world);
+    const grainLedger = ledgers.ironvale!.grain;
+    expect(grainLedger.supply).toBeCloseTo(500, 2);
+
+    runInputPurchasing(world, ledgers, DEMO_CONFIG, [], { round: 1 });
+    runProduction(world, ledgers, DEMO_CONFIG);
+    expect(grainLedger.sold).toBeCloseTo(500, 2);
+    const unmetAfterRound1 = round2(grainLedger.unmetDemand);
+    expect(unmetAfterRound1).toBeGreaterThan(0);
+
+    // 模拟“第 2 轮可供库存未计入月初供给快照”：补入 100 粮食并把 supply 视为 0。
+    seller.inventory.grain = 100;
+    grainLedger.supply = 0;
+    const soldBefore = grainLedger.sold;
+    runInputPurchasing(world, ledgers, DEMO_CONFIG, [], { round: 2 });
+
+    const addedSold = round2(grainLedger.sold - soldBefore);
+    expect(addedSold).toBeGreaterThan(0);
+    // 成交以第 1 轮已记未满足额为上限。
+    expect(addedSold).toBeLessThanOrEqual(unmetAfterRound1 + 0.05);
+    // 第 2 轮成交把 supply 兜底到 sold，不变量 sold ≤ supply + intercityImported 仍成立。
+    expect(grainLedger.supply).toBeGreaterThanOrEqual(grainLedger.sold - 0.01);
+    expect(grainLedger.sold).toBeLessThanOrEqual(
+      grainLedger.supply + grainLedger.intercityImported + 0.05,
+    );
+    // 缺货只在第 1 轮记账，第 2 轮按成交冲减，不会被补成负数。
+    expect(grainLedger.unmetDemand).toBeCloseTo(unmetAfterRound1 - addedSold, 1);
+    expect(grainLedger.unmetDemand).toBeGreaterThanOrEqual(-0.01);
+    // 生产者口径恒等式仍成立（第 2 轮不新增需求）。
+    expect(
+      round2(grainLedger.producerRequired - grainLedger.sold - grainLedger.intercityImported),
+    ).toBeCloseTo(round2(grainLedger.unmetDemand + grainLedger.unmetFunding), 1);
   });
 });

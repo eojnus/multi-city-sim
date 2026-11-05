@@ -8,6 +8,7 @@ import {
   FOUNDING_MIN_WAGE_RESERVE_MONTHS,
   FOUNDING_SCALE_UNITS,
   assessFounding,
+  companyOperatingReserve,
   foundingAttempts,
 } from '../src/simulation/companies/founding';
 import {
@@ -222,7 +223,7 @@ describe('v1.1 周转金：2 个月工资 + 1 个月计划原料', () => {
 });
 
 describe('v1.1 创办失败回滚与守恒', () => {
-  it('设备不可得时不创办、不产生贷款/扣款/设备/股份副作用', () => {
+  it('设备市场不可得时以 1 台实物出资成立，不产生虚假贷款/设备库存/股份副作用', () => {
     const world = newWorld();
     makeRich(world);
     seedGap(world, 'lanport', 'food');
@@ -235,24 +236,26 @@ describe('v1.1 创办失败回滚与守恒', () => {
     const companiesBefore = world.companies.length;
     const cashBefore = totalOwnedCash(world);
     const loansBefore = world.banking.loans.length;
-    const holdingsBefore = world.securities.holdings.length;
 
     const result = foundCompany(
       world,
       { cityId: 'lanport', recipeOutput: 'food', log: [] } as never,
       DEMO_CONFIG,
     );
-    expect(result.ok).toBe(false);
-    expect(result.error ?? '').toContain('设备');
-    expect(world.companies).toHaveLength(companiesBefore);
+    // v1.4 §4：市场设备不可得时，创办者从模拟范围外带入 1 台最小可行规模实物设备。
+    expect(result.ok, result.error).toBe(true);
+    const company = world.companies.find((entry) => entry.id === result.companyId)!;
+    expect(company.equipment.industry).toBe(1);
+    expect(company.initialEquipment?.source).toBe('founderInKind');
+    expect(company.lastMonth.equipmentPurchased ?? 0).toBe(0);
+    expect(world.companies).toHaveLength(companiesBefore + 1);
     expect(totalOwnedCash(world) - outstandingLoans(world)).toBeCloseTo(cashBefore, 2);
     expect(world.banking.loans).toHaveLength(loansBefore);
-    expect(world.securities.holdings).toHaveLength(holdingsBefore);
-    expect(world.lifecycle.foundings).toHaveLength(0);
+    expect(world.lifecycle.foundings).toHaveLength(1);
     const attempt = foundingAttempts(world).at(-1)!;
-    expect(attempt.outcome).toBe('rejected');
-    expect(attempt.obstacles.some((obstacle) => obstacle.kind === 'equipment')).toBe(true);
-    expect(attempt.companyId).toBeUndefined();
+    expect(attempt.outcome).toBe('founded');
+    expect(attempt.inKindUnits).toBe(1);
+    expect(attempt.companyId).toBe(result.companyId);
   });
 });
 
@@ -315,7 +318,7 @@ describe('v1.2 每城每月 100 家与 160 上限', () => {
 });
 
 describe('v1.2 成立后首月资金可持续（不被在营企业抽干）', () => {
-  it('自动创办不再用在营企业出资；新企业首月不欠薪、保留周转现金', () => {
+  it('在营企业可作为出资人，但出资后仍保留 2 个月工资+1 月原料+本息缓冲；新企业首月不欠薪', () => {
     const sim = Simulation.create(DEMO_CONFIG);
     const world = sim.state;
     makeRich(world);
@@ -324,12 +327,16 @@ describe('v1.2 成立后首月资金可持续（不被在营企业抽干）', ()
     const cashBefore = new Map(existing.map((company) => [company.id, company.cash]));
     const created = maybeFoundCompanies(world, DEMO_CONFIG, []);
     expect(created.length).toBeGreaterThan(0);
-    // 1) 在营企业的现金不能被本轮创办抽走（旧缺陷：把在营企业当出资人，整笔现金转给新企业）。
+    // 1) 在营企业可以出资（v1.3 起恢复），但出资后必须保留自身运转缓冲，
+    //    不能出现旧缺陷里的 A→B→C 连锁抽血。
     for (const company of existing) {
-      // 设备厂卖出设备会增加现金，但任何在营企业都不应因“被当作出资人”而减少现金。
-      expect(company.cash, company.id).toBeGreaterThanOrEqual(cashBefore.get(company.id)! - 0.01);
+      const city = world.cities.find((entry) => entry.id === company.cityId)!;
+      const reserve = companyOperatingReserve(world, city, company, DEMO_CONFIG);
+      expect(company.cash, company.id).toBeGreaterThanOrEqual(
+        Math.min(cashBefore.get(company.id)!, reserve) - 0.01,
+      );
     }
-    // 2) 新企业真实买到设备，且成立时保留周转金。
+    // 2) 新企业真实拥有设备（实物出资或市场购买），且成立时保留周转金。
     const newCompanies = created.map((id) => world.companies.find((company) => company.id === id)!);
     for (const company of newCompanies) {
       expect(company.equipmentCapacity, company.id).toBeGreaterThan(0);

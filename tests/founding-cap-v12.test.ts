@@ -123,7 +123,8 @@ describe('v1.2 自动创办上限与资源使用', () => {
       expect(holdingShares).toBeCloseTo(1_000_000, 0);
     }
 
-    // 设备库存没有被重复记账：新企业设备台数 = 政府库存减少量 + 从既有设备企业库存买走的台数。
+    // 设备库存没有被重复记账：新企业“市场购买”的设备台数 = 政府库存减少量 + 从既有设备企业库存买走的台数。
+    // v1.4：每家企业另有 1 台创办者从模拟范围外带入的实物出资，不消耗任何市场/政府库存。
     const governmentUsed = KINDS.reduce(
       (sum, kind) => sum + (stockBefore[kind] - world.equipmentMarket.initialStock[kind]),
       0,
@@ -132,11 +133,17 @@ describe('v1.2 自动创办上限与资源使用', () => {
       const company = world.companies.find((entry) => entry.id === companyId)!;
       return sum + equipmentUnitsOf(company);
     }, 0);
+    const newInKindUnits = created.reduce((sum, companyId) => {
+      const company = world.companies.find((entry) => entry.id === companyId)!;
+      return sum + (company.initialEquipment?.units ?? 0);
+    }, 0);
     const inventoryAfter = world.companies.reduce(
       (sum, company) => sum + equipmentGoodIds.reduce((inner, good) => inner + company.inventory[good], 0),
       0,
     );
-    expect(governmentUsed + (inventoryBefore - inventoryAfter)).toBe(newEquipmentUnits);
+    expect(governmentUsed + (inventoryBefore - inventoryAfter)).toBe(
+      newEquipmentUnits - newInKindUnits,
+    );
     expect(world.equipmentMarket.initialStock.farm).toBeGreaterThanOrEqual(0);
 
     // 劳动力不重复分配：每城所有企业岗位之和不超过可用劳动力。

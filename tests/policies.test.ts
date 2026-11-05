@@ -52,7 +52,12 @@ describe('15 项政策逐项验证：起始条件 → 财政变化 → 实际模
     const policy = activePolicy(world, city.id, 'hiringSubsidy')!;
     expect(hiringSubsidyPerHire(world, city.id, company.wageRate, DEMO_CONFIG)).toBeGreaterThan(0);
 
+    // v1.4 §五：招聘补贴只按真实净新增岗位发放。启动时记录在岗基线；
+    // 首月要模拟“真实入职”（企业 employees 实际增加）才能领取补贴。
+    const baselineBefore = company.employees;
+    expect(policy.tracking?.hiringBaseline?.[company.id]).toBe(baselineBefore);
     const cashBefore = company.cash;
+    setCompanyEmployees(company, company.employees + 5);
     settlePolicies(world, DEMO_CONFIG, {
       hiresByCompany: { [company.id]: 5 },
       log: [],
@@ -62,6 +67,8 @@ describe('15 项政策逐项验证：起始条件 → 财政变化 → 实际模
     expect(company.cash).toBeGreaterThan(cashBefore);
     expect(city.treasury).toBeLessThan(treasuryBefore);
     expect(policySpendEntries(world, city.id)).toHaveLength(1);
+    expect(policy.tracking?.subsidisedJobs?.[company.id]).toBe(5);
+    expect(policy.tracking?.runs.at(-1)?.jobsEffect).toBe(5);
 
     // 企业 AI：相同企业，有补贴时因现金月数改善而保留更多岗位。
     const plain = richWorld();
@@ -211,19 +218,31 @@ describe('15 项政策逐项验证：起始条件 → 财政变化 → 实际模
     expect(city.workforce.trainedTotal).toBeGreaterThan(0);
   });
 
-  it('公共岗位计划：财政设立岗位并真实从失业人口招聘', () => {
+  it('公共岗位计划：财政设立岗位并真实从失业人口招聘（只预留、不预扣）', () => {
     const world = richWorld();
     const city = world.cities.find((entry) => entry.id === 'ironvale')!;
     const jobsBefore = city.publicSector.jobs;
     const unemployedBefore = city.population.unemployed;
+    const treasuryBefore = city.treasury;
     expect(startPolicy(world, city.id, 'publicJobs', DEMO_CONFIG).ok).toBe(true);
     const policy = activePolicy(world, city.id, 'publicJobs')!;
     expect(policy.effects.jobsCreated).toBeGreaterThan(0);
     expect(city.publicSector.jobs).toBe(jobsBefore + (policy.effects.jobsCreated ?? 0));
-    expect(city.treasury).toBeLessThan(80_000_000);
+    // v1.4 §五：启动只记录预算预留额（不预扣财政）；工资由财政公共工资科目按月真实支付。
+    expect(policy.effects.reservedWages).toBeGreaterThan(0);
+    expect(policy.tracking?.publicWorksJobs).toBe(policy.effects.jobsCreated);
+    expect(policy.tracking?.publicWorksFunding).toContain('publicWages');
+    expect(city.treasury).toBe(treasuryBefore);
+    expect(policy.spent).toBe(0);
     const labor = reconcileLabor(world, DEMO_CONFIG, []);
     expect(labor.publicHires).toBeGreaterThan(0);
     expect(city.population.unemployed).toBeLessThan(unemployedBefore);
+    // 月度执行只把“真实在岗工资”计入政策预算归属，不再次扣财政（否则与 publicWages 重复扣费）。
+    settlePolicies(world, DEMO_CONFIG, { hiresByCompany: labor.hiresByCompany, log: [] });
+    expect(policy.effects.publicWagePaid).toBeGreaterThan(0);
+    expect(policy.spent).toBe(policy.effects.publicWagePaid);
+    expect(policy.spent).toBeLessThanOrEqual(policy.budget);
+    expect(city.treasury).toBe(treasuryBefore);
   });
 
   it('初创扶持：降低创办资本并由财政注入启动资金', () => {

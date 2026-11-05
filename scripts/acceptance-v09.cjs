@@ -5,7 +5,7 @@
  * 唯一的人工构造：把两家企业的经营者临时设为玩家（`governance.controls`），
  * 以便在界面上真实执行设备买卖——这是“玩家经营权限”的测试前置，不改变任何经济数值。
  *
- * 证据截图与 JSON 同时写入 artifacts/（gitignore）与 docs/evidence_v1.3/（入仓）。
+ * 证据截图与 JSON 同时写入 artifacts/（gitignore）与 docs/evidence_v1.4/（入仓）。
  *
  * 用法：Xvfb :99 & DISPLAY=:99 node_modules/electron/dist/electron --no-sandbox \
  *        --disable-dev-shm-usage --enable-unsafe-swiftshader scripts/acceptance-v09.cjs
@@ -17,7 +17,7 @@ const { registerSaveHandlers } = require('../dist/electron/saveIpc.js');
 
 const root = path.resolve(__dirname, '..');
 const artifacts = path.join(root, 'artifacts', 'acceptance-v09');
-const evidence = path.join(root, 'docs', 'evidence_v1.3');
+const evidence = path.join(root, 'docs', 'evidence_v1.4');
 fs.mkdirSync(artifacts, { recursive: true });
 fs.mkdirSync(evidence, { recursive: true });
 const userData = path.join(artifacts, 'electron-user-data');
@@ -194,6 +194,8 @@ app.whenReady().then(async () => {
       return {
         structure: has('population-structure'),
         demandPanel: has('population-demand-vs-trade'),
+        investorSection: has('investor-section'),
+        investorText: (document.querySelector('[data-testid="investor-section"]')?.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 240),
         demand: view.demand,
         population: { total: view.population.total, employed: view.population.employed, unemployed: view.population.unemployed, nonLabor: view.population.nonLabor, laborForce: view.population.laborForce },
         text: (document.querySelector('[data-testid="population-demand-vs-trade"]')?.textContent ?? '').replace(/\\s+/g, ' ').trim().slice(0, 260),
@@ -204,6 +206,11 @@ app.whenReady().then(async () => {
       && demand.demand.consumption >= 0
       && demand.demand.consumption < demand.demand.desiredConsumption * 0.6;
     check('人口标签显示就业结构与「需求 vs 成交」，t0 成交显著低于需求', demandOk, JSON.stringify({ demand: demand.demand, population: demand.population }));
+    // v1.4 §3.4：居民投资面板显示全部有效份额（含 openingShares）与净资产口径。
+    const investorOk = demand.investorSection
+      && /有效份额/.test(demand.investorText)
+      && /净资产/.test(demand.investorText);
+    check('人口标签显示居民投资面板：有效份额/净资产可见且与报告同口径', investorOk, JSON.stringify({ section: demand.investorSection, text: demand.investorText }));
     await capture(win, 'v09-01-population-demand-trade.png');
 
     // ---- 3. 企业「经营」标签出现设备与生产计划 ----
@@ -218,6 +225,8 @@ app.whenReady().then(async () => {
       return {
         section: Boolean(document.querySelector('[data-testid="company-equipment"]')),
         plan: Boolean(document.querySelector('[data-testid="equipment-plan"]')),
+        initialSection: Boolean(document.querySelector('[data-testid="equipment-initial"]')),
+        initialText: (document.querySelector('[data-testid="equipment-initial"]')?.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 240),
         rows: view.equipmentRows.map((row) => ({ kind: row.kind, units: row.units, capacity: row.capacity, marketPrice: row.marketPrice, governmentStock: row.governmentStock })),
         planView: view.plan ? { plannedOutput: view.plan.plannedOutput, equipmentLimit: view.plan.equipmentLimit, laborLimit: view.plan.laborLimit, reasons: view.plan.reasons } : null,
         salesHistory: view.salesHistory,
@@ -228,7 +237,37 @@ app.whenReady().then(async () => {
       && equipmentPanel.rows.some((row) => row.units > 0)
       && equipmentPanel.planView !== null && equipmentPanel.planView.plannedOutput > 0;
     check('企业「经营」显示设备表与生产计划（设备/劳动/计划/实际分离）', equipmentPanelOk, JSON.stringify(equipmentPanel));
+    // v1.4 §4：初始实物出资来源/估值/锁定期在设备面板可观察（无出资时如实标注市场采购）。
+    const initialOk = equipmentPanel.initialSection
+      && /实物出资|市场采购/.test(equipmentPanel.initialText);
+    check('企业设备面板显示初始设备来源（模拟范围外实物出资/市场采购）与锁定期', initialOk, JSON.stringify({ section: equipmentPanel.initialSection, text: equipmentPanel.initialText }));
     await capture(win, 'v09-02-company-equipment.png');
+
+    // ---- 3b. v1.4 政府/政策面板：AI 经济体检或玩家市长不代选政策 ----
+    step('3b. v1.4 政府/政策面板：AI 经济体检与政策执行可观察');
+    // 步骤 3 打开的是企业详情，右栏此时是企业标签；先关闭企业聚焦城市标签才出现。
+    await click(win, '[data-action="close-company"]');
+    await sleep(500);
+    await enterCity(win, 'lanport');
+    await clickTab(win, 'government');
+    await waitFor(win, `document.querySelector('[data-testid="ai-government"]') || document.querySelector('[data-testid="ai-mayor-status"]') || document.querySelector('[data-testid="fiscal-restricted"]')`, 8000);
+    await sleep(500);
+    const govPanel = await read(win, `(() => {
+      const text = (sel) => (document.querySelector(sel)?.textContent ?? '').replace(/\\s+/g, ' ').trim().slice(0, 360);
+      const s = window.__lanwan.store;
+      return {
+        ai: Boolean(document.querySelector('[data-testid="ai-government"]')),
+        aiText: text('[data-testid="ai-government"]'),
+        mayor: Boolean(document.querySelector('[data-testid="ai-mayor-status"]')),
+        mayorText: text('[data-testid="ai-mayor-status"]'),
+        checkup: (s.world.policies.checkups ?? []).filter((c) => c.cityId === 'lanport').slice(-1)[0] ?? null,
+      };
+    })()`);
+    const govOk = govPanel.mayor
+      ? /不代选/.test(govPanel.mayorText)
+      : govPanel.ai && /失业档位/.test(govPanel.aiText) && /预算/.test(govPanel.aiText) && govPanel.checkup !== null;
+    check('政府面板显示 AI 经济体检/玩家市长不代选政策，数值来自真实体检快照', govOk, JSON.stringify({ ai: govPanel.ai, mayor: govPanel.mayor, aiText: govPanel.aiText, mayorText: govPanel.mayorText }));
+    await capture(win, 'v14-01-gov-ai.png');
 
     // ---- 4. 玩家经营前置（唯一构造）：设置两家企业的经营者为玩家 ----
     step('4. 玩家经营前置（唯一构造）：设置两家企业的经营者为玩家');

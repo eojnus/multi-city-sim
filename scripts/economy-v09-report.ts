@@ -19,6 +19,8 @@ import {
 import { equipmentUnits } from '../src/simulation/equipment/equipment';
 import { GOODS } from '../src/data/demo-data';
 import { foundingAttempts, foundingAttemptsTruncated } from '../src/simulation/companies/founding';
+import { investorFundingReport } from '../src/simulation/investors/investors';
+import { policyName } from '../src/simulation/policies/definitions';
 
 function argNumber(flag: string, fallback: number): number {
   const raw = process.argv.find((arg) => arg.startsWith(`${flag}=`));
@@ -53,6 +55,11 @@ function num(value: number, digits = 0): string {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   });
+}
+
+/** 金额/份额口径统一四舍五入到分（与 simulation round2 一致）。 */
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
 }
 
 const MONTHS = argNumber('--months', 72);
@@ -124,12 +131,91 @@ function investorEquityStats(world: WorldState, cityId: string) {
       zeroPeopleShares += owned;
     }
   }
-  const entityCash = world.investors
-    .filter((investor) => investor.cityId === cityId)
-    .reduce((sum, investor) => sum + investor.cash, 0);
-  return { contributed, opening, holders, groups: groups.length, zeroPeopleWithShares, zeroPeopleShares, entityCash };
+  // v1.4 §3.2/§3.4：净资产 = 实体现金 + 股票市值 + 政府债券估值（本金 + 已计提利息）；
+  // 份额一律用有效份额（shares + openingShares），与分红/财富归属口径一致。
+  const report = investorFundingReport(world).find((entry) => entry.cityId === cityId);
+  const entityCash = round2(report?.investorCash ?? 0);
+  const netWorth = round2(report?.investorNetWorth ?? 0);
+  const bondsValue = round2((report?.groups ?? []).reduce((sum, group) => sum + group.bondsValue, 0));
+  const totalShares = round2(
+    (report?.householdShares ?? []).reduce((sum, share) => sum + share.effectiveShares, 0),
+  );
+  const navPerShare = totalShares > 0 ? round2(netWorth / totalShares) : 0;
+  return {
+    contributed,
+    opening,
+    holders,
+    groups: groups.length,
+    zeroPeopleWithShares,
+    zeroPeopleShares,
+    entityCash,
+    netWorth,
+    bondsValue,
+    totalShares,
+    navPerShare,
+  };
 }
 
+/** v1.4 §4：初始实物设备（模拟范围外实物出资）现状与本城真实设备采购。 */
+function initialEquipmentStats(world: WorldState, cityId: string) {
+  const companies = world.companies.filter((company) => company.cityId === cityId);
+  const kindUnits: Record<string, number> = { farm: 0, industry: 0, energy: 0 };
+  let grants = 0;
+  let units = 0;
+  let valuation = 0;
+  let locked = 0;
+  let grantedThisTick = 0;
+  let purchasedThisTick = 0;
+  for (const company of companies) {
+    purchasedThisTick += Math.max(0, company.lastMonth.equipmentPurchased ?? 0);
+    const grant = company.initialEquipment;
+    if (!grant) continue;
+    grants += 1;
+    units += grant.units;
+    valuation += grant.valuation;
+    kindUnits[grant.kind] = (kindUnits[grant.kind] ?? 0) + grant.units;
+    if (world.time.tick < grant.lockUntilTick) locked += 1;
+    if (grant.grantedTick === world.time.tick) grantedThisTick += 1;
+  }
+  return { grants, units, valuation: round2(valuation), locked, grantedThisTick, purchasedThisTick: round2(purchasedThisTick), kindUnits };
+}
+
+/** v1.4 §5：AI 政府本月经济体检与政策执行（预算/支出/受益/就业效果/债务预警）。 */
+function aiPolicyStats(world: WorldState, cityId: string) {
+  const checkups = (world.policies.checkups ?? []).filter((checkup) => checkup.cityId === cityId);
+  let latest = checkups[0];
+  for (const checkup of checkups) if (!latest || checkup.tick > latest.tick) latest = checkup;
+  const active = world.policies.active.filter((policy) => policy.cityId === cityId);
+  let spentThisTick = 0;
+  let beneficiaries = 0;
+  let jobsEffect = 0;
+  let runsThisTick = 0;
+  const reasons = new Set<string>();
+  for (const policy of active) {
+    reasons.add(policy.reason ?? '');
+    for (const run of policy.tracking?.runs ?? []) {
+      if (run.tick !== world.time.tick) continue;
+      spentThisTick += run.spent;
+      beneficiaries += run.beneficiaries;
+      jobsEffect += run.jobsEffect;
+      runsThisTick += 1;
+    }
+  }
+  const decisions = active
+    .filter((policy) => policy.policyId !== 'taxAdjustment' && policy.policyId !== 'transportInvestment')
+    .map((policy) => `${policyName(policy.policyId)}(预算 ${round2(policy.budget).toFixed(0)}/已支 ${round2(policy.spent).toFixed(0)})`)
+    .join('、');
+  return {
+    latest,
+    activeCount: active.length,
+    spentThisTick: round2(spentThisTick),
+    beneficiaries,
+    jobsEffect,
+    runsThisTick,
+    decisions,
+    reasons: [...reasons].filter(Boolean).slice(-3),
+  };
+}
 function unemployedConsumption(world: WorldState, cityId: string) {
   const groups = world.households.groups.filter(
     (group) => group.cityId === cityId && group.occupation === 'unemployed',
@@ -220,9 +306,14 @@ function governmentFiscalDetail(world: WorldState, cityId: string) {
     entries: entries.length,
     limit,
     truncated: entries.length >= limit,
+    incomeTax: sum(['incomeTax']),
+    corporateTax: sum(['corporateTax']),
+    consumptionTax: sum(['consumptionTax']),
+    dividendTax: sum(['dividendTax']),
     tax:
       sum(['incomeTax', 'corporateTax', 'consumptionTax', 'dividendTax']),
     transportBonus: sum(['transportTaxBonus']),
+    transportLoss: sum(['transportTaxLoss']),
     publicWages: sum(['publicWages']),
     benefits: sum(['benefits']),
     policySpending: sum(['policySpending', 'policyTransfer']),
@@ -233,6 +324,9 @@ function governmentFiscalDetail(world: WorldState, cityId: string) {
     bondService: sum(['bondInterest', 'bondPrincipal']),
     bankAdvance: sum(['bankAdvance']),
     writtenOff: sum(['debtWriteOff', 'debtForgiven']),
+    // v1.4 §6.5：其余财政收支（清算收益/股息收入/选举费用），单列避免遗漏。
+    otherIncome: sum(['liquidationProceeds', 'dividendIncome']),
+    electionFee: sum(['electionFee']),
   };
   return result;
 }
@@ -265,11 +359,59 @@ function bankruptcyHistory(city: City) {
   };
 }
 
+/**
+ * v1.4 §6.4：本月跨城贸易（关键商品）与运输约束。
+ * 只读取 world.lastTick.tradeFlows（当月成交记录），不把保留窗口当成全期累计。
+ */
+function intercityTradeThisTick(world: WorldState, cityId: string) {
+  const keyGoods = new Set([
+    'food',
+    'grain',
+    'energy',
+    'farmEquipment',
+    'industryEquipment',
+    'energyEquipment',
+  ]);
+  const flows = world.lastTick.tradeFlows.filter(
+    (flow) =>
+      keyGoods.has(flow.good) && (flow.fromCityId === cityId || flow.toCityId === cityId),
+  );
+  const imports = flows.filter((flow) => flow.toCityId === cityId);
+  const exports = flows.filter((flow) => flow.fromCityId === cityId);
+  const byGood = (rows: typeof flows) => {
+    const map = new Map<string, { qty: number; value: number }>();
+    for (const flow of rows) {
+      const current = map.get(flow.good) ?? { qty: 0, value: 0 };
+      current.qty += flow.qty;
+      current.value += flow.value;
+      map.set(flow.good, current);
+    }
+    return [...map.entries()]
+      .sort((a, b) => b[1].value - a[1].value)
+      .map(([good, total]) => `${good} ${num(total.qty, 1)} 件/¥${num(total.value, 1)}`);
+  };
+  // v1.4：运输是 WorldState 全局状态（world.transport），不是 city 字段；城内行按 cityId 过滤。
+  const intracity = world.transport.lastMonth.intracity.find((row) => row.cityId === cityId);
+  const corridorPenalty = world.transport.lastMonth.penaltyRate ?? 0;
+  return {
+    importQty: imports.reduce((total, flow) => total + flow.qty, 0),
+    importValue: imports.reduce((total, flow) => total + flow.value, 0),
+    exportQty: exports.reduce((total, flow) => total + flow.qty, 0),
+    exportValue: exports.reduce((total, flow) => total + flow.value, 0),
+    importGoods: byGood(imports),
+    exportGoods: byGood(exports),
+    flowCount: flows.length,
+    deliveryEfficiency: intracity?.deliveryEfficiency ?? null,
+    corridorPenalty,
+  };
+}
+
 /** 居民消费四层口径（每城）：期望成本 / 成交 / 资金不足缺口 / 预算未形成需求。 */
 function cityConsumption(world: WorldState, cityId: string) {
   const groups = world.households.groups.filter((group) => group.cityId === cityId);
   const sum = (pick: (group: (typeof groups)[number]) => number) =>
     groups.reduce((total, group) => total + Math.max(0, pick(group)), 0);
+  const foodGood = GOODS.find((good) => good.id === 'food');
   const desiredCost = sum((group) => group.lastMonth.desiredConsumption);
   const consumption = sum((group) => group.lastMonth.consumption);
   const unmetFunding = sum((group) => group.lastMonth.unmetFunding ?? 0);
@@ -277,22 +419,27 @@ function cityConsumption(world: WorldState, cityId: string) {
   const loanDrawn = sum((group) => group.lastMonth.loanDrawn ?? 0);
   const depositWithdrawn = sum((group) => group.lastMonth.depositWithdrawn ?? 0);
   const budget = sum((group) => group.lastMonth.budget ?? 0);
-  // 期望成本中既没有成交、也没有被记为“资金不足”的部分 = 预算/有效需求没有形成，
-  // 与“有供给但缺钱”分开报告；两者都不是供给不足。
-  const fundingGap = Math.round(Math.max(0, desiredCost - consumption - unmetFunding) * 100) / 100;
-  // “有预算但没有商品供给”：消费购买口径下未成交的消费品数量 × 当月市场价（下限估算）。
-  // consumerDemand/sold 来自城市市场账本；这里只统计 category=consumer 的商品，避免把
-  // 企业投入品采购混进来。价格为当月市场价，不代表成交价。
-  let supplyGapUnits = 0;
-  let supplyGapValue = 0;
-  for (const good of GOODS) {
-    if (good.category !== 'consumer') continue;
-    const market = world.cities.find((city) => city.id === cityId)?.market[good.id];
-    if (!market) continue;
-    const unfilled = Math.max(0, (market.consumerDemand ?? 0) - (market.sold ?? 0));
-    supplyGapUnits += unfilled;
-    supplyGapValue += unfilled * (market.price ?? 0);
-  }
+  // v1.4 §6.1：成交 = 现金支付 + 存款提取 + 消费贷；三项都由 consumer 本月真实落账。
+  const cashPaid = round2(sum((group) => group.lastMonth.cashPaid ?? 0));
+  // 期望成本中既没有成交、也没有被记为“资金不足”的部分 = 预算/有效需求没有形成。
+  const fundingGap = round2(Math.max(0, desiredCost - consumption - unmetFunding));
+  // 有效需求（件/金额）与商品不足缺口（件）用 consumer 落账口径：
+  // 件数包含跨城进口成交，缺口只统计“尝试过但最终未成交”的部分，二者互斥。
+  const effectiveUnits = round2(sum((group) => group.lastMonth.effectiveUnits ?? 0));
+  const soldUnits = round2(sum((group) => group.lastMonth.soldUnits ?? 0));
+  const effectiveCost = round2(sum((group) => group.lastMonth.effectiveCost ?? 0));
+  const supplyShortfallUnits = round2(sum((group) => group.lastMonth.supplyShortfallUnits ?? 0));
+  // 基本需要量/成交：优先读 consumer 落账；旧档/未落账回退到“人口 × 人均需要”与市场成交（标注口径）。
+  const statedNeed = sum((group) => group.lastMonth.basicNeedUnits ?? 0);
+  const statedSold = sum((group) => group.lastMonth.basicSoldUnits ?? 0);
+  const fallbackNeed = round2(
+    groups.reduce((total, group) => total + group.people, 0) * (foodGood?.perCapitaMonthlyNeed ?? 0),
+  );
+  const basicNeedQty = statedNeed > 0.01 ? round2(statedNeed) : fallbackNeed;
+  const basicNeedSold = statedSold > 0.01 ? round2(statedSold) : round2(
+    world.cities.find((city) => city.id === cityId)?.market['food']?.sold ?? 0,
+  );
+  const basicNeedCoverage = basicNeedQty > 0.01 ? basicNeedSold / basicNeedQty : null;
   return {
     desiredCost,
     consumption,
@@ -301,12 +448,17 @@ function cityConsumption(world: WorldState, cityId: string) {
     loanFinanced,
     loanDrawn,
     depositWithdrawn,
+    cashPaid,
     budget,
-    supplyGapUnits: Math.round(supplyGapUnits * 100) / 100,
-    supplyGapValue: Math.round(supplyGapValue * 100) / 100,
+    effectiveUnits,
+    soldUnits,
+    effectiveCost,
+    supplyShortfallUnits,
+    basicNeedQty,
+    basicNeedSold,
+    basicNeedCoverage,
   };
 }
-
 /** 商品市场供需（数量口径），用于区分缺货与缺钱。 */
 function marketStats(city: City, goodId: GoodId) {
   const market = city.market[goodId];
@@ -354,6 +506,8 @@ function companyStats(world: WorldState, cityId: string) {
   const emergency = companies.reduce((sum, company) => sum + (company.lastMonth.emergencyLayoffs ?? 0), 0);
   const revenue = companies.reduce((sum, company) => sum + company.lastMonth.revenue, 0);
   const inputCost = companies.reduce((sum, company) => sum + company.lastMonth.inputCost, 0);
+  const cogs = companies.reduce((sum, company) => sum + (company.lastMonth.cogs ?? company.lastMonth.inputCost), 0);
+  const refundGain = companies.reduce((sum, company) => sum + (company.lastMonth.refundGain ?? 0), 0);
   const wages = companies.reduce(
     (sum, company) => sum + company.lastMonth.wagesPaid + (company.lastMonth.bonusPaid ?? 0),
     0,
@@ -385,6 +539,8 @@ function companyStats(world: WorldState, cityId: string) {
     emergency,
     revenue,
     inputCost,
+    cogs,
+    refundGain,
     wages,
     interest,
     tax,
@@ -600,13 +756,25 @@ function printCheckpoint(world: WorldState) {
     console.log(
       `谷食物流 谷物 价 ${num(chain.grainMarket?.price)} 需求 ${num(chain.grainMarket?.producerRequired)} 成交 ${num(chain.grainMarket?.sold)} 库存 ${num(chain.grainMarket?.closingStock)} 进口 ${num(chain.grainMarket?.intercityImported)}｜食品 价 ${num(chain.foodMarket?.price)} 成交 ${num(chain.foodMarket?.sold)} 需求 ${num(chain.foodMarket?.consumerDemand)} 库存 ${num(chain.foodMarket?.closingStock)} 进口 ${num(chain.foodMarket?.intercityImported)}｜能源 价 ${num(chain.energyMarket?.price)} 成交 ${num(chain.energyMarket?.sold)} 库存 ${num(chain.energyMarket?.closingStock)}`,
     );
+    const trade = intercityTradeThisTick(world, city.id);
+    console.log(
+      `跨城贸易 本月进口 ${num(trade.importQty, 1)} 件/¥${num(trade.importValue, 1)}（${trade.importGoods.join('；') || '无'}）｜出口 ${num(trade.exportQty, 1)} 件/¥${num(trade.exportValue, 1)}（${trade.exportGoods.join('；') || '无'}）｜成交 ${trade.flowCount} 笔｜城内配送效率 ${trade.deliveryEfficiency === null ? 'n/a' : pct(trade.deliveryEfficiency)}｜跨城运力惩罚 ${trade.corridorPenalty > 0 ? pct(trade.corridorPenalty) : '0.0%'}`,
+    );
     const gov = governmentFiscalDetail(world, city.id);
     console.log(
-      `财政明细（窗口 ${gov.entries}/${gov.limit} 条${gov.truncated ? '，已触达账本上限、更早流水被裁剪' : ''}）税收 ${money(gov.tax)}（含交通加成 ${money(gov.transportBonus)}）｜公共工资 ${money(gov.publicWages)}｜福利 ${money(gov.benefits)}｜政策 ${money(gov.policySpending)}｜交通 ${money(gov.transport)}｜政府贷款 ${money(gov.loanProceeds)}/还本息 ${money(gov.loanRepayment)}｜发债 ${money(gov.bondProceeds)}/付本息 ${money(gov.bondService)}｜银行垫付 ${money(gov.bankAdvance)}｜勾销 ${money(gov.writtenOff)}`,
+      `财政明细（窗口 ${gov.entries}/${gov.limit} 条${gov.truncated ? '，已触达账本上限、更早流水被裁剪' : ''}）税收 ${money(gov.tax)}（个税 ${money(gov.incomeTax)}/企业税 ${money(gov.corporateTax)}/消费税 ${money(gov.consumptionTax)}/股息税 ${money(gov.dividendTax)}；交通加成 ${money(gov.transportBonus)}、损耗 ${money(gov.transportLoss)} 单独列示，属游戏化财政调整、无对应纳税人）｜公共工资 ${money(gov.publicWages)}｜福利 ${money(gov.benefits)}｜政策 ${money(gov.policySpending)}｜交通 ${money(gov.transport)}｜政府贷款 ${money(gov.loanProceeds)}/还本息 ${money(gov.loanRepayment)}｜发债 ${money(gov.bondProceeds)}/付本息 ${money(gov.bondService)}｜银行垫付 ${money(gov.bankAdvance)}｜勾销 ${money(gov.writtenOff)}｜其他收入 ${money(gov.otherIncome)}｜选举费 ${money(gov.electionFee)}`,
     );
+    const aiPolicy = aiPolicyStats(world, city.id);
+    const checkup = aiPolicy.latest;
+    console.log(
+      checkup
+        ? `AI 政府 失业档位 ${checkup.tier}（3 月均值 ${pct(checkup.unemploymentRateAvg3)}，趋势 ${checkup.unemploymentTrend >= 0 ? '+' : ''}${pct(checkup.unemploymentTrend)}；原始档 ${checkup.rawTier}）｜症结 ${checkup.symptoms.join('/') || '无'}｜月预算 ${money(checkup.budget)}（占近 12 月均税 ${pct(checkup.budgetShare, 0)}；真实税月 ${checkup.taxMonthsReal}/估算 ${checkup.taxMonthsEstimated}）｜债务/GDP ${pct(checkup.debtRatio)}${checkup.debtWarning ? '（≥85% 预警，预算缩减）' : ''}｜到期压力 债券 ${money(checkup.bondDue)}/贷款 ${money(checkup.loanDue)}｜本月执行 ${aiPolicy.runsThisTick} 项：支出 ${money(aiPolicy.spentThisTick)} 受益 ${num(aiPolicy.beneficiaries)} 真实岗位 ${num(aiPolicy.jobsEffect)}｜预算说明 ${checkup.budgetNote}`
+        : `AI 政府 本月无体检快照（玩家市长或未启用 AI）｜执行 ${aiPolicy.runsThisTick} 项：支出 ${money(aiPolicy.spentThisTick)} 受益 ${num(aiPolicy.beneficiaries)} 真实岗位 ${num(aiPolicy.jobsEffect)}`,
+    );
+    if (aiPolicy.decisions) console.log(`AI 政策 在行：${aiPolicy.decisions}｜原因：${aiPolicy.reasons.join('；') || '无'}`);
     const equity = investorEquityStats(world, city.id);
     console.log(
-      `居民投资权益 有效份额 ${num(equity.contributed + equity.opening)}（累计投入 ${num(equity.contributed)} + 开局 ${num(equity.opening)}）｜持有人 ${equity.holders}/${equity.groups} 群体｜实体现金 ${money(equity.entityCash)}｜零人仍持份 ${equity.zeroPeopleWithShares}（${num(equity.zeroPeopleShares)} 份）`,
+      `居民投资权益 有效份额 ${num(equity.totalShares)}（累计投入 ${num(equity.contributed)} + 开局 ${num(equity.opening)}）｜持有人 ${equity.holders}/${equity.groups} 群体｜实体现金 ${money(equity.entityCash)}｜债券估值 ${money(equity.bondsValue)}｜净资产 ${money(equity.netWorth)}｜每份净值 ${num(equity.navPerShare, 4)}｜零人仍持份 ${equity.zeroPeopleWithShares}（${num(equity.zeroPeopleShares)} 份）`,
     );
     const jobless = unemployedConsumption(world, city.id);
     console.log(
@@ -625,11 +793,18 @@ function printCheckpoint(world: WorldState) {
     console.log(
       `企业设备 farm ${num(company.equipmentKinds.farm)} / industry ${num(company.equipmentKinds.industry)} / energy ${num(company.equipmentKinds.energy)} 台｜本月购置 ${money(company.equipmentPurchased)} / 出售 ${money(company.equipmentSold)}`,
     );
+    const initialEquipment = initialEquipmentStats(world, city.id);
     console.log(
-      `企业财务 营收 ${money(company.revenue)}｜原料 ${money(company.inputCost)}｜工资(含奖金) ${money(company.wages)}｜利息 ${money(company.interest)}｜企业税 ${money(company.tax)}｜利润 ${money(company.profit)}｜现金 ${money(company.cash)}｜债务 ${money(company.debt)}｜欠薪 ${money(company.wageArrears)}｜本月紧急裁员 ${num(company.emergency)}`,
+      `初始设备 实物出资 ${initialEquipment.grants} 家/${num(initialEquipment.units)} 台（farm ${num(initialEquipment.kindUnits.farm ?? 0)}/industry ${num(initialEquipment.kindUnits.industry ?? 0)}/energy ${num(initialEquipment.kindUnits.energy ?? 0)}）估值 ${money(initialEquipment.valuation)}｜锁定期内 ${initialEquipment.locked} 家｜本月新授 ${initialEquipment.grantedThisTick} 家｜本月真实市场采购 ${money(initialEquipment.purchasedThisTick)}`,
     );
     console.log(
-      `居民消费 成交 ${money(consumption.consumption)}（期望 ${money(consumption.desiredCost)}）｜有本地供给但资金不足 ${money(consumption.unmetFunding)}｜预算缩量未形成购买 ${money(consumption.fundingGap)}｜有预算但缺货 ${num(consumption.supplyGapUnits, 1)} 件≈${money(consumption.supplyGapValue)}｜消费贷支持 ${money(consumption.loanFinanced)}（本月发放 ${money(consumption.loanDrawn)}）｜存款提取 ${money(consumption.depositWithdrawn)}`,
+      `企业财务 营收 ${money(company.revenue)}｜COGS ${money(company.cogs)}（原料现金支出 ${money(company.inputCost)}）｜工资(含奖金) ${money(company.wages)}｜利息 ${money(company.interest)}｜企业税 ${money(company.tax)}｜退款收益 ${money(company.refundGain)}｜利润 ${money(company.profit)}｜现金 ${money(company.cash)}｜债务 ${money(company.debt)}｜欠薪 ${money(company.wageArrears)}｜本月紧急裁员 ${num(company.emergency)}`,
+    );
+    console.log(
+      `居民消费 成交 ${money(consumption.consumption)}（现金支付 ${money(consumption.cashPaid)} + 存款提取 ${money(consumption.depositWithdrawn)} + 消费贷 ${money(consumption.loanFinanced)}；本月贷款发放 ${money(consumption.loanDrawn)}；成交件数 ${num(consumption.soldUnits, 1)}）｜有支付力有效需求 ${num(consumption.effectiveUnits, 1)} 件/¥${money(consumption.effectiveCost)}（期望成本 ${money(consumption.desiredCost)} 含买不起部分）｜资金不足缺口 ${money(consumption.unmetFunding)}｜商品不足缺口 ${num(consumption.supplyShortfallUnits, 1)} 件｜期望未形成 ${money(consumption.fundingGap)}`,
+    );
+    console.log(
+      `基本需要 需要量 ${num(consumption.basicNeedQty, 1)} 件/月｜基本需要成交 ${num(consumption.basicNeedSold, 1)}｜需要覆盖率 ${consumption.basicNeedCoverage === null ? 'n/a' : pct(consumption.basicNeedCoverage)}（含跨城进口成交；与“有效需求满足率”不同，后者只统计买得起的部分）`,
     );
     console.log(
       `居民收入 工资 ${money(household.wages)}｜福利 ${money(household.benefits)}｜分红 ${money(household.dividends)}｜个税 ${money(household.incomeTax)}｜本月转入投资实体 ${money(household.invested)}`,
@@ -709,6 +884,97 @@ function printCheckpoint(world: WorldState) {
   );
 }
 
+// v1.4：AI 政策执行与跨城贸易的本期逐月累计（脚本内存累计，不受历史保留窗口截断）。
+interface AiTotals {
+  runs: number;
+  spent: number;
+  beneficiaries: number;
+  jobsEffect: number;
+  debtWarningMonths: number;
+  policyIds: Set<string>;
+}
+
+interface TradeTotals {
+  importQty: number;
+  importValue: number;
+  exportQty: number;
+  exportValue: number;
+  byGood: Map<string, { importQty: number; exportQty: number }>;
+}
+
+const aiTotals = new Map<string, AiTotals>();
+const tradeTotals = new Map<string, TradeTotals>();
+
+function aiTotalsOf(cityId: string): AiTotals {
+  let entry = aiTotals.get(cityId);
+  if (!entry) {
+    entry = { runs: 0, spent: 0, beneficiaries: 0, jobsEffect: 0, debtWarningMonths: 0, policyIds: new Set() };
+    aiTotals.set(cityId, entry);
+  }
+  return entry;
+}
+
+function tradeTotalsOf(cityId: string): TradeTotals {
+  let entry = tradeTotals.get(cityId);
+  if (!entry) {
+    entry = { importQty: 0, importValue: 0, exportQty: 0, exportValue: 0, byGood: new Map() };
+    tradeTotals.set(cityId, entry);
+  }
+  return entry;
+}
+
+const TRADE_REPORT_GOODS = new Set([
+  'food',
+  'grain',
+  'energy',
+  'farmEquipment',
+  'industryEquipment',
+  'energyEquipment',
+]);
+
+/** 每月末累计 AI 政策真实执行与本城跨城贸易成交（只累计本月真实记录）。 */
+function accumulateMonthlyFlows(world: WorldState): void {
+  const tick = world.time.tick;
+  for (const city of world.cities) aiTotalsOf(city.id);
+  for (const policy of world.policies.active) {
+    const entry = aiTotalsOf(policy.cityId);
+    entry.policyIds.add(policy.policyId);
+    for (const run of policy.tracking?.runs ?? []) {
+      if (run.tick !== tick) continue;
+      entry.runs += 1;
+      entry.spent += run.spent;
+      entry.beneficiaries += run.beneficiaries;
+      entry.jobsEffect += run.jobsEffect;
+    }
+  }
+  for (const checkup of world.policies.checkups ?? []) {
+    if (checkup.tick !== tick) continue;
+    const entry = aiTotalsOf(checkup.cityId);
+    if (checkup.debtWarning) entry.debtWarningMonths += 1;
+  }
+  for (const flow of world.lastTick.tradeFlows) {
+    if (!TRADE_REPORT_GOODS.has(flow.good)) continue;
+    const pairs: [string, boolean][] = [
+      [flow.fromCityId, false],
+      [flow.toCityId, true],
+    ];
+    for (const [cityId, isImport] of pairs) {
+      const entry = tradeTotalsOf(cityId);
+      const good = entry.byGood.get(flow.good) ?? { importQty: 0, exportQty: 0 };
+      if (isImport) {
+        entry.importQty += flow.qty;
+        entry.importValue += flow.value;
+        good.importQty += flow.qty;
+      } else {
+        entry.exportQty += flow.qty;
+        entry.exportValue += flow.value;
+        good.exportQty += flow.qty;
+      }
+      entry.byGood.set(flow.good, good);
+    }
+  }
+}
+
 function printSummary(world: WorldState) {
   console.log(`\n${'='.repeat(88)}`);
   console.log('# 汇总（按城市，最后一次观察）');
@@ -729,6 +995,34 @@ function printSummary(world: WorldState) {
   for (const seller of [...equipmentFlow.sellers.values()].sort((a, b) => b.produced - a.produced)) {
     console.log(
       `  - ${seller.name}（${seller.cityId}）：累计生产 ${num(seller.produced)} 台｜累计售出 ${num(seller.sold)} 台`,
+    );
+  }
+  // v1.4 §4：初始实物设备来源与规模（当前企业账 + 生命周期创办记录）。
+  const lifecycleLimitForEquipment = DEMO_CONFIG.lifecycle.maxHistory;
+  const equipmentRecords = world.lifecycle.foundings.filter((record) => record.initialEquipment);
+  console.log(
+    `初始设备（模拟范围外实物出资）合计：当前 ${world.companies.filter((company) => company.initialEquipment).length} 家企业持有/${num(
+      world.companies.reduce((sum, company) => sum + (company.initialEquipment?.units ?? 0), 0),
+    )} 台/估值 ${money(world.companies.reduce((sum, company) => sum + (company.initialEquipment?.valuation ?? 0), 0))}；生命周期窗口内带实物出资的创办记录 ${equipmentRecords.length} 条/${num(
+      equipmentRecords.reduce((sum, record) => sum + (record.initialEquipment?.units ?? 0), 0),
+    )} 台（上限 ${lifecycleLimitForEquipment} 条，更早记录可能被截断）`,
+  );
+  for (const city of world.cities) {
+    const grants = world.companies.filter((company) => company.cityId === city.id && company.initialEquipment);
+    const aiTotalsCity = aiTotalsOf(city.id);
+    const tradeTotalsCity = tradeTotalsOf(city.id);
+    const goodText = [...tradeTotalsCity.byGood.entries()]
+      .sort((a, b) => b[1].importQty + b[1].exportQty - (a[1].importQty + a[1].exportQty))
+      .map(([good, value]) => `${good} 进 ${num(value.importQty, 1)}/出 ${num(value.exportQty, 1)}`)
+      .join('；');
+    console.log(
+      `${city.name} 初始设备 持有 ${grants.length} 家/${num(grants.reduce((sum, company) => sum + (company.initialEquipment?.units ?? 0), 0))} 台｜估值 ${money(grants.reduce((sum, company) => sum + (company.initialEquipment?.valuation ?? 0), 0))}`,
+    );
+    console.log(
+      `${city.name} AI 政策累计（逐月真实执行，脚本累计）：执行 ${aiTotalsCity.runs} 次｜支出 ${money(aiTotalsCity.spent)}｜受益 ${num(aiTotalsCity.beneficiaries)}｜真实岗位 ${num(aiTotalsCity.jobsEffect)}｜债务预警月数 ${aiTotalsCity.debtWarningMonths}｜政策 ${[...aiTotalsCity.policyIds].sort().join('/') || '无'}`,
+    );
+    console.log(
+      `${city.name} 跨城贸易累计（关键商品，脚本逐月累计）：进口 ${num(tradeTotalsCity.importQty, 1)} 件/¥${num(tradeTotalsCity.importValue, 1)}｜出口 ${num(tradeTotalsCity.exportQty, 1)} 件/¥${num(tradeTotalsCity.exportValue, 1)}${goodText ? `｜${goodText}` : ''}`,
     );
   }
   const investorCash = world.investors.reduce((sum, investor) => sum + investor.cash, 0);
@@ -865,6 +1159,7 @@ const simulation = Simulation.create(runtimeConfig);
 for (let month = 1; month <= MONTHS; month += 1) {
   simulation.tick();
   accumulateEquipmentFlow(simulation.state);
+  accumulateMonthlyFlows(simulation.state);
   if (CHECKPOINTS.includes(month)) printCheckpoint(simulation.state);
 }
 printSummary(simulation.state);
