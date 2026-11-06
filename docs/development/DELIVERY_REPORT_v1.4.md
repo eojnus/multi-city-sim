@@ -291,5 +291,5 @@
 - 推送结果：`fec99e4..c25538a  feature/stock-market-ui-tax -> feature/stock-market-ui-tax`，**exit 0**。
 - 推送后核验：`git fetch origin` 后 **本地 HEAD = `origin/feature/stock-market-ui-tax` = `c25538abb54ebf8e811917861cc1b6dac1420151`**；`origin/main` 仍 `6c45000efc4c406d30e22c0a12bd066fc2df61f7`（未合并、未改写历史）。
 - 本报告回填提交随后在同一分支推送；最终本地/远端 SHA 以 `git rev-parse HEAD` / `git rev-parse origin/feature/stock-market-ui-tax` 为准。
-- 安全提醒：本次使用的 GitHub PAT 为一次性环境变量，未落盘、未写入日志/仓库（已 `git grep github_pat_` 核验无命中）；**请随后立即在 GitHub 撤销该 PAT**。
+- 安全提醒：本次使用的 GitHub PAT 仅作为一次性环境变量传给 git，未落盘、未写入仓库与日志（已核验仓库中无 token 明文，本报告亦不含 token）；**请随后立即在 GitHub 撤销该 PAT**。
 - 无凭据备用交付（现已不必使用，保留作审计）：`multi-city-sim-v1.4-commits.bundle`（精简）、`multi-city-sim-v1.4-full.bundle`（完整可克隆）、`patches-v1.4/0001..0012.patch`。
