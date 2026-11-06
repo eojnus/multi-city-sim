@@ -1,136 +1,104 @@
-# PROGRESS — multi-city-sim v1.6 交接
+# PROGRESS — multi-city-sim v1.6.1 交接
 
 > 新会话第一句：`Read /workspace/Coding/multi-city-sim/PROGRESS.md and git log -8, then continue from "Next".`
 > 本文件是唯一可信状态；不要从旧对话记忆推断。不要在文件里写 token。
 
 ## Goal
 
-v1.6（按用户 2026-11-06 任务书）：①修复 v1.5 验收遗留（AI 政策月预算合计额度、公共岗位
-人数/人次统计、债券迁移微小权益）；②商品价格短缺快涨/进口计入需求/向基础价回归/可配置；
-③企业竞争、生产、招聘；④设备月度维护费 = 新设备市场价 1%；⑤僵尸企业退出；⑥既有规则保持。
-验收：tsc 0 + 构建成功 + 全量测试全绿 + 72 月默认种子 + 3 个对照种子 + Electron 实机核查 +
-交付报告 + 推送功能分支（不合并 main、不改写历史）。
+v1.6.1（v1.6 验收第二轮任务书）：①未成交二手挂单设备仍计维护费（挂单不能逃费）；②清算先处置
+资产、再用真实清算资金偿付维护服务商（当月+旧欠，不足才坏账）→ 银行 → 股东；③存档边界：64MiB
+文案修正、默认世界 72 月经实际桌面接口写入/读取/推进下月、长期方案（gzip）、自动/手动失败不覆盖；
+④回归与交付：保留 v1.6 全部规则，构建/针对性测试/全量回归/Electron 实测，如实报告经济问题，推送分支。
 
 ## Done（均已验证）
 
-- 分支 `feature/stock-market-ui-tax`；用户验收基线 `483c6fe2ea98e80291dd3b2244a2cd878255a7f1`；
-  开工时本地/远端 HEAD `f483f609599771663de3e8311aaf1bd608edc707`（基线之后的交接文档提交，
-  已在其上继续）；`origin/main` 仍 `6c45000efc4c406d30e22c0a12bd066fc2df61f7`。
-- 版本 `GAME_VERSION/package = 1.6.0`；`SAVE_FORMAT_VERSION = 9`（未升版，新增字段全部 optional）。
-- 本轮提交链（在 `f483f60` 之上）：见本文件末尾“提交/推送”；工作区在交付时应干净。
-- **§一.1 AI 政策月预算**：`policies.ts` 以当月体检 `budget` 为 quota，对当月全部在行 AI 危机政策
-  按参考需求权重最大余数分配（Σ分项 ≤ quota，修复两项政策各拿满 2× 的问题）；`fundingMonths`
-  新增 `quota/policyBudgets/publicWagesAttributed/publicWagesOverQuota`；claim/reserved/unpaid
-  按分项封顶；公共工资按 `fiscal.publicWages` 实付归属。测试 `tests/policy-budget-v16.test.ts` 13 项。
-- **§一.2 公共岗位统计**：`PolicyState.publicJobsMonths`（jobsAdded/headcount/jobsRemoved/wagesPaid
-  + 累计岗位/累计人次分开）；报告覆盖 active+history，真实岗位不再恒 0。同日测试内覆盖。
-- **§一.3 债券迁移尾差**：`investors.ts` 份数 = 本金/面额内部全精度（面额 1000 时 1 分 = 1e-5 份），
-  4 信用点可迁移；`invariants.ts` 容差不变（仅注释）。测试 `tests/bond-migration-tail-v16.test.ts` 5 项。
-- **§二 商品价格**：`markets.ts` 缺口只用 `unmetDemand`（已被跨城进口冲销）；`config.market` 新增
-  `shortageRiseSpeed=0.3 / surplusFallSpeed=0.12 / competitionFallSpeed=0.08 / reversionSpeed=0.03 /
-  maxMonthlyChange=0.15 / costAnchorFactor=1 / costAnchorMaxFactor=1.6`；锚价 = 上月单位生产成本
-  中位数 clamp [基础价, 1.6×基础价]；过剩用“本地成交+进口”覆盖量；无需求不涨。测试
-  `tests/price-v16.test.ts` 14 项（含“需求 100/本地 60/进口 40 不涨”）。
-- **§三 竞争/生产/招聘**：新增 `companies/pricing.ts`（报价内部 6 位精度、至少 1 分可见变动、
-  对手让价、单位成本×(1+3%) 底线）、`companies/cost.ts`（维护费/固定成本/单位成本接入 AI）；
-  `production-plan.ts` 可触达需求份额（缺货+资金缺口 5%+降价机会 5%+跨城×0.5）、需求驱动增产
-  （盈利+缺货+利用率<80% 用现有设备并招工）；`planning.ts` 卖多余设备（初始设备锁定期整段不卖）；
-  `founding.ts` 防羊群。测试 `tests/competition-v16.test.ts` 8 项。
-- **§四 设备维护费**：新增 `equipment/maintenance.ts`；tick 开头快照 `company.maintenanceBase/
-  maintenancePrices`（D1：月初持有 + 月初价；当月买入下月计费、当月卖出/挂单/破产仍计当月）；
-  每类 = 台数 × 月初新机参考单价 × 1%；应计全额进 `preTaxProfit`、现金支付进 `operatingCashFlow`；
-  收款方为模拟范围外服务商（`world.equipmentMarket.maintenanceMonth/maintenanceHistory` 独立流水，
-  不进设备厂收入/政府税收）；现金不足先真实融资、不足记 `maintenanceArrears`（欠费不得分红、
-  不再以贷养欠、清算记坏账）；面板显示台数/单价/费率/维护费/状态。测试
-  `tests/equipment-maintenance-v16.test.ts` 16 项。
-- **§五 僵尸企业**：删除 `checkBankruptcies` 的 `wage<=0 continue` 漏洞；`CompanyAiState.idleMonths`
-  （读 previousMonth、保护期清零、有经营即清零）；`idleExitMonths=6` + 现金+授信 < 1 月固定成本
-  （工资+维护费+偿债）且无恢复计划 → 复用 `liquidateCompany`。测试 `tests/zombie-exit-v16.test.ts` 7 项。
-- **§六 存档容量**：15 个月世界实测 12.09MB，旧 8MB 上限导致桌面存档失败；`src/platform/saveBridge.ts`
-  与 `electron/saveIpc.ts` 上限统一 64MB。
-- **集成期修复**：①维护费月度流水“月末欠付”改为“月初存量 + 本月增量”（旧实现跨月清算会扣成负数，
-  72 月实测 -2,839），`tests/v16-crosscut.test.ts` 12 月逐月对账；②v14 守恒测试因“锁定期内卖设备”
-  回归 → 锁定期整段不卖（pool-dev）；③v15 权限测试因公司现金与受限值偶然同值误报 → 只扫政府区块；
-  ④v11 旧档测试允许“真实出售/挂单”导致的设备减少；⑤inventory-cogs/production-feedback 利润恒等式
-  补维护费项；⑥acceptance 36 月轨迹按 v1.6 重锁。
+- 分支 `feature/stock-market-ui-tax`；验收基线 `b266962935f5ea83d1a2831fd98508aba83658ff`（本轮开工
+  HEAD=远端）；`origin/main` 仍 `6c45000efc4c406d30e22c0a12bd066fc2df61f7`（未合并、未改写历史）。
+- 版本 `GAME_VERSION/package = 1.6.1`；`SAVE_FORMAT_VERSION = 9`（未升版，新字段全部 optional）。
+- 提交链（基线 `b266962` 之上）：见本文件末尾“提交/推送”（推送后回填远端 SHA）。
+- **§一 未成交挂单设备维护费**：`maintenance.ts` 新增 `maintenanceBilledUnits(world, company)`
+  = 当前 equipment + 该企业未成交二手挂单 units（逐类）；月初快照 / 无快照直调回退 / AI
+  `estimatedMonthlyMaintenance` 三处同口径；成交/撤单按月初持有时点切换责任；不影响 equipment /
+  capacity / 产能重算。测试 `tests/maintenance-listing-v17.test.ts` 7 项；用户复现（2 台工业设备
+  高价挂单未成交）第 2 月仍计 3,800（v1.6 为 0）。
+- **§二 清算维护费偿付顺序**：`maintenance.ts` 拆两段：`planCompanyMaintenanceOnLiquidation`
+  （处置前算应计，避免设备卖出后漏计）→ `settleCompanyMaintenanceOnLiquidation`（处置收入到账后：
+  先付当月→旧欠→不足才坏账，`skipFinancing` 不新增借款）；`lifecycle.liquidateCompany` 顺序改为
+  “设备处置收入入账 → 维护费 → 银行债务 → 股东分配”；`LiquidationRecord` 追加 5 个 optional
+  对账字段（`equipmentProceeds/equipmentMaintenanceDue/Paid/ArrearsRepaid/WrittenOff`），`save.ts`
+  增加数值校验。复现例：现金 0+旧欠 10,000+当月 3,800+处置 180,000 → 实付 13,800、坏账 0、股东
+  166,200（v1.6：坏账 13,800、股东 180,000）。测试 `tests/liquidation-maintenance-order-v17.test.ts` 6 项。
+- **§三 存档边界**：`electron/saveIpc.ts` 与 `src/platform/saveBridge.ts` 统一 64MiB 上限与文案
+  `存档过大（超过 64MB / 64MiB 限制）`（读写 list 一致、写失败带 `too-large`）；72 月默认世界存档
+  实测 **53,313,078B（50.8MiB，64MiB 的 79%）**，t48→t72 增长 11.78MB（≈491KB/月，约 80–90 月撞限）；
+  实现桌面 **gzip 压缩**（≥4MiB、zlib 异步、落盘约 2.47MB/4.6%、21.6×；旧明文按 gzip 魔数兼容，
+  list 双格式，不删任何债券/贷款/权益/追溯数据，格式版本仍 9）；渲染层上限预检改 UTF-8 字节口径；
+  自动存档写失败暂停且不覆盖原档、手动失败 toast 注明原档未修改。测试 `tests/save-boundary-v17.test.ts` 18 项
+  （含 72 月真实写入/读取/解析/推进实测）。
+- **acceptance 重锁**：`tests/acceptance/bankruptcy-real-run.test.ts` 按 v1.6.1 真实 36 月轨迹重锁
+  （F-R2 负债率 t19/27/28/36、F-R3 票息 779 笔/欠息 32 期、F-R4 计划=成交 3,199,219/持债 816、
+  F-R5/F-R8 债务与贷款 35/35/34、F-R9 政策资金），重锁后 9/9 绿。
 - **验证证据**：
-  - `npx tsc --noEmit` = 0（含 tests）；`npx tsc -p tsconfig.electron.json --noEmit` = 0；
-    `npm run build` 成功。
-  - 新增 7 个 v1.6 测试文件：价格 14 / 维护费 16 / 政策 13 / 债券 5 / 竞争 8 / 僵尸 7 / 横切 3 = 66 项全绿。
-  - 全量回归：136 个测试文件分 11 块（12 文件/块）执行；块 1（含重锁后 acceptance 9/9）、块 2
-    （settlement-resume H08 单跑 13/13 绿）、块 3/5/7/10 全绿、块 6/8/9 断言全绿（仅容器
-    `onTaskUpdate` RPC 噪声 exit≠0）、块 11/12 全绿；块 4 用 `--testTimeout=900000` 重跑
-    （economy-stability 120 月测试约 16 分钟，默认 180s 会超时；属容器性能边界，不是断言失败）。
-  - 72 月默认 seed 20261101：t72 失业 93.4%/84.7%/87.4%，基本食品覆盖率 24.2%/22.2%/30.0%，
-    食品价 79.64/85.27/77.28（基础 55，成本锚上限 88），负债率 78.5%(high)/50.6%/60.9%(watch)，
-    设备维护费 40.0/60.0/31.2 万/月，AI 政策 quota 600 万 = 分项 300+300 万、实支 499.9 万，
-    公共岗位在岗 476 人/实发 199.9 万/月。完整 checkpoint 数据见交付报告第 7 节。
-  - 3 对照种子 36 月（20261102/777001/424242）：均 exit 0、不变量 0、无破产；失业 82.0–90.1%、
-    食品覆盖率 14.5–38.7%、负债率 23.4–42.7%；运行时长 123.9s / 172.6s / 168.1s。
-  - Electron（生产构建 + Xvfb :99，Electron 38.8.6）：**24/24 检查通过、0 console 错误**；证据
-    `docs/evidence_v1.6/`（report.json + 9 PNG）；含 14 个月真实 tick 后的价格规则、维护费
-    结算/面板、政策额度分项、公共岗位、存读档（维护费快照/欠费/政策额度）检查。
-  - 交付报告：`docs/development/DELIVERY_REPORT_v1.6.md`；README v1.6.0。
+  - `npx tsc --noEmit` = 0；`npx tsc -p tsconfig.electron.json --noEmit` = 0；`npm run build` 成功。
+  - 针对性回归：维护/清算/存档/守恒等 10 文件 64/64 绿；v17 三文件 30/30 绿；save-boundary 18/18。
+  - 全量回归：140 个测试文件分 12 块执行（12 文件/块，`--testTimeout=900000`）；分块结果见交付报告 §6.1。
+  - Electron（生产构建 + Xvfb :99，Electron 38.8.6）：**27/27 检查通过、0 console 错误**；证据
+    `docs/evidence_v1.6.1/`；含 72 月档桌面接口端到端（源 53,313,078B → 读取 3.0s → 推进 1 月
+    10.7s → 写入 gzip 2,495,647B/3.3s → 再读取 3.3s；startTick 72 → advancedTick 73）。
+  - 经济（如实，72 月航拍）：失业 90.9%/88.5%/81.1%；基本食品覆盖 14.0%/33.4%/30.8%；负债率
+    50.2%(watch)/**98.0%(high)**/50.7%(watch)；岚港食品价触上限 121；在营企业 477、零员工 0。
+  - 交付报告：`docs/development/DELIVERY_REPORT_v1.6.1.md`；README v1.6.1。
 
 ## Next（按序）
 
-1. **等用户验收**：已推送 `feature/stock-market-ui-tax`（本地/远端 = 推送交付 HEAD `4a08095`；
-   回填提交见 `git log -1`），等待用户验收；验收后提醒用户撤销本次使用的 PAT。
-2. 新会话先做基线确认：`git rev-parse HEAD origin/feature/stock-market-ui-tax origin/main`、
+1. **等用户验收**；本轮已推送（本地=远端 SHA 见末尾）。提醒撤销本轮使用的 PAT。
+2. 新会话基线确认：`git rev-parse HEAD origin/feature/stock-market-ui-tax origin/main`、
    `git status --short`、`npx tsc --noEmit`。
-3. 若继续开发：沿用仓库约定——基线 SHA、分支不变、不 amend/rebase/force、不合并 main、
-   每步有命令验证；开工先 `git fetch` 确认远端无新提交。
-4. 若继续修经济：优先看交付报告 §9（高失业/食品覆盖低、债务率上升、行业集中 agriculture、
-   idle 但现金充足企业占名额、食品价高于基础价、公共岗位规模小）。
+3. 若继续开发：分支保持不变、不 amend/rebase/force、不合并 main、每步有命令验证；开工先 `git fetch`。
+4. 若继续修经济，优先看交付报告 §9：铁谷负债 98.0% 逼近 100% 破产线、高失业、食品覆盖低、
+   行业集中、72 月渲染层 serializeSave 52MB（~0.8s UI 冻结，本轮未改）。
+5. 待用户确认：清算偿付顺序把维护服务商排在银行债务之前（按任务书 §二）；如需银行优先只改
+   `lifecycle.liquidateCompany` 一处顺序。
 
 ## Open questions
 
-- 用户是否接受 v1.6；下一轮是否继续修宏观经济（当前失业 ~85–93%、基本食品覆盖 19–30%）。
-- “长期无经营但现金/授信充足”的企业是否也应强制退出（当前 D6 只清算“无恢复能力”的僵尸企业）。
-- 食品价格高于基础价（成本锚达 1.6× 上限）是否符合预期，是否要放开/收紧成本锚上限。
+- 用户是否接受 v1.6.1；下一轮是否继续修宏观经济（高失业/食品覆盖/铁谷债务）。
+- 维护费欠费在清算中的顺位是否需要改为银行优先（当前服务商优先，符合本轮任务书）。
+- 是否需要把 72 月渲染层序列化开销（52MB JSON.stringify，~0.8s）优化（例如分帧/Worker），
+  属既有成本，本轮未改。
 
 ## Key facts（环境与坑）
 
 - 仓库 `/workspace/Coding/multi-city-sim`；node v24.22.1 / npm 11.19.1；**2 核 / ~2GB 容器**。
-- 环境：`export HOME=/workspace/Coding/.home; export npm_config_cache=/workspace/Coding/.npm-cache`
-  （root 的 `/root/.npm` 无权限）。
-- 测试：`npx vitest run <files> --maxWorkers=1 --testTimeout=180000 --hookTimeout=1500000`；
-  大世界（企业数接近 160/城）单月 tick 2–5 秒：`tests/economy-stability.test.ts`（16+120+40 月）
-  需 `--testTimeout=900000`（120 月测试自带 1,200s 超时，实测约 978s）；容器偶发
-  `[vitest-worker]: Timeout calling "onTaskUpdate"` → exit≠0 但断言全绿（不是产品失败）。
-  分块脚本参考 `/tmp/run-v16-chunks.sh`（临时文件，12 文件/块）。
-- **`tsc` 不检查 `scripts/`**（不在 tsconfig）：改报告脚本后必须
-  `npx tsx scripts/economy-v09-report.ts --months=3 --checkpoints=1,3` 冒烟。
-- 报告/数据：72 月约 10–13 分钟（`scripts/economy-v09-report.ts --months=72
-  --checkpoints=1,6,12,24,36,72 --seed=20261101`）；3 个对照种子 36 月约 2–3 分钟/种子
-  （`scripts/v14-seed-compare.ts --months=36 --seeds=20261102,777001,424242`）。
-- 桌面：先 `npm run build`，再 `DISPLAY=:99 node_modules/electron/dist/electron --no-sandbox
+- 环境：`export HOME=/workspace/Coding/.home; export npm_config_cache=/workspace/Coding/.npm-cache`。
+- 测试：`npx vitest run <files> --maxWorkers=1 --testTimeout=900000 --hookTimeout=1500000`；
+  `tests/economy-stability.test.ts`（16+120+40 月）约 20–25 分钟；容器偶发
+  `[vitest-worker]: Timeout calling "onTaskUpdate"`（exit≠0 但断言全绿，报告如实说明）。
+  分块脚本参考 `/tmp/run-v161-chunks.sh`（临时文件，12 文件/块）；当前全量 140 个测试文件。
+- **`tsc` 不检查 `scripts/`**：改报告/验收脚本后必须 `npx tsx scripts/economy-v09-report.ts
+  --months=3 --checkpoints=1,3` 冒烟；Electron 验收脚本需先 `npm run build`。
+- 桌面验收：先 `npm run build`，再 `DISPLAY=:99 node_modules/electron/dist/electron --no-sandbox
   --disable-dev-shm-usage --enable-unsafe-swiftshader scripts/acceptance-v09.cjs`；证据目录
-  `docs/evidence_v1.6/`（换版本要改脚本内路径）。Xvfb 需先启动。
-- 存档：`formatVersion 9` 不升版，新增字段全部 optional；桌面存档大小上限 64MB（15 月实测 12.09MB）。
-- Git：无 SSH 密钥、无 credential helper；不要 amend/rebase/force、不合并 main。
-- 关键文件：`src/simulation/markets/markets.ts`（价格）、`policies/policies.ts`（额度/公共岗位）、
-  `equipment/maintenance.ts`（维护费）、`companies/{pricing,cost,production-plan,planning,founding}.ts`、
-  `companies/lifecycle/lifecycle.ts`（退出）、`investors/investors.ts`（债券迁移）、
-  `core/{simulation,save,invariants}.ts`、`data/config.ts`、`contracts/types.ts`、`ui/panels.ts`、
-  `scripts/economy-v09-report.ts`、`scripts/acceptance-v09.cjs`。
-- 已踩过的坑（不要重复）：①设备维护费“月末欠付”必须按“月初存量+本月增量”，否则跨月清算出现负数；
-  ②初始设备锁定期内 AI 不得出售该行业设备（v14 守恒测试比“锁定台数”更严）；
-  ③v15 权限测试的受限金额可能与企业现金偶然同值，检查范围要限定在政府区块；
-  ④旧档测试允许真实出售/挂单导致的设备减少（不是重算抹掉）；
-  ⑤利润恒等式（inventory-cogs/production-feedback）必须含 `maintenanceDue`；
-  ⑥acceptance 36 月轨迹在规则变更后需要按真实 v1.6 序列重锁（不要只改一两个断言）。
+  `docs/evidence_v1.6.1/`。72 月档验收素材由临时脚本生成到 `/tmp/v16-acceptance/t72-save.json`
+  （不在仓库；重新生成约 6–7 分钟，脚本本次已删除；需要时按交付报告 §5.2 说明用 tsx 重建）。
+- 存档：`formatVersion 9`；桌面上限 64MiB（UTF-8 字节），≥4MiB gzip 落盘（`.json` 后缀 + gzip 魔数，
+  旧明文兼容）。`saves:list` 的 `size` 为解压后真实字节数。
+- 关键文件：`src/simulation/equipment/maintenance.ts`（计费口径/清算结算）、
+  `equipment/equipment.ts`（挂单/处置）、`companies/lifecycle/lifecycle.ts`（清算顺序）、
+  `contracts/types.ts`（LiquidationRecord 对账字段）、`core/save.ts`（可选字段校验）、
+  `electron/saveIpc.ts` + `src/platform/saveBridge.ts` + `src/app/gameStore.ts`（存档边界/失败语义）、
+  `scripts/acceptance-v09.cjs`、`scripts/economy-v09-report.ts`。
+- 已踩过的坑（不要重复）：①挂单设备仍属卖方，维护费计费台数 = equipment + 未成交挂单；只影响计费
+  台数，不要改 equipment/产能重算；②清算应计必须在设备处置**前**算（处置后台数已变），结算必须在
+  处置收入到账**后**（否则先记坏账）；③桌面存档上限判定用 UTF-8 字节，渲染层旧 `text.length`
+  对中文会放过超限文本；④压缩文件不能按明文 JSON 直接 parse，`saves:list` 必须先按 gzip 魔数分流；
+  ⑤规则变更会改变 acceptance/全量轨迹，重锁数值要整段替换并注明版本，不要只改一两个断言。
+
 
 ## 提交/推送（本轮）
 
-- 本轮提交链（在 `f483f609599771663de3e8311aaf1bd608edc707` 之上）：
-  - `b2064d7` feat(v1.6)：规则与产品代码（价格/竞争/维护费/退出/政策额度/存档上限/报告脚本）
-  - `aa0ea0a` test(v1.6)：7 个新测试 + acceptance 重锁 + 兼容回归修复 + 桌面验收脚本
-  - `35cb76d` docs(v1.6)：交付报告、README 1.6.0、PLAN、桌面证据（24/24）
-  - `ff2e830` docs(v1.6)：全量回归分块结果、提交链与推送状态回填
-  - `4a08095` docs(v1.6)：PLAN 收尾状态与提交链 SHA 回填（**已推送的交付 HEAD**）
-- **推送成功（已核验）**：`f483f60..4a08095 feature/stock-market-ui-tax -> feature/stock-market-ui-tax`；
-  推送后 `git fetch` 实测 本地 HEAD = `origin/feature/stock-market-ui-tax` = `4a08095`；
-  `origin/main` 仍 `6c45000`（未合并、未改写历史）。其后仅“推送 SHA 回填” docs 提交（本地=远端，
-  见 `git log -1`）。
-- 用户提供的 PAT 只作为单次命令环境变量使用，未写入任何文件/仓库；已提醒用户在验收后撤销该 token。
+- 本轮提交链（在 `b266962935f5ea83d1a2831fd98508aba83658ff` 之上）：
+  - `1c1a9d2` feat(v1.6.1)：挂单设备仍计维护费、清算维护费优先偿付、桌面存档 gzip 与 64MiB 文案
+  - `d7aee46` test(v1.6.1)：3 个 v17 测试 + acceptance 按 v1.6.1 轨迹重锁 + 桌面验收扩展
+  - 交付文档提交（HEAD，见 `git log -1`；含本文件、README 1.6.1、交付报告、证据）
+- 推送状态：见下方回填（推送后把本地=远端 SHA 写在这里）。

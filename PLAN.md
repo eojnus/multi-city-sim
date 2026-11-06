@@ -109,3 +109,48 @@ Lead 独占（其他人只读，需要改动先 message Lead）：`src/simulatio
 - Electron 证据路径要用新目录 `docs/evidence_v1.6/`（不要覆盖 v1.5 证据，需改脚本内路径）。
 - 时间预算：72 月约 10-13 分钟；4 seed 36 月约 12-15 分钟；全量分块约 25-40 分钟；Electron 约 3-5 分钟。
 - 每步完成后把证据（命令+结果）写回本文件对应步骤。
+
+---
+
+# v1.6 验收修复（第二轮任务书，基线 `b266962935f5ea83d1a2831fd98508aba83658ff`）
+
+## 目标（用户任务书 2026-11-06 第二轮）
+
+1. **§一 未成交二手设备逃避维护费**：挂单设备仍属卖方，必须计入卖方每月维护费；成交后按月初持有时点
+   切换责任；撤单/部分成交/清算/锁定初始设备/存读档不重复计费或漏费；不把挂单设备重复计入产能；
+   新增跨月未成交、高价长期挂单、部分成交、撤单回归测试。
+2. **§二 清算维护费欠款偿付顺序**：先完成可变现资产处置，再用真实清算资金按债权优先规则偿付
+   维护服务商/银行，最后分配股东；确实无法偿付才记坏账；可对账、不重复扣费/造钱；覆盖现金不足、
+   设备出售后有钱、无买家、部分偿还、本月已结算后清算、初始设备锁定返还。
+3. **§三 存档边界**：桌面超 64MiB 错误文案仍写 8MB（`electron/saveIpc.ts:71`）；默认世界 ≥72 月
+   经实际桌面存档接口写入/读取/推进下月并报告字节数/结果/耗时；若接近/超过上限，提出并实现
+   有依据的长期方案（不得删除债券/贷款/权益/追溯所需权威数据）；自动/手动存档失败提示正确且
+   不覆盖原有效存档。
+4. **§四** 保留价格/AI 政策额度/维护费 1%/退出等已实现规则；构建+针对性测试+存档/资金守恒/清算
+   回归；Electron 实测挂单维护费/财务/存档；如实报告高失业/食品覆盖/政府债务；推送功能分支。
+
+## 分工与写作用域
+
+| 工作流 | owner | 写作用域 |
+|---|---|---|
+| F1 §一 挂单设备维护费 | equip-dev | `src/simulation/equipment/**`、`src/simulation/companies/lifecycle/lifecycle.ts`、`tests/maintenance-listing-v17.test.ts` |
+| F2 §二 清算偿付顺序 | equip-dev | 同上 + `tests/liquidation-maintenance-order-v17.test.ts` |
+| F3 §三 存档边界 | save-dev | `electron/saveIpc.ts`、`src/platform/saveBridge.ts`、`src/app/gameStore.ts`、`tests/save-*.test.ts`（新增 save-boundary-v17.test.ts） |
+| F4 集成/验收 | lead | `scripts/`、`docs/`、`PLAN.md`、`PROGRESS.md`、`README.md`、git 提交/推送 |
+
+共享 `src/simulation/contracts/types.ts` / `src/data/config.ts` 仅允许 edit 追加可选字段；save 版本不升。
+
+## 步骤与验收
+
+- [x] F1 equip-dev：`maintenanceBilledUnits` = equipment + 未成交二手挂单 units，快照/直调回退/AI 估算
+  三处同口径；成交/撤单责任切换正确；`tests/maintenance-listing-v17.test.ts` 7/7 绿（用户复现 2 台
+  工业设备高价挂单未成交第 2 月仍计 3,800），既有维护费/横切测试不回归。
+- [x] F2 equip-dev：`planCompanyMaintenanceOnLiquidation`（处置前算应计）→ 设备处置 → 现金偿付
+  当月+旧欠（不足才坏账）→ 银行债务 → 股东；复现例实付 13,800、坏账 0、股东 166,200；
+  `tests/liquidation-maintenance-order-v17.test.ts` 6/6 绿（含无买家/部分偿还/已结算后清算/锁定初始设备/银行债权）。
+- [x] F3 save-dev：读写/list 文案统一 `存档过大（超过 64MB / 64MiB 限制）`；72 月存档实测
+  53,313,078B→gzip 落盘 2,495,647B（4.7%）；实现桌面 gzip 压缩（旧明文兼容、格式版本 9、不删权威数据）；
+  自动/手动失败不覆盖原档并暂停提示。`tests/save-boundary-v17.test.ts` 18/18 绿。
+- [x] F4 lead：Electron 验收新增挂单维护费/企业财务/72 月档桌面接口闭环检查 → **27/27、0 console 错误**
+  （`docs/evidence_v1.6.1/`）；7 个 v17 测试与 acceptance 重锁；交付报告 `DELIVERY_REPORT_v1.6.1.md`；
+  全量回归与 commit/push 见交付报告 §6.1/§8。

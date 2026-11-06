@@ -1,0 +1,144 @@
+{
+  "generatedAt": "2026-11-06T15:09:12.795Z",
+  "electron": "38.8.6",
+  "checks": [
+    {
+      "name": "启动进入区域视图，右栏 6 个城市标签可见",
+      "pass": true,
+      "detail": "{\"view\":\"region\",\"tabs\":6}"
+    },
+    {
+      "name": "开局人口 = 基线 ×5，非劳动 20%、劳动力 80%，就业+失业=劳动力",
+      "pass": true,
+      "detail": "[{\"id\":\"lanport\",\"name\":\"岚港\",\"population\":600000,\"nonLabor\":120000,\"laborForce\":480000,\"employed\":65540,\"unemployed\":414460,\"jobs\":null},{\"id\":\"ironvale\",\"name\":\"铁谷\",\"population\":430000,\"nonLabor\":86000,\"laborForce\":344000,\"employed\":54540,\"unemployed\":289460,\"jobs\":null},{\"id\":\"greenfield\",\"name\":\"青原\",\"population\":320000,\"nonLabor\":64000,\"laborForce\":256000,\"employed\":48440,\"unemployed\":207560,\"jobs\":null}]"
+    },
+    {
+      "name": "人口标签显示就业结构与「需求 vs 成交」，t0 成交显著低于需求",
+      "pass": true,
+      "detail": "{\"demand\":{\"desiredConsumption\":1238804074.04,\"consumption\":413585313.19,\"unmetFunding\":461587541.47,\"budget\":501805472.64,\"loanFinancedConsumption\":0,\"depositWithdrawn\":15305963.040000001},\"population\":{\"total\":600145,\"employed\":64919,\"unemployed\":415197,\"nonLabor\":120029,\"laborForce\":480116}}"
+    },
+    {
+      "name": "人口标签显示居民投资面板：有效份额/净资产可见且与报告同口径",
+      "pass": true,
+      "detail": "{\"section\":true,\"text\":\"HOUSEHOLD INVESTMENT\\n          居民投资实体 · 有效份额与净资产\\n        \\n        1,443,818,057.49 份\\n      \\n      口径与月度投资报告一致：有效份额 =  hare  + openingShare ；投资实体净资产 = 现金 + 股票市值 + 债券估值；每份净值 = 净资产 ÷ 有效份额合计。股票市值不是现金，债券按发行批次记在投资实体层。\\n      \\n        投资实体净资产14.75 \"}"
+    },
+    {
+      "name": "企业「经营」显示设备表与生产计划（设备/劳动/计划/实际分离）",
+      "pass": true,
+      "detail": "{\"section\":true,\"plan\":true,\"initialSection\":true,\"initialText\":\"初始实物出资\\n          无实物出资\\n        \\n        \\n          来源全部为市场采购无创办实物出资记录（旧档/未带设备）\\n          实物出资台数0 台设备全部来自游戏内市场或政府储备\\n          实物出资估值—按创办时单价记录，仅审计\\n          锁定期剩余无锁定设备设备全部可按二手规则出售\\n          市场采购1 台游戏内设备市场 / 政府储备\\n          持有合计1 台设备产能按台数重算\\n   \",\"rows\":[{\"kind\":\"farm\",\"units\":0,\"capacity\":0,\"marketPrice\":96900,\"governmentStock\":72},{\"kind\":\"industry\",\"units\":0,\"capacity\":0,\"marketPrice\":161500,\"governmentStock\":180},{\"kind\":\"energy\",\"units\":1,\"capacity\":337200.00000000006,\"marketPrice\":129200,\"governmentStock\":48}],\"planView\":{\"plannedOutput\":256272,\"equipmentLimit\":337200,\"laborLimit\":450121.54,\"reasons\":[\"销售参考 269760.00（近 1 月实际销量），目标库存 134880.00，现有库存 148368.00\",\"设备产能 337200.00，劳动产能 450121.54\",\"扩产条件未满足：上月设备利用率 0.0%、本月计划 76.0%，未连续 2 个月达到 80%\"]},\"salesHistory\":[],\"text\":\"设备 · 产能 · 生产计划 能源 设备产能33.7 万单位 / 月 劳动产能41.4 万单位 / 月 计划产量25.6 万T1 计划 上月产出25.6 万利用率 73.0% 员工 / 岗位1,104 / 684工资 531.1 万/月 成品库存40.5 万无销售参考 初始实物出资 无实物出资 来源全部为市场采购无创办实物出资记录（旧档/未带设备） 实物出资台数0 台设备全部来自游戏内市场或政府储备 实物出资估值—按创办时单价记录，仅审计 锁定期剩余无锁定设备设备全部可按二手规则出售 市场采购1 台游戏内设备市场 / 政府储备 持有合计1 台设备产能按台数重算 该企业没有实物出资记录：设备全部\"}"
+    },
+    {
+      "name": "企业设备面板显示初始设备来源（模拟范围外实物出资/市场采购）与锁定期",
+      "pass": true,
+      "detail": "{\"section\":true,\"text\":\"初始实物出资\\n          无实物出资\\n        \\n        \\n          来源全部为市场采购无创办实物出资记录（旧档/未带设备）\\n          实物出资台数0 台设备全部来自游戏内市场或政府储备\\n          实物出资估值—按创办时单价记录，仅审计\\n          锁定期剩余无锁定设备设备全部可按二手规则出售\\n          市场采购1 台游戏内设备市场 / 政府储备\\n          持有合计1 台设备产能按台数重算\\n   \"}"
+    },
+    {
+      "name": "政府面板显示 AI 经济体检/玩家市长不代选政策，数值来自真实体检快照",
+      "pass": true,
+      "detail": "{\"ai\":true,\"mayor\":false,\"aiText\":\"AI 政府 · 经济体检2026.02 快照 · 只读 失业档位正常3 月均值 86.0% · 原始档 危机 · 迟滞/开局上限生效 失业率 3 月均值86.0%趋势 0.0%（环比前 3 月） 症结高失业（3 月均值 86.0%，危机档）按真实失业/供需/招聘判定 就业 / 失业 / 劳动力65,540 / 414,460 / 480,000真实人口口径 上月招聘 / 裁员0 / 0创办 0 · 退出 0 岗位空缺0企业 + 公共部门未招满 食品需求 / 产出1560 万 / 0基本需要量 / 上月产出 食品库存覆盖0.16 个月库存 252 万 · 产能 573 万 食品价格 / 未满足需求52.25 / 0价格单位信用点 AI 体检 · 财政口径仅市长可见 债务/GDP、债务预警、债券与贷款到期压力、月政\",\"mayorText\":\"\"}"
+    },
+    {
+      "name": "非市长：AI 体检不显示债务/GDP/预警/到期/预算，视图数据预算为 null",
+      "pass": true,
+      "detail": "{\"isMayor\":false,\"aiRestrictedBlock\":false,\"fiscalRestricted\":true,\"aiText\":\"AI 政府 · 经济体检2026.02 快照 · 只读\\n        \\n        \\n          \\n            失业档位正常3 月均值 86.0% · 原始档 危机 · 迟滞/开局上限生效\\n            失业率 3 月均值86.0%趋势 0.0%（环比前 3 月）\\n            症结高失业（3 月均值 86.0%，危机档）按真实失业/供需/招聘判定\\n            就业 / 失业 / 劳动力65,540 / 414,460 / 480,000真实人口口径\\n            上月招聘 / 裁员0 / 0创办 0 · 退出 0\\n            岗位空缺0企业 + 公共部门未招满\\n            食品需求 / 产出1560 万 / 0基本需要量 / 上月产出\\n            食品库存覆盖0.16 个月库存 252 万 · 产能 573 万\\n            食品价格 / 未满足需求52.25 / 0价格单位信用点\\n          \\n        \\n          AI 体检 · 财政口径仅市长可见\\n          债务/GDP、债务预警、债券与贷款到期压力、月政策预算与参考税收仅该城市现任市长可见；公开信息见上方失业、招聘与食品供需。\\n        \\n        公开部分来自真实\",\"restrictedText\":\"AI 体检 · 财政口径仅市长可见\\n          债务/GDP、债务预警、债券与贷款到期压力、月政策预算与参考税收仅该城市现任市长可见；公开信息见上方失业、招聘与食品供需。\",\"allBudgetsNull\":true,\"allDefaultBudgetsNull\":true,\"historyEmpty\":true}"
+    },
+    {
+      "name": "市长：AI 体检受限财政口径出现，政策卡显示参考/预留/未支付与资金预算",
+      "pass": true,
+      "detail": "{\"isMayor\":true,\"restrictedBlock\":true,\"restrictedText\":\"财政口径仅市长可见 · AI 决策参考\\n          \\n            月政策预算155.8 万占参考税收 5.0%\\n            税收参考月数真实 0 月 / 估算 12 月真实月均 0 · 估算 3115.1 万/月\\n            债务 / GDP0.0%预警线 85%（非破产线）\\n            本月到期压力0.0%债券到期 0 · 贷款到期 0\\n            政府财政余额6000.0 万体检时点可用资金\\n          \\n          预算参考：近 12 月平均月税收 31151424（真实 0 月 + 估算 12 月）× 5%\",\"cardText\":\"已支出 0 / 总预算 80.0 万｜本月参考 80.0 万 · 预留 0 · 未支付 0 · 来源 —\",\"budgetVisible\":true,\"referenceVisible\":true}"
+    },
+    {
+      "name": "离任后立即恢复非市长受限视图",
+      "pass": true,
+      "detail": "{\"isPlayerMayor\":false}"
+    },
+    {
+      "name": "市场快照显示 §3 口径说明（居民实际食品成交 = 本地 + 跨城进口）",
+      "pass": true,
+      "detail": "{\"note\":true,\"text\":\"口径：“成交”是本地市场成交（不含跨城进口）；“贸易”列分别显示跨城进口与区域外出口。居民实际食品成交 = 本地市场成交 + 跨城进口（居民侧含进口花费，见人口标签的「需求 v  成交」）。\",\"header\":true}"
+    },
+    {
+      "name": "构造玩家经营三家岚港企业后，设备买卖权限在视图层生效",
+      "pass": true,
+      "detail": "{\"fixture\":{\"a\":true,\"b\":true,\"c\":true},\"canOperate\":true}"
+    },
+    {
+      "name": "界面买入 1 台能源设备：设备 +1、货源减少、企业付款=卖方收款（企业库存或政府储备）",
+      "pass": true,
+      "detail": "{\"buyBefore\":{\"cash\":6235160,\"treasury\":0,\"units\":1,\"stock\":48,\"price\":160000,\"marketPrice\":129200,\"stockMonths\":0,\"sellers\":[{\"id\":\"lp-energy-equipment\",\"cash\":1337133.6,\"inventory\":8.09}]},\"buyAfter\":{\"cash\":6105960,\"treasury\":0,\"units\":2,\"stock\":48,\"sellers\":[{\"id\":\"lp-food\",\"cash\":434894224.49,\"inventory\":0},{\"id\":\"lp-garment\",\"cash\":91499702.53,\"inventory\":0},{\"id\":\"lp-appliance\",\"cash\":47867275.05,\"inventory\":0},{\"id\":\"lp-energy\",\"cash\":6105960,\"inventory\":0},{\"id\":\"lp-textile\",\"cash\":18406142.8,\"inventory\":0},{\"id\":\"lp-food2\",\"cash\":69043342.98,\"inventory\":0},{\"id\":\"lp-food3\",\"cash\":65514273.78,\"inventory\":0},{\"id\":\"lp-food4\",\"cash\":42984306.27,\"inventory\":0},{\"id\":\"lp-grain2\",\"cash\":11004882.8,\"inventory\":0},{\"id\":\"lp-grain3\",\"cash\":10483012.8,\"inventory\":0},{\"id\":\"lp-grain4\",\"cash\":9813349.6,\"inventory\":0},{\"id\":\"lp-energy2\",\"cash\":0,\"inventory\":0},{\"id\":\"lp-energy3\",\"cash\":0,\"inventory\":0},{\"id\":\"lp-metal2\",\"cash\":5337710,\"inventory\":0},{\"id\":\"lp-farm-equipment\",\"cash\":1496292.8,\"inventory\":0},{\"id\":\"lp-industry-equipment\",\"cash\":1460071.2,\"inventory\":0},{\"id\":\"lp-energy-equipment\",\"cash\":1466333.6,\"inventory\":7.09},{\"id\":\"lp-fiber2\",\"cash\":6220943.2,\"inventory\":0},{\"id\":\"lp-textile3\",\"cash\":18748152.8,\"inventory\":0},{\"id\":\"lp-garment3\",\"cash\":27652348.8,\"inventory\":0},{\"id\":\"lp-appliance3\",\"cash\":35081810.21,\"inventory\":0}]},\"spent\":129200,\"received\":0,\"sellerDelta\":[{\"id\":\"lp-energy-equipment\",\"inventory\":1,\"cash\":129200}],\"path\":\"company\"}"
+    },
+    {
+      "name": "界面挂出 2 台二手设备：立即扣除设备、生成本城委托并显示在列表",
+      "pass": true,
+      "detail": "{\"sellSource\":{\"kind\":\"industry\",\"units\":12},\"offer\":{\"id\":\"used-1\",\"companyId\":\"lp-food\",\"kind\":\"industry\",\"units\":2,\"askPrice\":130000},\"unitsAfter\":10}"
+    },
+    {
+      "name": "界面买入二手设备：委托清空、买方设备 +2、买卖双方现金等额转移",
+      "pass": true,
+      "detail": "{\"usedBefore\":{\"buyerCash\":91499702.53,\"sellerCash\":434894224.49,\"buyerUnits\":1},\"usedAfter\":{\"buyerCash\":91239702.53,\"sellerCash\":435154224.49,\"buyerUnits\":3,\"offersLeft\":0},\"usedCost\":260000}"
+    },
+    {
+      "name": "股票市场大窗口仍可打开并显示行",
+      "pass": true,
+      "detail": "{\"window\":true,\"rows\":65,\"title\":\"STOCK MARKET\\n          股票市场\\n          有投票权股份\"}"
+    },
+    {
+      "name": "14 个月真实 tick：商品价格均为正、单月变动不超过配置上限",
+      "pass": true,
+      "detail": "{\"tick\":15,\"maxAbsChange\":15,\"pricesFinite\":true}"
+    },
+    {
+      "name": "设备维护费按月初快照真实结算：应计 = 台数 × 月初价 × 1%（误差 ≤0.05），城市已真实付款",
+      "pass": true,
+      "detail": "{\"company\":\"lp-food\",\"due\":25300,\"expected\":25300,\"cityDue\":356736.6,\"cityPaid\":351236.6}"
+    },
+    {
+      "name": "政策月预算为合计额度：Σ分项参考预算 ≤ 本月总额度，且无分项实支+未支付超出自身额度",
+      "pass": true,
+      "detail": "{\"quota\":6000000,\"allocated\":6000000,\"allocations\":2,\"over\":0}"
+    },
+    {
+      "name": "公共岗位统计可读：新增/在岗/撤销/实发工资均为非负数（人数与人次分开）",
+      "pass": true,
+      "detail": "{\"added\":476,\"headcount\":476,\"removed\":0,\"wages\":1999200}"
+    },
+    {
+      "name": "企业面板显示设备台数/计价/维护费/支付状态",
+      "pass": true,
+      "detail": "{\"hasPanel\":true,\"hasSection\":true,\"total\":\"2.5 万\",\"status\":\"支付状态已付清收款方：模拟范围外设备维护服务商\",\"rows\":1}"
+    },
+    {
+      "name": "未成交挂单设备仍计入卖方当月维护费（月初快照含挂单台数，撤单返还）",
+      "pass": true,
+      "detail": "{\"ok\":true,\"company\":\"lp-food\",\"tick\":16,\"beforeIndustry\":23,\"beforeOfferUnits\":0,\"afterListIndustry\":22,\"offerUnits\":1,\"baseIndustry\":23,\"expectedDue\":25300,\"due\":25300,\"paid\":25300,\"arrearsAdded\":0,\"cancelled\":true,\"afterCancelIndustry\":23,\"equipmentAfterTick\":22}"
+    },
+    {
+      "name": "企业财务面板显示设备维护费独立费用行",
+      "pass": true,
+      "detail": "{\"hasRow\":true,\"rowText\":\"设备维护费2.5 万\"}"
+    },
+    {
+      "name": "存读档保留设备/现金/人口/债券/设备储备/销售历史/生产计划/维护费快照/政策额度且完全一致",
+      "pass": true,
+      "detail": "{\"saved\":true,\"loaded\":true,\"advanced\":\"2027 年 06 月\",\"toasts\":[\"已从manual-1恢复（保存于 2026/11/6 15:08:40）。\"],\"diffKeys\":[]}"
+    },
+    {
+      "name": "1100x700 无横向溢出且城市标签仍完整",
+      "pass": true,
+      "detail": "{\"overflowX\":false,\"tabs\":6,\"labels\":[\"概况\",\"人口\",\"企业\",\"市场\",\"政府\",\"交通\"],\"view\":\"region\",\"equipment\":true}"
+    },
+    {
+      "name": "72 月默认世界经桌面存档接口：读取成功→推进 1 月→写入成功（gzip）→再读取成功",
+      "pass": true,
+      "detail": "{\"sourceBytes\":53313078,\"savedBytes\":2495650,\"savedIsGzip\":true,\"compressionRatio\":0.047,\"loadMs\":2923,\"tickMs\":10784,\"saveMs\":4211,\"reloadMs\":3427,\"startTick\":72,\"advancedTick\":73,\"companies\":477,\"toasts\":[\"已保存到 manual-t72b。\",\"已从manual-t72b恢复（保存于 2026/11/6 15:09:04）。\"]}"
+    },
+    {
+      "name": "全程无控制台错误（过滤 GPU/GL 噪声）",
+      "pass": true,
+      "detail": ""
+    }
+  ],
+  "passed": 27,
+  "total": 27,
+  "consoleErrors": []
+}

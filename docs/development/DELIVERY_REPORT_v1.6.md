@@ -6,6 +6,7 @@
 - 版本：`GAME_VERSION = 1.6.0`，`package.json = 1.6.0`，`SAVE_FORMAT_VERSION = 9`（不升版）
 - 环境：node v24.22.1 / npm 11.19.1；2 核 / ~2GB 容器；Electron 38；Xvfb `:99`
 - 说明：所有数字来自实际运行；未达标处如实标注，不伪造数据、不改统计口径掩盖问题。
+- 后续修复：v1.6 验收问题（挂单设备维护费、清算偿付顺序、64MiB 文案/存档 gzip）见 `docs/development/DELIVERY_REPORT_v1.6.1.md`；本报告 §3.6 的“64MB / 两处上限”口径由 v1.6.1 更新为 64MiB + 桌面 gzip 压缩。
 
 ## 1. 结论摘要（逐项对照任务书）
 
