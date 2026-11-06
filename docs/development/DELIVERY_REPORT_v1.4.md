@@ -214,7 +214,12 @@
   - `3830894` docs(v1.4)：交付报告、README 与 1.4.0 版本标识
   - `0d6831a` fix(v1.4)：回退 create 时预写份额账本（保持 v1.2 股息归属语义），按 v1.4 实际耗时/初始设备行为校准慢测试超时与观察窗口
   - `419168a` test(acceptance)：最终交付代码重跑桌面验收 15/15 并刷新 v1.4 证据
-  - 其后还有一次 docs 提交用于回填测试/推送状态（最终 HEAD 以 `git rev-parse HEAD` 为准）
+  - `98f414b` docs：回填最终证据提交与本地提交链（待推送）
+  - `ddcd102` / `10c2a9c` docs：记录无凭据备用交付（git bundle 与 patch 系列）
+  - `3fec9d1` test(ui)：ui-v14 面板用例改为结算后断言（openingShares 由首次结算补齐）
+  - `2cc93ea` docs：记录最终代码复跑（ui-v14 修正、块 10 全通过、受影响套件复跑）
+  - `c25538a` docs：备用交付补充完整可克隆 bundle
+  - 以上 `fec99e4..c25538a` 共 12 个提交已推送（见 13.6）；本报告回填提交随后同分支推送，最终 HEAD 以 `git rev-parse HEAD` 为准。
 - 工作区：干净；未合并 main、未改写历史、未 force push。
 
 ### 13.2 完整测试套件（分块运行）
@@ -279,16 +284,12 @@
 
 **结论**：124 个测试文件 / 992 项全部通过（0 断言失败；分块中 vitest 进程 exit≠0 的 4 次均为容器 `[vitest-worker] Timeout calling "onTaskUpdate"` 噪声，断言全绿，与 v1.3 记录一致）。上述调整均为测试口径/超时/setup（2 处容器吞吐、1 处 v1.4 初始设备带来的早期采购行为、1 处 Lead 改动回归、1 处 ui-v14 setup），没有删除或放宽产品守恒断言。
 
-### 13.6 推送状态（未完成：缺凭据）
+### 13.6 推送状态（已完成）
 
-- 本地提交链（`feature/stock-market-ui-tax`）：`fec99e4`（v1.3 基线）→ `fc9ab01` → `8226633` → `3830894` → `0d6831a` → `419168a`（证据）→ 其后 docs 提交（本报告）。最终本地 HEAD 由最后一次 docs 提交构成，以 `git rev-parse HEAD` 为准。
-- 推送尝试：`git push origin feature/stock-market-ui-tax` → 失败 `fatal: could not read Username for 'https://github.com': terminal prompts disabled`（本环境无 GitHub 凭据，未提供 PAT）。
-- 因此：**远端功能分支仍为 `fec99e4a923f4bc95077525f7ea9c200215b6d8b`，`main` 仍为 `6c45000efc4c406d30e22c0a12bd066fc2df61f7`；本地提交待推送。**
-- 需要用户提供 GitHub PAT（建议仅作为环境变量 `GH_PUSH_TOKEN` 或临时 credential helper 使用，不写入仓库文件）；收到后执行 `git push origin feature/stock-market-ui-tax` 并在本节回填本地/远端完整 SHA。
-- **无凭据备用交付**（按既定“无凭据给 bundle”规则）：
-  - `git bundle`：`/workspace/Coding/multi-city-sim-v1.4-commits.bundle`（11 MB，含 `fec99e4..HEAD` 全部提交，生成于最终 docs 提交之后；在仓库内 `git fetch <bundle> feature/stock-market-ui-tax` 即可得到同样提交）。
-  - 补丁系列：`/workspace/Coding/patches-v1.4/0001..00NN.patch`（`git format-patch fec99e4..HEAD` 生成，可 `git am` 依序应用）。
-  - 完整可克隆 bundle（含全部历史，68 MB）：`/workspace/Coding/multi-city-sim-v1.4-full.bundle`（已实测 `git clone` 成功、HEAD 与本地一致）。
-  - 以上 bundle/patch 与本地 HEAD 一致，可复现同一提交链；推送后本节回填远端完整 SHA。
-
-> 注：本节表格中的多 seed 债务/破产数据以 `cityDebt` 独立重算，与主报告一致；AI 支出/受益/岗位为该 seed 36 月内脚本逐月累计。
+- 推送命令（PAT 仅作一次性环境变量，未写入仓库或文件）：
+  `git -c credential.helper=... push origin feature/stock-market-ui-tax`
+- 推送结果：`fec99e4..c25538a  feature/stock-market-ui-tax -> feature/stock-market-ui-tax`，**exit 0**。
+- 推送后核验：`git fetch origin` 后 **本地 HEAD = `origin/feature/stock-market-ui-tax` = `c25538abb54ebf8e811917861cc1b6dac1420151`**；`origin/main` 仍 `6c45000efc4c406d30e22c0a12bd066fc2df61f7`（未合并、未改写历史）。
+- 本报告回填提交随后在同一分支推送；最终本地/远端 SHA 以 `git rev-parse HEAD` / `git rev-parse origin/feature/stock-market-ui-tax` 为准。
+- 安全提醒：本次使用的 GitHub PAT 为一次性环境变量，未落盘、未写入日志/仓库（已 `git grep github_pat_` 核验无命中）；**请随后立即在 GitHub 撤销该 PAT**。
+- 无凭据备用交付（现已不必使用，保留作审计）：`multi-city-sim-v1.4-commits.bundle`（精简）、`multi-city-sim-v1.4-full.bundle`（完整可克隆）、`patches-v1.4/0001..0012.patch`。
