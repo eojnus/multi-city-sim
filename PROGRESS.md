@@ -1,80 +1,96 @@
-# PROGRESS — multi-city-sim v1.5 交接
+# PROGRESS — multi-city-sim v1.6 交接
 
 > 新会话第一句：`Read /workspace/Coding/multi-city-sim/PROGRESS.md and git log -8, then continue from "Next".`
 > 本文件是唯一可信状态；不要从旧对话记忆推断。不要在文件里写 token。
 
 ## Goal
 
-v1.5 验收修复（6 项）：①非市长财政信息泄露；②债券无流动性时跨城迁移权益；③食品成交/覆盖率报告口径；
-④AI 政策预算与资金执行衔接；⑤初始设备兼容入口；⑥构建/回归/完整测试/72 月对照/Electron/报告/推送。
-验收：`tsc 0` + 分块全量测试全绿 + Electron 19/19 + 72 月与多 seed 数据 + 报告/版本 + 推送 feature 分支
-（不合并 main、不改写历史）。
+v1.6（按用户 2026-11-06 任务书）：①修复 v1.5 验收遗留（AI 政策月预算合计额度、公共岗位
+人数/人次统计、债券迁移微小权益）；②商品价格短缺快涨/进口计入需求/向基础价回归/可配置；
+③企业竞争、生产、招聘；④设备月度维护费 = 新设备市场价 1%；⑤僵尸企业退出；⑥既有规则保持。
+验收：tsc 0 + 构建成功 + 全量测试全绿 + 72 月默认种子 + 3 个对照种子 + Electron 实机核查 +
+交付报告 + 推送功能分支（不合并 main、不改写历史）。
 
 ## Done（均已验证）
 
-- **已交付并推送**：分支 `feature/stock-market-ui-tax`；基线 `a20f1cb7303a237c7499415b2b6862f32e53f24d`；
-  **本地 HEAD = 远端 = `483c6fe2ea98e80291dd3b2244a2cd878255a7f1`**；`origin/main` 仍
-  `6c45000efc4c406d30e22c0a12bd066fc2df61f7`；工作区干净；版本 `GAME_VERSION/package = 1.5.0`；
-  `SAVE_FORMAT_VERSION = 9`（未变）。
-- 本轮提交链（`a20f1cb..483c6fe`）：`85a8673` feat(v1.5) → `ea5b3c2` test(acceptance) →
-  `1958a17` fix(v1.5) → `b6bda6e` test(acceptance) → `887aa93` docs(v1.5) → `483c6fe` docs。
-- **§一 非市长财政权限**：`src/ui/panels.ts` AI 体检拆公开/受限（`ai-government` / `ai-checkup-restricted` /
-  `fiscal-restricted`）；`src/app/gameStore.ts::policyView` 非市长 budget/spent/tracking 金额为 null、
-  defaultBudget null、history 空；`src/simulation/policies/policies.ts` 5 处带金额日志加
-  `visibility:{scope:'mayor'}`。测试 `tests/ui-fiscal-permission.test.ts` 15 项。
-- **§二 债券无流动性迁移**：`src/simulation/investors/investors.ts` 迁移时按价值比例真实拆债券持债
-  （0.01 份粒度、目标实体合并防碎片、不改兑付），`src/simulation/core/invariants.ts` 一处 0.01 容差。
-  测试 `tests/investor-dividend-distribution.test.ts` 10 项（复现例：A 仅 10,000 债券、迁出 5,000，迁移者守恒）。
-- **§三 食品口径**：`scripts/economy-v09-report.ts::cityFoodMetrics`：居民实际成交=Σ`group.lastMonth.basicSoldUnits`
-  （含进口）/基本需要；新增 `HouseholdMonthlyStats.basicEffectiveUnits?`（`src/simulation/markets/consumer.ts` 落账）；
-  `scripts/v14-seed-compare.ts` 同步。青原 t72 覆盖率由旧 23.2% 修正为 51.2%。测试
-  `tests/food-report-coverage-v15.test.ts` 4 项。
-- **§四 AI 政策资金**：`policies.ts` 新增 `preparePolicyFunding`/`finalizePolicyFunding`/`policyFundingMonthlyReport`；
-  `PolicyState.fundingMonths`、`ActivePolicy.referenceBudget/reservedThisMonth/unpaidThisMonth/fundingSourceThisMonth`
-  （`types.ts`）；tick 15b 顺序（`core/simulation.ts`）；先立项后融资（`deferFunding`）、按 `effects.aiCrisisPolicy`
-  标记资助、公共岗位纳入、85% 借款上限/100% 破产/玩家市长边界不变；修复完成政策 `spent>budget` 存档校验 bug
-  （总预算=参考×(monthsRemaining+1)）。测试 `tests/ai-policy-funding-v15.test.ts` 16 项 +
-  `tests/ai-government-v14.test.ts` 35 项。
-- **§五 初始设备兼容入口**：`src/simulation/companies/lifecycle/lifecycle.ts` 分发条件改为
-  `!usesLegacyFoundingPath(request)`（plan 走 v1.0 实物出资；显式 capital 为旧语义且正常游戏不可达，已标注）。
-  测试 `tests/founding-compat-v15.test.ts` 10 项。
+- 分支 `feature/stock-market-ui-tax`；用户验收基线 `483c6fe2ea98e80291dd3b2244a2cd878255a7f1`；
+  开工时本地/远端 HEAD `f483f609599771663de3e8311aaf1bd608edc707`（基线之后的交接文档提交，
+  已在其上继续）；`origin/main` 仍 `6c45000efc4c406d30e22c0a12bd066fc2df61f7`。
+- 版本 `GAME_VERSION/package = 1.6.0`；`SAVE_FORMAT_VERSION = 9`（未升版，新增字段全部 optional）。
+- 本轮提交链（在 `f483f60` 之上）：见本文件末尾“提交/推送”；工作区在交付时应干净。
+- **§一.1 AI 政策月预算**：`policies.ts` 以当月体检 `budget` 为 quota，对当月全部在行 AI 危机政策
+  按参考需求权重最大余数分配（Σ分项 ≤ quota，修复两项政策各拿满 2× 的问题）；`fundingMonths`
+  新增 `quota/policyBudgets/publicWagesAttributed/publicWagesOverQuota`；claim/reserved/unpaid
+  按分项封顶；公共工资按 `fiscal.publicWages` 实付归属。测试 `tests/policy-budget-v16.test.ts` 13 项。
+- **§一.2 公共岗位统计**：`PolicyState.publicJobsMonths`（jobsAdded/headcount/jobsRemoved/wagesPaid
+  + 累计岗位/累计人次分开）；报告覆盖 active+history，真实岗位不再恒 0。同日测试内覆盖。
+- **§一.3 债券迁移尾差**：`investors.ts` 份数 = 本金/面额内部全精度（面额 1000 时 1 分 = 1e-5 份），
+  4 信用点可迁移；`invariants.ts` 容差不变（仅注释）。测试 `tests/bond-migration-tail-v16.test.ts` 5 项。
+- **§二 商品价格**：`markets.ts` 缺口只用 `unmetDemand`（已被跨城进口冲销）；`config.market` 新增
+  `shortageRiseSpeed=0.3 / surplusFallSpeed=0.12 / competitionFallSpeed=0.08 / reversionSpeed=0.03 /
+  maxMonthlyChange=0.15 / costAnchorFactor=1 / costAnchorMaxFactor=1.6`；锚价 = 上月单位生产成本
+  中位数 clamp [基础价, 1.6×基础价]；过剩用“本地成交+进口”覆盖量；无需求不涨。测试
+  `tests/price-v16.test.ts` 14 项（含“需求 100/本地 60/进口 40 不涨”）。
+- **§三 竞争/生产/招聘**：新增 `companies/pricing.ts`（报价内部 6 位精度、至少 1 分可见变动、
+  对手让价、单位成本×(1+3%) 底线）、`companies/cost.ts`（维护费/固定成本/单位成本接入 AI）；
+  `production-plan.ts` 可触达需求份额（缺货+资金缺口 5%+降价机会 5%+跨城×0.5）、需求驱动增产
+  （盈利+缺货+利用率<80% 用现有设备并招工）；`planning.ts` 卖多余设备（初始设备锁定期整段不卖）；
+  `founding.ts` 防羊群。测试 `tests/competition-v16.test.ts` 8 项。
+- **§四 设备维护费**：新增 `equipment/maintenance.ts`；tick 开头快照 `company.maintenanceBase/
+  maintenancePrices`（D1：月初持有 + 月初价；当月买入下月计费、当月卖出/挂单/破产仍计当月）；
+  每类 = 台数 × 月初新机参考单价 × 1%；应计全额进 `preTaxProfit`、现金支付进 `operatingCashFlow`；
+  收款方为模拟范围外服务商（`world.equipmentMarket.maintenanceMonth/maintenanceHistory` 独立流水，
+  不进设备厂收入/政府税收）；现金不足先真实融资、不足记 `maintenanceArrears`（欠费不得分红、
+  不再以贷养欠、清算记坏账）；面板显示台数/单价/费率/维护费/状态。测试
+  `tests/equipment-maintenance-v16.test.ts` 16 项。
+- **§五 僵尸企业**：删除 `checkBankruptcies` 的 `wage<=0 continue` 漏洞；`CompanyAiState.idleMonths`
+  （读 previousMonth、保护期清零、有经营即清零）；`idleExitMonths=6` + 现金+授信 < 1 月固定成本
+  （工资+维护费+偿债）且无恢复计划 → 复用 `liquidateCompany`。测试 `tests/zombie-exit-v16.test.ts` 7 项。
+- **§六 存档容量**：15 个月世界实测 12.09MB，旧 8MB 上限导致桌面存档失败；`src/platform/saveBridge.ts`
+  与 `electron/saveIpc.ts` 上限统一 64MB。
+- **集成期修复**：①维护费月度流水“月末欠付”改为“月初存量 + 本月增量”（旧实现跨月清算会扣成负数，
+  72 月实测 -2,839），`tests/v16-crosscut.test.ts` 12 月逐月对账；②v14 守恒测试因“锁定期内卖设备”
+  回归 → 锁定期整段不卖（pool-dev）；③v15 权限测试因公司现金与受限值偶然同值误报 → 只扫政府区块；
+  ④v11 旧档测试允许“真实出售/挂单”导致的设备减少；⑤inventory-cogs/production-feedback 利润恒等式
+  补维护费项；⑥acceptance 36 月轨迹按 v1.6 重锁。
 - **验证证据**：
-  - `npx tsc --noEmit` = 0；`npm run build` 成功。
-  - 分块全量 130 个测试文件（12 文件/块，11 块）全部通过；首轮 3 类失败已闭环（chunk2 预算预期没跟上、
-    chunk6 政策转移支付未落地居民群体、chunk11 crosscut 报告舍入/多种子超时），复跑 chunk1 12/107、
-    chunk2 12/128、chunk6 12/103、chunk11 中 crosscut 10/10 + v13 多种子 4/4，均绿。
-  - acceptance 终锁（36 月）：**无破产**（records 空）；t36 负债率 0.286466/0.414176/0.409088；债券 36 期
-    计划=成交=3,014,448；持债 985；券息 1,041 笔；政府贷款 105 笔 active（未偿 593,130,865.77）；
-    fundingMonths 24 月/城、unpaid=0；combined 7 套件 68/68。
-  - 72 月默认 seed 20261101：t72 失业 91.8%/88.5%/90.6%，基本食品覆盖率 16.3%/10.9%/13.3%，
-    负债率 46.3%/45.2%/66.5%，AI 政策每月真实借款/实支约 799.9 万（未达标记入报告，未改口径）。
-  - 4 seed 36 月对照：均 exit 0/不变量 0/无破产；AI 实支约 2.07–2.10 亿/城；失业 78.4–93.8%；
-    覆盖率 10.9–78.4%；负债率 28.5–53.5%。
-  - Electron：`npm run build` 后 `DISPLAY=:99 node_modules/electron/dist/electron --no-sandbox
-    --disable-dev-shm-usage --enable-unsafe-swiftshader scripts/acceptance-v09.cjs` → **19/19、0 console 错误**；
-    证据入仓 `docs/evidence_v1.5/`（report.json + 9 PNG）。
-  - 与 v1.4 报告差异：受控实验在临时 worktree 检出 `3830894` 用同脚本/参数跑 72 月，**逐项复现 v1.4 报告数字**；
-    差异来自提交 `0d6831a`（回退 `Simulation.create` 预写 openingShares），非脚本/参数/环境。
-- 交付报告：`docs/development/DELIVERY_REPORT_v1.5.md`；README v1.5.0。
+  - `npx tsc --noEmit` = 0（含 tests）；`npx tsc -p tsconfig.electron.json --noEmit` = 0；
+    `npm run build` 成功。
+  - 新增 7 个 v1.6 测试文件：价格 14 / 维护费 16 / 政策 13 / 债券 5 / 竞争 8 / 僵尸 7 / 横切 3 = 66 项全绿。
+  - 全量回归：136 个测试文件分 11 块（12 文件/块）执行；块 1（含重锁后 acceptance 9/9）、块 2
+    （settlement-resume H08 单跑 13/13 绿）、块 3/5/7/10 全绿、块 6/8/9 断言全绿（仅容器
+    `onTaskUpdate` RPC 噪声 exit≠0）、块 11/12 全绿；块 4 用 `--testTimeout=900000` 重跑
+    （economy-stability 120 月测试约 16 分钟，默认 180s 会超时；属容器性能边界，不是断言失败）。
+  - 72 月默认 seed 20261101：t72 失业 93.4%/84.7%/87.4%，基本食品覆盖率 24.2%/22.2%/30.0%，
+    食品价 79.64/85.27/77.28（基础 55，成本锚上限 88），负债率 78.5%(high)/50.6%/60.9%(watch)，
+    设备维护费 40.0/60.0/31.2 万/月，AI 政策 quota 600 万 = 分项 300+300 万、实支 499.9 万，
+    公共岗位在岗 476 人/实发 199.9 万/月。完整 checkpoint 数据见交付报告第 7 节。
+  - 3 对照种子 36 月（20261102/777001/424242）：均 exit 0、不变量 0、无破产；失业 82.0–90.1%、
+    食品覆盖率 14.5–38.7%、负债率 23.4–42.7%；运行时长 123.9s / 172.6s / 168.1s。
+  - Electron（生产构建 + Xvfb :99，Electron 38.8.6）：**24/24 检查通过、0 console 错误**；证据
+    `docs/evidence_v1.6/`（report.json + 9 PNG）；含 14 个月真实 tick 后的价格规则、维护费
+    结算/面板、政策额度分项、公共岗位、存读档（维护费快照/欠费/政策额度）检查。
+  - 交付报告：`docs/development/DELIVERY_REPORT_v1.6.md`；README v1.6.0。
 
 ## Next（按序）
 
-1. **等用户新任务书/验收反馈**；新会话先做基线确认：`git rev-parse HEAD origin/feature/stock-market-ui-tax
-   origin/main`、`git status --short`、`npx tsc --noEmit`。
-2. 若继续开发：新建任务时沿用本仓库约定——基线 SHA、分支不变、不 commit 由 owner 做（Lead 收口）、
-   每步有命令验证；开工先 `git fetch`，确认远端无新提交。
-3. 若需再次推送：需用户提供新 PAT（旧 PAT 已被要求撤销）。做法：仅作环境变量
-   `GH_PUSH_TOKEN`，`git -c credential.helper='!f(){ echo username=x-access-token; echo "password=$GH_PUSH_TOKEN"; };f'
+1. **等用户验收/推送**：本地提交已完成；**推送需要用户提供新 PAT**（旧 PAT 已按要求撤销；仓库无
+   SSH key、无 credential helper）。做法：仅作环境变量 `GH_PUSH_TOKEN`：
+   `git -c credential.helper='!f(){ echo username=x-access-token; echo "password=$GH_PUSH_TOKEN"; };f'
    -c http.version=HTTP/1.1 push origin feature/stock-market-ui-tax`，失败重试 3 次；推送后
    `git fetch` 核验本地=远端、main 未变，并提醒撤销 token。
-4. 若继续修经济：优先看 `DELIVERY_REPORT_v1.5.md` §7 已知问题（高失业/食品覆盖低、AI 借款推高债务、
-   债券按城基金份额共享、0.01 份尾差、capital 兼容路径不可达）。
+2. 新会话先做基线确认：`git rev-parse HEAD origin/feature/stock-market-ui-tax origin/main`、
+   `git status --short`、`npx tsc --noEmit`。
+3. 若继续开发：沿用仓库约定——基线 SHA、分支不变、不 amend/rebase/force、不合并 main、
+   每步有命令验证；开工先 `git fetch` 确认远端无新提交。
+4. 若继续修经济：优先看交付报告 §9（高失业/食品覆盖低、债务率上升、行业集中 agriculture、
+   idle 但现金充足企业占名额、食品价高于基础价、公共岗位规模小）。
 
 ## Open questions
 
-- 用户是否接受 v1.5（§六 要求等待验收）；下一轮是否继续修宏观经济（当前失业 ~90%、覆盖率 10–16%）。
-- 桌面权限检查使用显式身份夹具（生产构建 `setMayorDemo` 被 DEV 门禁禁用，直接设
-  `world.player.roles.mayorCityId`），是否需要补“真实选举上任”的桌面路径。
+- 用户是否接受 v1.6；下一轮是否继续修宏观经济（当前失业 ~85–93%、基本食品覆盖 19–30%）。
+- “长期无经营但现金/授信充足”的企业是否也应强制退出（当前 D6 只清算“无恢复能力”的僵尸企业）。
+- 食品价格高于基础价（成本锚达 1.6× 上限）是否符合预期，是否要放开/收紧成本锚上限。
 
 ## Key facts（环境与坑）
 
@@ -82,25 +98,39 @@ v1.5 验收修复（6 项）：①非市长财政信息泄露；②债券无流�
 - 环境：`export HOME=/workspace/Coding/.home; export npm_config_cache=/workspace/Coding/.npm-cache`
   （root 的 `/root/.npm` 无权限）。
 - 测试：`npx vitest run <files> --maxWorkers=1 --testTimeout=180000 --hookTimeout=1500000`；
-  容器偶发 `[vitest-worker]: Timeout calling "onTaskUpdate"` → 进程 exit≠0 但断言全绿（不是产品失败，
-  报告里如实说明）。分块脚本：12 文件/块（参考 `/tmp/run-v14-chunks.sh`，临时文件）。
-- **`tsc` 不检查 `scripts/`**（不在 tsconfig）：报告脚本运行时错误（变量重名等）只能在 `npx tsx` 冒烟时发现；
-  改脚本后必须 `npx tsx scripts/economy-v09-report.ts --months=3 --checkpoints=1,3` 冒烟。
-- 报告/数据：72 月约 10–13 分钟（`scripts/economy-v09-report.ts --months=72 --checkpoints=1,6,12,24,36,72
-  --seed=20261101`）；4 seed 36 月约 12–15 分钟（`scripts/v14-seed-compare.ts --months=36
-  --seeds=20261101,20261102,777001,424242`）。
+  大世界（企业数接近 160/城）单月 tick 2–5 秒：`tests/economy-stability.test.ts`（16+120+40 月）
+  需 `--testTimeout=900000`（120 月测试自带 1,200s 超时，实测约 978s）；容器偶发
+  `[vitest-worker]: Timeout calling "onTaskUpdate"` → exit≠0 但断言全绿（不是产品失败）。
+  分块脚本参考 `/tmp/run-v16-chunks.sh`（临时文件，12 文件/块）。
+- **`tsc` 不检查 `scripts/`**（不在 tsconfig）：改报告脚本后必须
+  `npx tsx scripts/economy-v09-report.ts --months=3 --checkpoints=1,3` 冒烟。
+- 报告/数据：72 月约 10–13 分钟（`scripts/economy-v09-report.ts --months=72
+  --checkpoints=1,6,12,24,36,72 --seed=20261101`）；3 个对照种子 36 月约 2–3 分钟/种子
+  （`scripts/v14-seed-compare.ts --months=36 --seeds=20261102,777001,424242`）。
 - 桌面：先 `npm run build`，再 `DISPLAY=:99 node_modules/electron/dist/electron --no-sandbox
-  --disable-dev-shm-usage --enable-unsafe-swiftshader scripts/acceptance-v09.cjs`；证据目录在脚本内
-  `docs/evidence_v1.5/`（换版本要改脚本里的 evidence 路径）。
+  --disable-dev-shm-usage --enable-unsafe-swiftshader scripts/acceptance-v09.cjs`；证据目录
+  `docs/evidence_v1.6/`（换版本要改脚本内路径）。Xvfb 需先启动。
+- 存档：`formatVersion 9` 不升版，新增字段全部 optional；桌面存档大小上限 64MB（15 月实测 12.09MB）。
 - Git：无 SSH 密钥、无 credential helper；不要 amend/rebase/force、不合并 main。
-- 校验工作区干净后提交；commit 拆分参考：feat(sim) / test(acceptance) / docs。
-- 历史 team 角色（本会话有，新会话默认没有，需要时重新 spawn）：gov-dev（政策/政府）、banking-dev（投资/银行）、
-  pool-migration-dev（企业/设备/迁移）、ui-dev（UI）、consumption-dev（消费）、tests-dev（测试）、wages-dev（生产/工资）。
-- 关键文件：`src/simulation/policies/policies.ts`、`policies/ai-labor.ts`、`government/{fiscal,bonds,debt,treasury}.ts`、
-  `core/simulation.ts`（tick 顺序）、`contracts/types.ts`、`core/save.ts`、`markets/consumer.ts`、`investors/investors.ts`、
-  `population/household-*.ts`、`companies/{lifecycle,founding}.ts`、`equipment/equipment.ts`、
-  `src/ui/panels.ts`、`src/app/gameStore.ts`、`scripts/economy-v09-report.ts`。
-- 已踩过的坑（不要重复）：① `settlePolicies` 在启动当月也执行一次 → 总预算必须 ×(months+1)（否则存档
-  `spent>budget` 校验失败）；② 政策转移支付必须同时落地 `group.cash/income/benefits/netCashChange`，且
-  `city.lastMonth.householdIncome` 只加政策实发、不能赋值为含退款的 `householdIncomeLastMonth`（会重复计退款）；
-  ③ 报告脚本变量重名会让 tsx 运行时才报错；④ 桌面生产构建不能用 `setMayorDemo`（DEV 门禁）。
+- 关键文件：`src/simulation/markets/markets.ts`（价格）、`policies/policies.ts`（额度/公共岗位）、
+  `equipment/maintenance.ts`（维护费）、`companies/{pricing,cost,production-plan,planning,founding}.ts`、
+  `companies/lifecycle/lifecycle.ts`（退出）、`investors/investors.ts`（债券迁移）、
+  `core/{simulation,save,invariants}.ts`、`data/config.ts`、`contracts/types.ts`、`ui/panels.ts`、
+  `scripts/economy-v09-report.ts`、`scripts/acceptance-v09.cjs`。
+- 已踩过的坑（不要重复）：①设备维护费“月末欠付”必须按“月初存量+本月增量”，否则跨月清算出现负数；
+  ②初始设备锁定期内 AI 不得出售该行业设备（v14 守恒测试比“锁定台数”更严）；
+  ③v15 权限测试的受限金额可能与企业现金偶然同值，检查范围要限定在政府区块；
+  ④旧档测试允许真实出售/挂单导致的设备减少（不是重算抹掉）；
+  ⑤利润恒等式（inventory-cogs/production-feedback）必须含 `maintenanceDue`；
+  ⑥acceptance 36 月轨迹在规则变更后需要按真实 v1.6 序列重锁（不要只改一两个断言）。
+
+## 提交/推送（本轮）
+
+- 本轮提交链（在 `f483f609599771663de3e8311aaf1bd608edc707` 之上）：
+  - `b2064d7` feat(v1.6)：规则与产品代码（价格/竞争/维护费/退出/政策额度/存档上限/报告脚本）
+  - `aa0ea0a` test(v1.6)：7 个新测试 + acceptance 重锁 + 兼容回归修复 + 桌面验收脚本
+  - `35cb76d` docs(v1.6)：交付报告、README 1.6.0、PLAN、桌面证据（24/24）
+  - 另有一次“SHA 回填”docs 提交（HEAD，见 `git log -1`）
+- 本地 HEAD = 上述回填提交；**截至本文件提交时未推送**（无 SSH key / 无 credential helper /
+  旧 PAT 已撤销）。`origin/feature/stock-market-ui-tax` 仍 `f483f60`，`origin/main` 仍 `6c45000`。
+- 推送步骤见“Next 1”；推送后把远端 SHA 回填到本文件与交付报告 10.3。

@@ -330,7 +330,26 @@
 
 ### 10.1 全量回归分块结果
 
-（见下方回填。）
+136 个测试文件分 11 块（12 文件/块，`/tmp/run-v16-chunks.sh`）执行 + 收尾补跑，合计约 1,126 项：
+
+| 块 | 文件/测试 | 结果 |
+|---|---|---|
+| 1 | 12 / 107 | 唯一失败是 v1.5 acceptance 36 月轨迹（规则变更后按 v1.6 真实序列重锁）；重锁后该文件 9/9 绿，其余 11 文件 101 项绿 |
+| 2 | 12 / 129 | 唯一失败是 `settlement-resume` H08 在容器负载下 180s 超时（断言未失败）；单独以 `--testTimeout=600000` 重跑 + v15-crosscut → 2 文件 13/13 绿 |
+| 3 | 12 / 73 | 全绿 |
+| 4 | 12 / 73 | 首轮被人工中止（`economy-stability` 三测试合计约 21 分钟）；以 `--testTimeout=900000` 重跑 **12/12 文件 73/73 绿**（1098s；120 月测试自带 1,200s 超时） |
+| 5 | 12 / 129 | 全绿 |
+| 6 | 12 / 112 | 断言全绿；仅容器 `onTaskUpdate` RPC 噪声（exit≠0） |
+| 7 | 12 / 92 | 全绿 |
+| 8 | 12 / 99 | 断言全绿；仅 RPC 噪声 |
+| 9 | 12 / 110 | 断言全绿；仅 RPC 噪声 |
+| 10 | 12 / 76 | 全绿 |
+| 11 | 12 / 97 | 唯一失败 `v11-economy` 旧档“设备台数不应减少”（v1.6 允许真实出售/挂单）；修复后该文件 7/7 绿，其余 11 文件全绿 |
+| 12（收尾） | 4 / 26 | `v15-crosscut` 非市长 HTML 误报（公司现金与受限金额偶然同值）；修复为只扫政府区块后 13/13 绿 |
+
+另：新增 `tests/v16-crosscut.test.ts` 3/3 绿（维护费 12 月逐月对账、存档往返、政策额度守恒）。
+所有“失败”均已定位：属**规则变更后的预期重锁/测试口径**或**容器性能/RPC 噪声**，
+没有未解释的产品断言失败；完整日志在运行环境的 `/tmp/v16-chunk-*.log`。
 
 ### 10.2 Electron 桌面验收
 
@@ -354,4 +373,14 @@ DISPLAY=:99 node_modules/electron/dist/electron --no-sandbox --disable-dev-shm-u
 
 ### 10.3 提交与远端
 
-（见下方回填。）
+- 本轮提交链（基线 `f483f609599771663de3e8311aaf1bd608edc707` 之上）：
+  `b2064d7` feat(v1.6) → `aa0ea0a` test(v1.6) → `35cb76d` docs(v1.6) → 交付文档 SHA 回填提交（HEAD，
+  见 `git log -1`）。
+- 推送状态：**未推送**——仓库无 SSH 密钥、无 credential helper，且旧 PAT 已按要求撤销；本轮所有
+  提交在本地 `feature/stock-market-ui-tax` 分支上，`origin/feature/stock-market-ui-tax` 仍为
+  `f483f609599771663de3e8311aaf1bd608edc707`，`origin/main` 仍为
+  `6c45000efc4c406d30e22c0a12bd066fc2df61f7`（未合并、未改写历史）。
+  需要用户提供新 PAT 后按下列方式推送（仅作环境变量，不写入仓库/文件）：
+  `git -c credential.helper='!f(){ echo username=x-access-token; echo "password=$GH_PUSH_TOKEN"; };f'
+  -c http.version=HTTP/1.1 push origin feature/stock-market-ui-tax`；
+  推送后 `git fetch` 核验本地=远端、main 未变，并提醒撤销 token。
