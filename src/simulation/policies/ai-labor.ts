@@ -3,6 +3,7 @@ import { GOODS } from '../../data/demo-data';
 import type {
   City,
   EconomicCheckup,
+  HouseholdMonthlyStats,
   PolicyId,
   UnemploymentTier,
   WorldState,
@@ -177,13 +178,11 @@ export function aiLaborBudget(
   const share = clamp(tierShare, ai.budgetTaxRevenueMinShare, ai.budgetTaxRevenueMaxShare);
   let budget = round2(clamp(blended * share, ai.budgetFloor, ai.budgetCap));
   let note = `预算参考：近 12 月平均月税收 ${blended.toFixed(0)}（真实 ${realMonths} 月 + 估算 ${estimatedMonths} 月）× ${(share * 100).toFixed(0)}%`;
-  if (city.lastMonth.publicWageBill > 0) {
-    const reserve = round2(city.lastMonth.publicWageBill * config.policies.aiReserveWageMonths);
-    const available = round2(Math.max(0, city.treasury - reserve));
-    if (budget > available) {
-      budget = round2(Math.max(0, available));
-      note += `；受可用财政（预留公共工资后 ${available.toFixed(0)}）限制`;
-    }
+  // v1.5 §4（task-18）：高失业预算不再按“当前财政余额 − 公共工资预留”缩减。
+  // 政策允许先立项、同 tick 15b 用既有借款规则真实补足资金；实际支出仍受“真实到账资金”限制，
+  // 借不到时如实记录未支付。这样财政为 0 时 AI 也不会因为启动前检查而永久无法立项。
+  if (city.treasury <= 0.005) {
+    note += '；当前财政为 0，政策执行前按既有借款规则真实补足（借不到则未支付如实记录）';
   }
   const debt = cityDebt(world, city.id);
   const risk = city.government?.lastDebt;
@@ -225,6 +224,14 @@ export function runCityEconomicCheckup(
   world: WorldState,
   city: City,
   config: DemoConfig,
+  /**
+   * 上一完整月的居民群体月度统计快照。
+   *
+   * tick 开始时 `resetCompanyMonth` 会清零群体本月统计；体检在清零之后运行，
+   * 因此必须由调用方在清零前抓取上一月快照传入。缺省时退回读取 group.lastMonth
+   * （测试/独立调用在未清零的场景下仍可用）。
+   */
+  previousHouseholdStats?: ReadonlyMap<string, HouseholdMonthlyStats>,
 ): EconomicCheckup {
   world.policies.checkups ??= [];
   const tick = world.time.tick;
@@ -262,11 +269,10 @@ export function runCityEconomicCheckup(
   const food = foodGood();
   const foodNeed = food?.perCapitaMonthlyNeed ?? 0;
   const foodMarket = city.market.food;
-  const foodDemand = round2(Math.max(0, population.total) * foodNeed);
   const foodPrice = Math.max(0, foodMarket?.price ?? 0);
   const foodInventory = Math.max(0, foodMarket?.closingStock ?? 0);
-  const foodUnmetDemand = Math.max(0, foodMarket?.unmetDemand ?? 0);
-  const foodUnmetFunding = Math.max(0, foodMarket?.unmetFunding ?? 0);
+  const marketUnmetDemand = Math.max(0, foodMarket?.unmetDemand ?? 0);
+  const marketUnmetFunding = Math.max(0, foodMarket?.unmetFunding ?? 0);
   const foodCapacity = round2(
     world.companies
       .filter((company) => company.cityId === city.id && company.recipeOutput === 'food')
@@ -277,15 +283,57 @@ export function runCityEconomicCheckup(
       .filter((company) => company.cityId === city.id && company.recipeOutput === 'food')
       .reduce((sum, company) => sum + Math.max(0, company.lastMonth.produced), 0),
   );
-  const coverageMonths = foodDemand > 0 ? foodInventory / foodDemand : 1;
   const consumerBudget = Math.max(0, city.lastMonth.consumerBudget);
   const householdIncome = Math.max(0, city.lastMonth.householdIncome);
   const effectivePurchasingPower = round2(householdIncome);
-  const foodCost = round2(foodDemand * foodPrice);
-  const fundingGap = foodUnmetFunding > 0 || (consumerBudget < foodCost && coverageMonths >= ai.foodCoverageMonths);
-  const supplyGap =
-    (foodUnmetDemand > 0 || coverageMonths < ai.foodCoverageMonths || foodCapacity < foodDemand) &&
-    consumerBudget >= foodCost;
+
+  // v1.5 §4（§6.1 消费六项口径）：居民侧“基本需要量 / 有效需求 / 成交 / 资金缺口 / 缺货缺口”
+  // 一律取真实居民群体月度统计（Σ group.lastMonth），不再用本地市场台账冒充居民需求。
+  // market.unmetDemand 只是本地生产端市场成交缺口，market.unmetFunding 生产端并不写入；
+  // 只有旧存档没有群体消费统计时才回退到市场台账，并在 note 中标注“市场台账回退”。
+  const householdGroups = (world.households?.groups ?? []).filter((group) => group.cityId === city.id);
+  const groupStatsOf = (group: { id: string; lastMonth: HouseholdMonthlyStats }): HouseholdMonthlyStats =>
+    previousHouseholdStats?.get(group.id) ?? group.lastMonth;
+  const groupSum = (key: keyof HouseholdMonthlyStats): number => {
+    let total = 0;
+    for (const group of householdGroups) {
+      const value = groupStatsOf(group)[key];
+      if (typeof value === 'number' && Number.isFinite(value)) total += Math.max(0, value);
+    }
+    return round2(total);
+  };
+  const groupStatsAvailable = householdGroups.some((group) => {
+    const stats = groupStatsOf(group);
+    return (
+      stats.basicNeedUnits !== undefined ||
+      stats.basicEffectiveUnits !== undefined ||
+      stats.unmetFunding !== undefined ||
+      stats.supplyShortfallUnits !== undefined
+    );
+  });
+  const groupNeedUnits = groupSum('basicNeedUnits');
+  const groupEffectiveUnits = groupSum('basicEffectiveUnits');
+  const groupSoldUnits = groupSum('basicSoldUnits');
+  const groupUnmetFunding = groupSum('unmetFunding');
+  const physicalNeed = round2(Math.max(0, population.total) * foodNeed);
+  const basicNeedUnits = groupStatsAvailable && groupNeedUnits > 0 ? groupNeedUnits : physicalNeed;
+  // 买不起基本食品（预算约束使基本需要没有形成有效需求）与缺货（有效需求没买到）分开。
+  const basicEffectiveUnits = groupStatsAvailable ? groupEffectiveUnits : Math.min(basicNeedUnits, 0);
+  const basicSoldUnits = groupStatsAvailable ? groupSoldUnits : Math.max(0, foodMarket?.sold ?? 0);
+  const basicFundingShortfallUnits = round2(Math.max(0, basicNeedUnits - basicEffectiveUnits));
+  const basicSupplyShortfallUnits = round2(Math.max(0, basicEffectiveUnits - basicSoldUnits));
+  const coverageMonths = basicNeedUnits > 0 ? foodInventory / basicNeedUnits : 1;
+  const foodCost = round2(basicNeedUnits * foodPrice);
+  const foodDemand = basicNeedUnits;
+  const foodUnmetDemand = groupStatsAvailable ? basicSupplyShortfallUnits : marketUnmetDemand;
+  const foodUnmetFunding = groupStatsAvailable ? groupUnmetFunding : marketUnmetFunding;
+  const fundingGap = groupStatsAvailable
+    ? basicFundingShortfallUnits > 0.5 || groupUnmetFunding > 0.5
+    : marketUnmetFunding > 0 || (consumerBudget < foodCost && coverageMonths >= ai.foodCoverageMonths);
+  const supplyGap = groupStatsAvailable
+    ? basicSupplyShortfallUnits > 0.5
+    : (marketUnmetDemand > 0 || coverageMonths < ai.foodCoverageMonths || foodCapacity < basicNeedUnits) &&
+      consumerBudget >= foodCost;
 
   const vacancies = companyVacancies(world, city.id) + publicVacancies(city);
   const hiringBlocked =
@@ -379,7 +427,11 @@ export function runCityEconomicCheckup(
     symptoms,
     note: `失业率 ${(unemploymentRate * 100).toFixed(1)}%（3 月均值 ${(unemploymentRateAvg3 * 100).toFixed(1)}%，档位 ${unemploymentTierLabel(tier)}）；${
       symptoms.join('、') || '无明显症状'
-    }；近 12 月 GDP ${gdpWindow.sum.toFixed(0)}（${gdpWindow.months} 月）。`,
+    }；近 12 月 GDP ${gdpWindow.sum.toFixed(0)}（${gdpWindow.months} 月）${
+      groupStatsAvailable
+        ? `；居民基本食品：需要 ${basicNeedUnits.toFixed(0)} 件 / 有效需求 ${basicEffectiveUnits.toFixed(0)} 件 / 成交 ${basicSoldUnits.toFixed(0)} 件；居民消费资金缺口 ${groupUnmetFunding.toFixed(0)}（全部消费品），缺货 ${basicSupplyShortfallUnits.toFixed(0)} 件`
+        : '；居民消费统计缺失，缺货/资金缺口回退本地市场台账'
+    }。`,
   };
   world.policies.checkups.push(checkup);
   // 保留最近 checkupRetentionMonths 个月（按城）。
@@ -391,11 +443,15 @@ export function runCityEconomicCheckup(
 }
 
 /** 为所有城市生成本月体检（幂等；供 tick 与测试直接调用）。 */
-export function runEconomicCheckup(world: WorldState, config: DemoConfig): EconomicCheckup[] {
+export function runEconomicCheckup(
+  world: WorldState,
+  config: DemoConfig,
+  previousHouseholdStats?: ReadonlyMap<string, HouseholdMonthlyStats>,
+): EconomicCheckup[] {
   world.policies.checkups ??= [];
   return [...world.cities]
     .sort((a, b) => a.id.localeCompare(b.id))
-    .map((city) => runCityEconomicCheckup(world, city, config));
+    .map((city) => runCityEconomicCheckup(world, city, config, previousHouseholdStats));
 }
 
 /** 确保本月体检已存在（供 autoSelectPolicies 直接调用时补齐）。 */

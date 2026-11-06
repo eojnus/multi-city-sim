@@ -230,6 +230,10 @@ const BOND_STATUS_LABELS: Record<'offering' | 'active' | 'redeemed', string> = {
 const EFFECT_LABELS: Record<string, string> = {
   paid: '已支付',
   invested: '投资额',
+  reservedWages: '预留工资',
+  publicWagePaid: '公共工资实付',
+  spentThisMonth: '本月支出',
+  expectedClaim: '资金需求',
   hiresSubsidised: '补贴新员工',
   employeesRetained: '稳岗人数',
   trained: '结训人次',
@@ -246,7 +250,15 @@ const EFFECT_LABELS: Record<string, string> = {
   productivityBonus: '生产率加成',
 };
 
-const MONEY_EFFECTS = new Set(['paid', 'invested']);
+// 财政金额型效果：非市长视图与渲染里一律剔除（v1.5 §1）。
+const MONEY_EFFECTS = new Set([
+  'paid',
+  'invested',
+  'reservedWages',
+  'publicWagePaid',
+  'spentThisMonth',
+  'expectedClaim',
+]);
 const RATE_EFFECTS = new Set(['incomeRateDelta', 'corporateRateDelta', 'productivityBonus', 'skillGain']);
 
 function policyDomainLabel(domain: string): string {
@@ -286,6 +298,46 @@ function effectSummary(effects: Record<string, number>): string {
   );
   if (entries.length === 0) return '本月暂无效果记录';
   return entries.map(([key, value]) => `${EFFECT_LABELS[key] ?? '效果'} ${effectValue(key, value)}`).join(' · ');
+}
+
+// ---- v1.5 §1：非市长财政信息隔离（在渲染层根本不生成受限内容，不靠 CSS 隐藏） ----
+
+/**
+ * 市长专属财政口径关键词：债务/GDP、债务预警、政策预算、参考税收、财政收支。
+ * AI 体检的公开症状与 AI 决策原因里若出现这些片段，非市长一律过滤掉。
+ */
+const RESTRICTED_FISCAL_TEXT = /债务|预算|税收|财政/;
+
+/** 公开症状：剔除债务/预算/税收/财政口径条目（保留高失业、缺货、招聘受阻等公开事实）。 */
+function publicSymptoms(symptoms: readonly string[]): string[] {
+  return symptoms.filter((symptom) => !RESTRICTED_FISCAL_TEXT.test(symptom));
+}
+
+/** 公开的 AI 决策原因：保留失业/供需/招聘等公开依据，剔除财政口径片段。 */
+function publicPolicyReason(reason: string): string {
+  const kept = reason
+    .split('；')
+    .map((segment) => {
+      if (segment.startsWith('症状：')) {
+        const symptoms = segment
+          .slice('症状：'.length)
+          .split('、')
+          .filter((symptom) => !RESTRICTED_FISCAL_TEXT.test(symptom));
+        return symptoms.length > 0 ? `症状：${symptoms.join('、')}` : '';
+      }
+      return RESTRICTED_FISCAL_TEXT.test(segment) ? '' : segment;
+    })
+    .filter((segment) => segment.trim().length > 0);
+  return kept.length > 0 ? kept.join('；') : '政府已选择该政策（详细财政依据仅市长可见）';
+}
+
+/** 公开政策效果：去掉金额型字段（已支付/投资额），非市长只看非财政效果。 */
+function publicEffectSummary(effects: Record<string, number>): string {
+  const publicEntries = Object.fromEntries(
+    Object.entries(effects).filter(([key]) => !MONEY_EFFECTS.has(key)),
+  );
+  const summary = effectSummary(publicEntries);
+  return summary === '本月暂无效果记录' ? '财政效果仅市长可见' : summary;
 }
 
 /**
@@ -833,24 +885,36 @@ export function renderGovernmentSection(store: GameStore, city: City): string {
             const definition = view.definitions.find((entry) => entry.id === policy.policyId);
             const name = definition?.name ?? policy.policyId;
             // v1.4 §五：执行追踪只在真实发生月度执行后才有记录；没有记录不编造支出/受益/岗位。
+            // v1.5 §1：支出/理论需求/实发/未支付属市长财政口径；非市长只保留公开执行事实
+            // （时间、周期、受益人数、真实岗位、执行原因），HTML 里不出现任何金额。
             const latestRun = policy.tracking?.runs.at(-1) ?? null;
             const runHtml = latestRun
               ? `<div class="policy-run" data-testid="policy-run-${esc(policy.policyId)}">
                   <span>最近执行 <b>${esc(tickDate(latestRun.tick))}</b> · 周期 ${num(latestRun.periodMonths)} 个月</span>
-                  <span>支出 <b>${money(latestRun.spent)}</b></span>
+                  ${
+                    isPlayerMayor
+                      ? `<span>支出 <b>${money(latestRun.spent ?? 0)}</b></span>`
+                      : '<span>支出 <b>—</b><small>（仅市长可见）</small></span>'
+                  }
                   <span>受益 <b>${num(latestRun.beneficiaries)}</b></span>
                   <span>真实岗位 <b class="${latestRun.jobsEffect > 0 ? 'is-positive' : ''}">${
                     latestRun.jobsEffect > 0 ? '+' : ''
                   }${num(latestRun.jobsEffect)}</b></span>
                   ${
-                    latestRun.theoreticalNeed !== undefined
+                    isPlayerMayor && latestRun.theoreticalNeed != null
                       ? `<span>理论需求 ${money(latestRun.theoreticalNeed)} · 实发 ${money(
                           latestRun.paid ?? 0,
                         )} · 未支付 ${money(latestRun.unpaid ?? 0)}</span>`
                       : ''
                   }
-                  <span class="policy-run-source">来源：${esc(latestRun.fundingSource)}</span>
-                  <span class="policy-run-reason">${esc(latestRun.reason)}</span>
+                  ${
+                    isPlayerMayor
+                      ? `<span class="policy-run-source">来源：${esc(latestRun.fundingSource)}</span>`
+                      : ''
+                  }
+                  <span class="policy-run-reason">${esc(
+                    isPlayerMayor ? latestRun.reason : publicPolicyReason(latestRun.reason),
+                  )}</span>
                 </div>`
               : '<p class="policy-run-empty">尚无月度执行记录：政策启动后，首次真实执行会记录支出、受益与岗位效果（不预填数据）。</p>';
             return `
@@ -862,14 +926,20 @@ export function renderGovernmentSection(store: GameStore, city: City): string {
                 <div class="policy-active-meta">
                   ${
                     isPlayerMayor
-                      ? `已支出 <b>${money(policy.spent)}</b> / 预算 ${money(policy.budget)}`
+                      ? `已支出 <b>${money(policy.spent ?? 0)}</b> / 总预算 ${money(policy.budget ?? 0)}｜本月参考 <b>${money(
+                          policy.referenceBudget ?? 0,
+                        )}</b> · 预留 <b>${money(policy.reservedThisMonth ?? 0)}</b> · 未支付 <b>${money(
+                          policy.unpaidThisMonth ?? 0,
+                        )}</b> · 来源 ${esc(policy.fundingSourceThisMonth ?? '—')}`
                       : '<span class="is-restricted-inline">政策预算额度与城市财政流水仅该城市市长可见</span>'
                   }
                 </div>
                 <p class="policy-active-reason" data-testid="policy-reason-${esc(policy.policyId)}">启动原因：${esc(
-                  policy.reason || '—',
+                  isPlayerMayor ? policy.reason || '—' : publicPolicyReason(policy.reason || '—'),
                 )}</p>
-                <p class="policy-active-effect">${esc(effectSummary(policy.effects))}</p>
+                <p class="policy-active-effect">${esc(
+                  isPlayerMayor ? effectSummary(policy.effects) : publicEffectSummary(policy.effects),
+                )}</p>
                 ${runHtml}
                 ${
                   isPlayerMayor
@@ -897,7 +967,7 @@ export function renderGovernmentSection(store: GameStore, city: City): string {
       const isTransport = definition.id === 'transportInvestment';
       const budgetLabel = isTax
         ? '不产生财政支出'
-        : `${isTransport ? '参考预算' : '默认预算'} ${money(definition.defaultBudget)}`;
+        : `${isTransport ? '参考预算' : '默认预算'} ${money(definition.defaultBudget ?? 0)}`;
       // 税收按税率方向执行、交通按工程造价出资，两者都不由玩家分配预算。
       const budgetField =
         isTax || isTransport
@@ -908,11 +978,11 @@ export function renderGovernmentSection(store: GameStore, city: City): string {
                 type="number"
                 data-policy-budget="${esc(definition.id)}"
                 data-testid="policy-budget-${esc(definition.id)}"
-                data-default-budget="${definition.defaultBudget}"
+                data-default-budget="${definition.defaultBudget ?? 0}"
                 min="0"
                 step="10000"
                 inputmode="numeric"
-                value="${definition.defaultBudget}"
+                value="${definition.defaultBudget ?? 0}"
                 ${definition.available ? '' : 'disabled'}
               >
             </label>`;
@@ -1034,19 +1104,28 @@ export function renderGovernmentSection(store: GameStore, city: City): string {
     })
     .join('');
 
-  // v1.4 §五：AI 政府经济体检（只在 AI 执政的城市显示；玩家市长时不代选政策）。
-  // 数据全部来自最新一份只读体检快照；没有快照时明确写“尚无记录”，不虚构预算/预警。
-  const checkup = isPlayerMayor ? null : latestCheckup(store.world, city.id);
+  // v1.5 §1：AI 政府经济体检拆成「公开」与「市长财政口径」两部分。
+  // - 公开：失业档位/3 月均值/趋势/公开症状/就业与招聘/岗位空缺/食品供需；
+  // - 受限（仅该城现任市长）：月政策预算与占比、参考税收月数与月均、债务/GDP 与 85% 预警、
+  //   债券/贷款到期压力、财政余额、预算说明。
+  // 非市长时受限数值根本不进入 HTML/属性，只渲染 fiscal-restricted 占位（不是 CSS 隐藏）。
+  const checkup = latestCheckup(store.world, city.id);
   const warningLine = pct(DEMO_CONFIG.policies.aiLabor.debtWarningRatio, 0);
-  const aiGovernmentHtml = isPlayerMayor
-    ? `<div class="ai-government is-player" data-testid="ai-mayor-status">
-        <div class="sub-head"><span>AI 政府</span><em>玩家市长</em></div>
-        <p class="ai-status"><b>AI 不代选政策</b>：你是本城现任市长，政策由你选择与停止，AI 不会替你选政策或替城市花钱。月度经济体检仍按真实数据生成，仅供背景参考。</p>
-      </div>`
-    : checkup
-      ? `<div class="ai-government" data-testid="ai-government">
-          <div class="sub-head"><span>AI 政府 · 经济体检</span><em>${esc(tickDate(checkup.tick))} 快照 · 只读</em></div>
-          <div class="ai-checkup-grid">
+  const mayorStatusHtml = isPlayerMayor
+    ? `<p class="ai-status" data-testid="ai-mayor-status"><b>AI 不代选政策</b>：你是本城现任市长，政策由你选择与停止，AI 不会替你选政策或替城市花钱。月度经济体检仍按真实数据生成，仅供背景参考。</p>`
+    : '';
+  const aiCheckupPublicHtml = checkup
+    ? (() => {
+        const publicSymptomList = publicSymptoms(checkup.symptoms);
+        const symptomText =
+          publicSymptomList.length > 0
+            ? publicSymptomList.join('、')
+            : checkup.symptoms.length > 0
+              ? '财政口径症状仅市长可见'
+              : '无明显症状';
+        const foodCoverage = checkup.foodDemand > 0 ? checkup.foodInventory / checkup.foodDemand : null;
+        return `
+          <div class="ai-checkup-grid" data-testid="ai-checkup-public">
             <span data-testid="ai-checkup-tier"${
               checkup.tier !== 'normal' ? ' class="is-warn"' : ''
             }><i>失业档位</i><b>${esc(unemploymentTierLabel(checkup.tier))}</b><small>3 月均值 ${pct(
@@ -1057,15 +1136,41 @@ export function renderGovernmentSection(store: GameStore, city: City): string {
             <span><i>失业率 3 月均值</i><b>${pct(checkup.unemploymentRateAvg3)}</b><small>趋势 ${signedPct(
               checkup.unemploymentTrend,
             )}（环比前 3 月）</small></span>
-            <span data-testid="ai-checkup-symptoms"><i>症结</i><b>${
-              checkup.symptoms.length > 0 ? esc(checkup.symptoms.join('、')) : '无明显症状'
-            }</b><small>按真实失业/供需/招聘/债务判定</small></span>
-            <span><i>月政策预算</i><b>${money(checkup.budget)}</b><small>占参考税收 ${pct(checkup.budgetShare)}</small></span>
-            <span><i>税收参考月数</i><b>真实 ${num(checkup.taxMonthsReal)} 月 / 估算 ${num(
-              checkup.taxMonthsEstimated,
-            )} 月</b><small>真实月均 ${money(checkup.monthlyTaxRevenueReal)} · 估算 ${money(
-              checkup.monthlyTaxRevenueEstimated,
-            )}/月</small></span>
+            <span data-testid="ai-checkup-symptoms"><i>症结</i><b>${esc(
+              symptomText,
+            )}</b><small>按真实失业/供需/招聘判定</small></span>
+            <span><i>就业 / 失业 / 劳动力</i><b>${num(checkup.employed)} / ${num(
+              checkup.unemployed,
+            )} / ${num(checkup.laborForce)}</b><small>真实人口口径</small></span>
+            <span><i>上月招聘 / 裁员</i><b>${num(checkup.hires)} / ${num(
+              checkup.layoffs,
+            )}</b><small>创办 ${num(checkup.founded)} · 退出 ${num(checkup.closed)}</small></span>
+            <span><i>岗位空缺</i><b>${num(checkup.vacancies)}</b><small>企业 + 公共部门未招满</small></span>
+            <span><i>食品需求 / 产出</i><b>${qty(checkup.foodDemand)} / ${qty(
+              checkup.foodOutput,
+            )}</b><small>基本需要量 / 上月产出</small></span>
+            <span><i>食品库存覆盖</i><b>${
+              foodCoverage === null ? '—' : `${num(foodCoverage, 2)} 个月`
+            }</b><small>库存 ${qty(checkup.foodInventory)} · 产能 ${qty(checkup.foodCapacity)}</small></span>
+            <span><i>食品价格 / 未满足需求</i><b>${num(checkup.foodPrice, 2)} / ${qty(
+              checkup.foodUnmetDemand,
+            )}</b><small>价格单位信用点</small></span>
+          </div>`;
+      })()
+    : '';
+  const aiCheckupRestrictedHtml =
+    checkup && isPlayerMayor
+      ? `<div class="ai-checkup-restricted" data-testid="ai-checkup-restricted">
+          <div class="sub-head"><span>财政口径</span><em>仅市长可见 · AI 决策参考</em></div>
+          <div class="ai-checkup-grid">
+            <span data-testid="ai-checkup-budget"><i>月政策预算</i><b>${money(
+              checkup.budget,
+            )}</b><small>占参考税收 ${pct(checkup.budgetShare)}</small></span>
+            <span data-testid="ai-checkup-tax"><i>税收参考月数</i><b>真实 ${num(
+              checkup.taxMonthsReal,
+            )} 月 / 估算 ${num(checkup.taxMonthsEstimated)} 月</b><small>真实月均 ${money(
+              checkup.monthlyTaxRevenueReal,
+            )} · 估算 ${money(checkup.monthlyTaxRevenueEstimated)}/月</small></span>
             <span data-testid="ai-checkup-debt"${
               checkup.debtWarning ? ' class="is-warn"' : ''
             }><i>债务 / GDP</i><b>${pct(
@@ -1075,17 +1180,38 @@ export function renderGovernmentSection(store: GameStore, city: City): string {
                 ? `≥ ${warningLine} 预警线，长期承诺政策已缩减`
                 : `预警线 ${warningLine}（非破产线）`
             }</small></span>
-            <span><i>本月到期压力</i><b>${pct(checkup.debtServicePressure)}</b><small>债券到期 ${money(
-              checkup.bondDue,
-            )} · 贷款到期 ${money(checkup.loanDue)}</small></span>
+            <span data-testid="ai-checkup-due"><i>本月到期压力</i><b>${pct(
+              checkup.debtServicePressure,
+            )}</b><small>债券到期 ${money(checkup.bondDue)} · 贷款到期 ${money(
+              checkup.loanDue,
+            )}</small></span>
+            <span data-testid="ai-checkup-treasury"><i>政府财政余额</i><b>${money(
+              checkup.treasury,
+            )}</b><small>体检时点可用资金</small></span>
           </div>
-          <p class="ai-budget-note">${esc(checkup.budgetNote)}</p>
-          <p class="fin-hint">体检与政策选择全部基于真实失业、税收、债务与到期合同；AI 只按症状排序可执行政策，不虚构支出、受益人数或岗位。</p>
+          <p class="ai-budget-note" data-testid="ai-checkup-budget-note">${esc(checkup.budgetNote)}</p>
         </div>`
-      : `<div class="ai-government" data-testid="ai-government">
-          <div class="sub-head"><span>AI 政府 · 经济体检</span><em>尚无记录</em></div>
-          <p class="fin-hint" data-testid="ai-checkup-empty">本月经济体检尚未生成：AI 政府不会在没有体检数据时凭空选择政策。推进 1 个月后这里会显示失业档位、预算与债务预警。</p>
-        </div>`;
+      : '';
+  const aiCheckupRestrictedPlaceholder =
+    checkup && !isPlayerMayor
+      ? `<div class="fiscal-brief is-restricted ai-checkup-restricted" data-testid="fiscal-restricted" data-restricted-scope="ai-checkup">
+          <div class="gov-sub-head"><span>AI 体检 · 财政口径</span><em>仅市长可见</em></div>
+          <p class="fiscal-empty">债务/GDP、债务预警、债券与贷款到期压力、月政策预算与参考税收仅该城市现任市长可见；公开信息见上方失业、招聘与食品供需。</p>
+        </div>`
+      : '';
+  const aiGovernmentHtml = checkup
+    ? `<div class="ai-government" data-testid="ai-government">
+        <div class="sub-head"><span>AI 政府 · 经济体检</span><em>${esc(tickDate(checkup.tick))} 快照 · 只读</em></div>
+        ${mayorStatusHtml}
+        ${aiCheckupPublicHtml}
+        ${isPlayerMayor ? aiCheckupRestrictedHtml : aiCheckupRestrictedPlaceholder}
+        <p class="fin-hint">公开部分来自真实失业、招聘与食品供需；财政口径仅该城市现任市长可见，AI 不虚构支出、受益人数或岗位。</p>
+      </div>`
+    : `<div class="ai-government" data-testid="ai-government">
+        <div class="sub-head"><span>AI 政府 · 经济体检</span><em>尚无记录</em></div>
+        ${mayorStatusHtml}
+        <p class="fin-hint" data-testid="ai-checkup-empty">本月经济体检尚未生成：AI 政府不会在没有体检数据时凭空选择政策。推进 1 个月后这里会显示失业档位、招聘与食品供需等公开指标。</p>
+      </div>`;
 
   const ledgerRows =
     ledger.length === 0
@@ -1116,7 +1242,9 @@ export function renderGovernmentSection(store: GameStore, city: City): string {
         <div class="gov-row"><span>任期剩余</span><b>${termMonths} 个月</b></div>
         <div class="gov-row"><span>支持率</span><b>${pct(city.politics.approval / 100, 0)}</b></div>
       </div>
-      <p class="gov-selection"><b>最近选择</b>${esc(view.lastSelection)}</p>
+      <p class="gov-selection"><b>最近选择</b>${esc(
+        isPlayerMayor ? view.lastSelection : publicPolicyReason(view.lastSelection),
+      )}</p>
       ${
         isPlayerMayor
           ? `<p class="gov-mode is-player">政策由你选择；每次启动从城市财政支出，预算与期限为演示参数。</p>`
@@ -1788,7 +1916,10 @@ export function renderMarket(city: City, showAllGoods: boolean): string {
               <th scope="col">商品</th>
               <th scope="col">价格</th>
               <th scope="col">需求</th>
-              <th scope="col">成交</th>
+              <th
+                scope="col"
+                title="本地市场成交（不含跨城进口）；居民实际食品成交 = 本地市场成交 + 跨城进口（居民侧含进口花费）"
+              >成交</th>
               <th scope="col">未满足</th>
               <th scope="col">库存</th>
               <th scope="col" title="跨城进口 / 区域外出口">贸易</th>
@@ -1807,7 +1938,9 @@ export function renderMarket(city: City, showAllGoods: boolean): string {
                     <em class="delta ${deltaClass(market.lastPriceChangePct)}">${signedPointPercent(market.lastPriceChangePct)}</em>
                   </td>
                   <td title="居民需求 ${num(market.consumerDemand)} · 生产有效需求 ${num(market.producerDemand)} · 企业计划采购 ${num(market.producerRequired)}">${qty(market.demand)}</td>
-                  <td>${qty(market.sold)}</td>
+                  <td title="本地市场成交（不含跨城进口）；居民实际食品成交 = 本地市场成交 + 跨城进口">${qty(
+                    market.sold,
+                  )}</td>
                   <td class="${market.unmetDemand > 0 ? 'is-hot' : ''}" title="缺货未满足 ${num(market.unmetDemand, 1)} · 资金不足未满足 ${num(market.unmetFunding, 1)}">${qty(market.unmetDemand)}</td>
                   <td>${qty(market.closingStock)}</td>
                   <td class="trade-cell" title="跨城进口 ${num(market.intercityImported, 1)} · 区域外出口 ${num(market.externalExport, 1)}">
@@ -1821,6 +1954,7 @@ export function renderMarket(city: City, showAllGoods: boolean): string {
         </table>
       </div>
       <p class="note">数量均为演示货品单位；需求含居民与生产有效需求（企业计划采购中买得起的那部分），成交为上月结果，贸易列为跨城进口 / 区域外出口数量。未满足列是缺货/配送不足造成的未成交数量；企业因资金不足未形成有效需求的数量见悬停说明。</p>
+      <p class="note" data-testid="market-scope-note">口径：“成交”是本地市场成交（不含跨城进口）；“贸易”列分别显示跨城进口与区域外出口。居民实际食品成交 = 本地市场成交 + 跨城进口（居民侧含进口花费，见人口标签的「需求 vs 成交」）。</p>
     </section>`;
 }
 

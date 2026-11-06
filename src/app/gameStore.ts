@@ -1,4 +1,5 @@
 import type {
+  ActivePolicy,
   CityTaxMonth,
   Company,
   CompanyProductionPlan,
@@ -9,6 +10,9 @@ import type {
   MayorFiscalView,
   OwnBondHoldingView,
   PlayerNotification,
+  PolicyFundingSource,
+  PolicyId,
+  PolicyTracking,
   PublicBondOfferView,
   SectorId,
   ShareKind,
@@ -407,6 +411,161 @@ export interface EquipmentMarketView {
   liquidationPriceFactor: number;
   maxBuyUnitsPerMonth: number;
   note: string;
+}
+
+/**
+ * v1.5 §1：政府/政策视图投影（只读）。
+ *
+ * 财政口径字段（预算/支出/财政影响/到期等）只在玩家担任该城市长时有值；
+ * 非市长一律为 null 或空数组，避免“先取到再靠 UI 隐藏”的信息泄露。
+ */
+export interface PolicyRunView {
+  tick: number;
+  reason: string;
+  fundingSource: string;
+  periodMonths: number;
+  /** 非市长为 null（不返回真实支出）。 */
+  spent: number | null;
+  beneficiaries: number;
+  jobsEffect: number;
+  /** 非市长为 null（不返回真实财政影响）。 */
+  fiscalImpact: number | null;
+  theoreticalNeed?: number | null;
+  paid?: number | null;
+  unpaid?: number | null;
+  note?: string;
+}
+
+export interface PolicyTrackingView {
+  runs: PolicyRunView[];
+  hiringBaseline?: Record<string, number>;
+  subsidisedJobs?: Record<string, number>;
+  publicWorksJobs?: number;
+  publicWorksBaselineEmployees?: number;
+  publicWorksWageRate?: number;
+  publicWorksFunding?: string;
+}
+
+export interface PolicyViewEntry {
+  id: string;
+  cityId: string;
+  policyId: PolicyId;
+  /** 非市长为 null。 */
+  budget: number | null;
+  /** 非市长为 null。 */
+  spent: number | null;
+  monthsRemaining: number;
+  startedTick: number;
+  status: 'active' | 'completed' | 'cancelled';
+  targetSector: SectorId | null;
+  taxDirection: 'cut' | 'raise' | null;
+  transportTarget: 'intracity' | string | null;
+  /** 非市长只保留非金额效果（剔除已支付/投资额等财政效果）。 */
+  effects: Record<string, number>;
+  reason: string;
+  note: string;
+  /** 非市长无执行记录时也为 null。 */
+  tracking: PolicyTrackingView | null;
+  /** v1.5 §4：决策参考预算（单月）；非市长为 null。 */
+  referenceBudget: number | null;
+  /** v1.5 §4：本月真实可动用预留；非市长为 null。 */
+  reservedThisMonth: number | null;
+  /** v1.5 §4：本月预留但未实际支付；非市长为 null。 */
+  unpaidThisMonth: number | null;
+  /** v1.5 §4：本月资金实际来源；非市长为 null。 */
+  fundingSourceThisMonth: PolicyFundingSource | null;
+}
+
+export interface PolicyHistoryView extends PolicyViewEntry {
+  endedTick: number;
+}
+
+/** 视为“财政金额”的政策效果键：非市长视图里直接剔除，而不是置 0。 */
+const POLICY_MONEY_EFFECT_KEYS = new Set([
+  'paid',
+  'invested',
+  'reservedWages',
+  'publicWagePaid',
+  'spentThisMonth',
+  'expectedClaim',
+]);
+
+/**
+ * 非市长视图的政策备注：去掉启动时追加的财政金额句（例如公共岗位“预留 N 个月工资 X”），
+ * 保留政策本身的公开说明。只做展示投影，不改模拟状态。
+ */
+function publicPolicyNote(note: string): string {
+  return note.replace(/\s*本项已设立[^。]*。?/g, '').trim();
+}
+
+/**
+ * 非市长视图：政策可用性原因若含财政口径（财政余额/预算下限金额/债务等），
+ * 只给公开占位；只有“冷却中/已达上限/目标无效”这类非财政原因才原样返回。
+ */
+function publicPolicyAvailabilityReason(reason: string): string {
+  return /财政|预算|税收|债务|余额/.test(reason)
+    ? '当前不可用（详细原因仅市长可见）'
+    : reason;
+}
+
+function policyTrackingView(
+  tracking: PolicyTracking,
+  revealFiscal: boolean,
+): PolicyTrackingView {
+  return {
+    runs: tracking.runs.map((run) => ({
+      tick: run.tick,
+      reason: run.reason,
+      fundingSource: run.fundingSource,
+      periodMonths: run.periodMonths,
+      spent: revealFiscal ? run.spent : null,
+      beneficiaries: run.beneficiaries,
+      jobsEffect: run.jobsEffect,
+      fiscalImpact: revealFiscal ? run.fiscalImpact : null,
+      ...(revealFiscal
+        ? {
+            theoreticalNeed: run.theoreticalNeed,
+            paid: run.paid,
+            unpaid: run.unpaid,
+          }
+        : {}),
+      note: run.note,
+    })),
+    hiringBaseline: tracking.hiringBaseline,
+    subsidisedJobs: tracking.subsidisedJobs,
+    publicWorksJobs: tracking.publicWorksJobs,
+    publicWorksBaselineEmployees: tracking.publicWorksBaselineEmployees,
+    publicWorksWageRate: tracking.publicWorksWageRate,
+    publicWorksFunding: tracking.publicWorksFunding,
+  };
+}
+
+function policyViewEntry(policy: ActivePolicy, revealFiscal: boolean): PolicyViewEntry {
+  return {
+    id: policy.id,
+    cityId: policy.cityId,
+    policyId: policy.policyId,
+    budget: revealFiscal ? policy.budget : null,
+    spent: revealFiscal ? policy.spent : null,
+    monthsRemaining: policy.monthsRemaining,
+    startedTick: policy.startedTick,
+    status: policy.status,
+    targetSector: policy.targetSector,
+    taxDirection: policy.taxDirection,
+    transportTarget: policy.transportTarget,
+    effects: revealFiscal
+      ? { ...policy.effects }
+      : Object.fromEntries(
+          Object.entries(policy.effects).filter(([key]) => !POLICY_MONEY_EFFECT_KEYS.has(key)),
+        ),
+    reason: policy.reason,
+    note: revealFiscal ? policy.note : publicPolicyNote(policy.note),
+    tracking: policy.tracking ? policyTrackingView(policy.tracking, revealFiscal) : null,
+    referenceBudget: revealFiscal ? policy.referenceBudget ?? null : null,
+    reservedThisMonth: revealFiscal ? policy.reservedThisMonth ?? null : null,
+    unpaidThisMonth: revealFiscal ? policy.unpaidThisMonth ?? null : null,
+    fundingSourceThisMonth: revealFiscal ? policy.fundingSourceThisMonth ?? null : null,
+  };
 }
 
 export class GameStore {
@@ -1648,23 +1807,38 @@ export class GameStore {
     return this.world.fiscal.ledger.slice(-40).reverse();
   }
 
+  /**
+   * 政府/政策视图（v1.5 §1 权限投影）。
+   *
+   * `revealFiscal = 玩家是否为该城市长`；非市长返回的 active/history 不含预算、支出、
+   * 财政影响与默认预算（一律 null / 剔除），definitions 也不带 defaultBudget。
+   * 权限每次调用按真实 politics 状态重新判定（不缓存），上任/离任/换届/读档后立即生效。
+   */
   policyView(cityId: string) {
     const city = this.world.cities.find((entry) => entry.id === cityId);
     const summary = policySummary(this.world, cityId);
+    const revealFiscal = playerIsMayor(this.world, cityId);
     return {
       city,
-      isPlayerMayor: playerIsMayor(this.world, cityId),
+      isPlayerMayor: revealFiscal,
       leader: summary.leader,
       lastSelection: summary.lastSelection,
-      active: summary.active,
-      history: this.world.policies.history.filter((entry) => entry.cityId === cityId).slice(-6),
+      active: summary.active.map((policy) => policyViewEntry(policy, revealFiscal)),
+      history: (revealFiscal
+        ? this.world.policies.history
+            .filter((entry) => entry.cityId === cityId)
+            .slice(-6)
+            .map((entry) => ({ ...policyViewEntry(entry, true), endedTick: entry.endedTick }))
+        : []) as PolicyHistoryView[],
       definitions: POLICY_DEFINITIONS.map((definition) => {
         const check = canStartPolicy(this.world, cityId, definition.id, DEMO_CONFIG);
         return {
           ...definition,
-          defaultBudget: DEMO_CONFIG.policies.budgets[definition.id],
+          defaultBudget: revealFiscal ? DEMO_CONFIG.policies.budgets[definition.id] : null,
           available: check.ok,
-          reason: check.error ?? '',
+          reason: revealFiscal
+            ? check.error ?? ''
+            : publicPolicyAvailabilityReason(check.error ?? ''),
         };
       }),
     };

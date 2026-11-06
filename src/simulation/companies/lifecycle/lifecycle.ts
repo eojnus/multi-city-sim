@@ -133,13 +133,26 @@ export interface FoundingRequest {
   founderType?: 'investorGroup' | 'company' | 'government';
   founderId?: string;
   recipeOutput?: string;
-  /** 显式资本预算：给出时沿用 v0.9 兼容路径（测试/旧调用方）；省略时走 v1.0 档位评估路径。 */
+  /**
+   * 显式资本预算：给出时沿用 v0.9 兼容路径（仅旧调用方/测试）；省略时走 v1.0 档位评估路径。
+   *
+   * v1.5 §5：v0.9 兼容路径没有“初始实物出资”（v1.4 §4）——它按 `plannedEquipmentUnits`
+   * 在真实设备市场一次性买齐启动设备，不写 initialEquipment、没有 12 个月锁定与提前退出
+   * 实物返还。正常游戏入口（UI/GameStore、AI 自动创办、评估路径）都不传 capital，
+   * 因此该差异只影响显式给资本预算的旧调用方/测试，见 `usesLegacyFoundingPath`。
+   */
   capital?: number;
   log?: LogEntry[];
 }
 
 export interface FoundCompanyOptions {
-  /** 强制使用某个已评估的规模档位（供 UI 预览与测试）。 */
+  /**
+   * 强制使用某个已评估的规模档位（供 UI 预览与测试；应传 `assessFounding` 返回的
+   * FoundingScaleTier，其中含 v1.4 的 inKindUnits/marketUnits）。
+   *
+   * v1.5 §5：该选项属于 v1.0 评估路径的“档位覆盖”，与新路径一样获得初始实物出资、
+   * 12 个月锁定与实物返还；只有显式给 `capital` 时才走 v0.9 兼容采购路径。
+   */
   plan?: FoundingScaleTier;
   /** 是否允许创业贷款（默认允许；测试可关闭）。 */
   allowLoan?: boolean;
@@ -186,6 +199,22 @@ function pickOutput(world: WorldState, cityId: string): { output: string; sector
   return { output: pick.id, sector: sectorForOutput(pick.id) };
 }
 
+/**
+ * v1.5 §5：该请求是否走 v0.9 兼容创办路径。
+ *
+ * 判定标准只有一个：显式给了 `capital`。给 `plan` 不算——档位覆盖属于 v1.0 评估路径，
+ * 必须与新路径一样获得初始实物出资/锁定/返还。
+ *
+ * 可达性证据（v1.5 核查）：正常游戏没有调用方显式传 capital——
+ * - UI `found-company` 动作 → `GameStore.foundCompany` → `foundCompany(world, {cityId, founderType, founderId})`；
+ * - AI 月度自动创办 `maybeFoundCompanies` → `foundCompany(world, {cityId, recipeOutput, log}, config, {blockedCompanyFounders})`；
+ * - 政策补贴（startupSupport/equipmentSubsidy）只在上述路径内部结算，不单独发起创办。
+ * 目前只有旧测试/旧调用方会显式传 capital，因此兼容路径的“无实物出资”差异不影响正常游戏。
+ */
+export function usesLegacyFoundingPath(request: FoundingRequest): boolean {
+  return request.capital !== undefined;
+}
+
 /** 创办企业：先全部校验，再一次性提交（资金、股份、企业、记录）。 */
 export function foundCompany(
   world: WorldState,
@@ -201,8 +230,10 @@ export function foundCompany(
   }
 
   // v1.0：未显式给资本预算（玩家/AI 新路径）时，先评估最小可行规模，再按真实出资 + 授信贷款创办。
-  // 显式 capital 的旧调用方继续走 v0.9 兼容路径，保证既有测试与存档行为不变。
-  if (request.capital === undefined && !options?.plan) {
+  // v1.5 §5：档位强制（options.plan）也走 v1.0 评估路径——它是对评估档位的覆盖（见
+  // foundCompanyV1 的 options.plan 分支），只有 `capital` 才触发 v0.9 兼容采购路径，
+  // 从而保证 plan 入口同样获得初始实物出资/12 个月锁定/实物返还（v1.4 §4）。
+  if (!usesLegacyFoundingPath(request)) {
     return foundCompanyV1(world, request, city, config, log, options);
   }
   const founderType = request.founderType ?? 'investorGroup';
@@ -381,8 +412,13 @@ export function foundCompany(
           : '由市政府财政出资创办，股份由城市持有。'
     } 行业评分 ${candidate.score.toFixed(1)} 分（${candidate.reasons.slice(0, 3).join('；')}）；启动采购${
       config.equipment.catalog[candidate.equipmentKind].name
-    } ${equipmentUnits} 台，设备支出 ${equipmentCost.toFixed(0)}。`,
+    } ${equipmentUnits} 台，设备支出 ${equipmentCost.toFixed(0)}。v0.9 兼容路径（显式资本预算，仅旧调用方/测试）：启动设备全部在真实设备市场采购，不含初始实物出资（无 12 个月锁定/实物返还）。`,
   };
+  log.push({
+    tick: world.time.tick,
+    kind: 'warning',
+    message: `${city.name}「${company.name}」经 v0.9 兼容路径创办（显式资本预算，仅旧调用方/测试）：未发放初始实物出资，启动设备 ${equipmentUnits} 台全部来自真实设备市场。`,
+  });
   world.lifecycle.foundings.push(record);
   world.lifecycle.nextFoundingNumber += 1;
   if (world.lifecycle.foundings.length > config.lifecycle.maxHistory) {

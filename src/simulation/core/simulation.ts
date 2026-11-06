@@ -1,6 +1,7 @@
 import type {
   CompanyMonthlyStats,
   GoodId,
+  HouseholdMonthlyStats,
   InvestmentResult,
   ProductionRecord,
   TickResult,
@@ -53,7 +54,7 @@ import {
 import { matchOrders, playerStakeOf } from '../securities/securities';
 import { notifyPlayer } from '../notifications/notifications';
 import { advancePolitics } from '../politics/politics';
-import { autoSelectPolicies, settlePolicies } from '../policies/policies';
+import { autoSelectPolicies, preparePolicyFunding, settlePolicies } from '../policies/policies';
 import { runEconomicCheckup } from '../policies/ai-labor';
 import { advanceTransportConstruction } from '../transport/network';
 import { settleTransportMonth } from '../transport/settlement';
@@ -219,6 +220,12 @@ export class Simulation {
     const rng = new DeterministicRng(this.state.rngState);
 
     try {
+      // v1.5 §4：体检要读“上一完整月”的居民群体消费六项，而 resetCompanyMonth 会把
+      // group.lastMonth 清零；因此先抓取快照，再交给体检使用（不改变任何累计口径）。
+      const previousHouseholdStats = new Map<string, HouseholdMonthlyStats>();
+      for (const group of this.state.households?.groups ?? []) {
+        previousHouseholdStats.set(group.id, { ...group.lastMonth });
+      }
       resetCompanyMonth(this.state);
       advanceTime(this.state);
       this.state.lastTick = {
@@ -247,7 +254,7 @@ export class Simulation {
       //    v1.4 §五：选政策前先做本月经济体检（失业分级/购买力/缺货/招聘/债务/税收），
       //    高失业档位走“对症政策 + 动态预算”，正常档位沿用既有弱项打分。
       advancePolitics(this.state, this.config, this.state.time.tick, logs);
-      runEconomicCheckup(this.state, this.config);
+      runEconomicCheckup(this.state, this.config, previousHouseholdStats);
       autoSelectPolicies(this.state, this.config, logs);
 
       // 3. 交通建设推进与维护（财政支出，容量在建成后提高）。
@@ -368,7 +375,12 @@ export class Simulation {
       for (const city of this.state.cities) recordMigrationReports(this.state, city);
       this.collectMayorNotices(logs);
 
-      // 16. 政策执行：补贴、培训、纾困、研发、住房、救助等（实际财政支出与状态变化）
+      // 15b. v1.5 §4：政策资金预留/补足（顺序固定：税收/公共工资/福利之后、政策执行之前）。
+      //      只用真实财政余额与既有政府借款规则补足：银行放款真实到账、计息入债，
+      //      且补足后债务/GDP 必须仍 < 85%（100% 破产规则不变）；玩家市长城市完全跳过。
+      preparePolicyFunding(this.state, this.config, logs, { hiresByCompany: labor.hiresByCompany });
+
+      // 16. 政策执行：补贴、培训、纾困、研发、住房、救助等（实际财政支出与状态变化；实支 ≤ 预留）
       settlePolicies(this.state, this.config, { hiresByCompany: labor.hiresByCompany, log: logs });
 
       // 16b. 玩家经营模式：AI 辅助/高度托管按需生成重大事项提案（未批准不执行）。

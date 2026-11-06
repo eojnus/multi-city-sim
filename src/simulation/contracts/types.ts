@@ -3,7 +3,7 @@
 // v0.2 新增证券/治理/居民投资/协议/通知数据；旧 v1 存档由 core/save.ts 迁移。
 
 export const SAVE_FORMAT_VERSION = 9;
-export const GAME_VERSION = '1.4.0';
+export const GAME_VERSION = '1.5.0';
 
 export type GoodId =
   | 'grain'
@@ -1051,10 +1051,51 @@ export interface ActivePolicy {
   note: string;
   /** v1.4 §五：执行追踪（可选，旧存档/旧测试夹具缺省）。 */
   tracking?: PolicyTracking;
+  /** v1.5 §四：决策时参考预算（AI=体检动态预算或固定默认；可选，旧档缺省）。 */
+  referenceBudget?: number;
+  /** v1.5 §四：本月已预留、真实可动用的政策资金（财政余额或真实到账借款；可选）。 */
+  reservedThisMonth?: number;
+  /** v1.5 §四：本月预留后未实际支付的部分（不得计入受益/收入；可选）。 */
+  unpaidThisMonth?: number;
+  /** v1.5 §四：本月资金实际来源。 */
+  fundingSourceThisMonth?: PolicyFundingSource;
 }
 
 export interface PolicyHistoryEntry extends ActivePolicy {
   endedTick: number;
+}
+
+/** v1.5 §四：政策资金的真实来源（借款必须真实到账，不凭空造钱）。 */
+export type PolicyFundingSource = 'treasury' | 'bankLoan' | 'none';
+
+/** v1.5 §四：单城单月政策资金顺序追踪（决策参考 → 税收 → 公共工资/福利 → 借款到账 → 预留 → 实支）。 */
+export interface PolicyFundingMonth {
+  tick: number;
+  cityId: string;
+  /** 本月 AI 政策参考预算合计（体检动态预算或固定默认；不是已到账资金）。 */
+  referenceBudget: number;
+  /** 本月税收实际入账（财政流水真实值）。 */
+  taxReceived: number;
+  /** 本月公共工资（支出口径，正数）。 */
+  publicWages: number;
+  /** 本月福利实际支付（正数）。 */
+  benefitsPaid: number;
+  /** 公共工资 + 福利（必要支出）。 */
+  essentialSpending: number;
+  /** 政策预留前财政余额。 */
+  treasuryBeforeFunding: number;
+  /** 为政策补足而真实到账的政府借款（银行放款，真实增加财政余额与债务）。 */
+  borrowingProceeds: number;
+  debtRatioBefore: number;
+  debtRatioAfterBorrowing: number;
+  /** 本月真实可动用的政策预留额。 */
+  reserved: number;
+  /** 本月实际支付（政策流水）。 */
+  spent: number;
+  /** 预留但未实际支付（不得计入受益/收入）。 */
+  unpaid: number;
+  fundingSource: PolicyFundingSource;
+  note: string;
 }
 
 export interface PolicyState {
@@ -1070,6 +1111,11 @@ export interface PolicyState {
    * 与“不足 3 个月开局”的处理；不保存任何未落地的承诺或虚构数据。
    */
   checkups?: EconomicCheckup[];
+  /**
+   * v1.5 §四：单城单月政策资金顺序追踪（可选，旧存档缺省为空；只保留最近若干月）。
+   * 用于区分参考预算/已预留/实际支出，并让报表核对税收入账 → 必要支出 → 借款到账 → 预留 → 实支。
+   */
+  fundingMonths?: PolicyFundingMonth[];
 }
 
 /** v1.4 §五：AI 政府经济体检的失业分级。 */
@@ -1096,8 +1142,12 @@ export interface PolicyExecutionRecord {
   theoreticalNeed?: number;
   /** 仅失业救助：实际发放。 */
   paid?: number;
-  /** 仅失业救助：未支付（不计入居民收入）。 */
+  /** 仅失业救助/预留制政策：未支付（不计入居民收入）。 */
   unpaid?: number;
+  /** v1.5 §四：本月参考预算（决策口径，不是资金）。 */
+  referenceBudget?: number;
+  /** v1.5 §四：本月已预留、真实可动用资金。 */
+  reserved?: number;
   note?: string;
 }
 
@@ -1427,6 +1477,12 @@ export interface HouseholdMonthlyStats {
   cashPaid?: number;
   /** v1.4 §6.1：有支付能力有效需求的金额口径（Σ effectiveQty × 本月价，与件数同源）。 */
   effectiveCost?: number;
+  /**
+   * v1.5 §3：基本需要商品（food）的有支付能力有效需求量（件，含本地与跨城口径的居民侧需求）。
+   * 与 basicSoldUnits 同口径，用于“有效需求满足率 = 居民实际成交 / 有效需求量”；
+   * 旧存档缺省按 0 处理（报告回退到市场口径并标注）。
+   */
+  basicEffectiveUnits?: number;
 }
 
 /**

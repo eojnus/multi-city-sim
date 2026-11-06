@@ -886,7 +886,10 @@ export function checkGovernmentDebtInvariants(world: WorldState, problems: strin
       const aggregate = holdingsByIssuance.get(issuance.id);
       const aggregateUnits = aggregate?.units ?? 0;
       const aggregatePrincipal = aggregate?.principal ?? 0;
-      if (issuance.soldUnits !== aggregateUnits) {
+      // v1.5 §2：跨城迁移按比例拆分持债后份数为 0.01 份粒度（小数），逐笔 round2 后
+      // 合计可能有 ≤0.01 份的浮点/尾差；本金/应计仍按 0.01 信用点对账。真实错账至少
+      // 1 份 = 面额（1000），该容差不会掩盖问题。
+      if (Math.abs(issuance.soldUnits - aggregateUnits) > 0.01) {
         problems.push(
           `债券批次 ${issuance.id}: 实售份数 ${issuance.soldUnits} 与持债份数合计 ${aggregateUnits} 不一致`,
         );

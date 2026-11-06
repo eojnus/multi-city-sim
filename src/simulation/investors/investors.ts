@@ -15,6 +15,8 @@
 // - 跨城买股、阈值、风险偏好均为演示参数。
 
 import type {
+  BondHolder,
+  BondHolding,
   Company,
   HolderRef,
   HouseholdGroup,
@@ -238,15 +240,152 @@ function attributeInvestorDividends(
 }
 
 /**
- * v1.3 §2 / v1.4 §3：跨城迁移时居民投资权益随人转移，且必须是**真实资产流转**。
+ * v1.5 §2：跨城迁移时把源城投资实体的**未到期政府债券**按迁移价值比例真实拆分给目标城实体。
+ *
+ * 为什么需要：v1.4 及以前迁移只划转现金与股票；当源城实体现金/股票为 0、净资产全是未到期债券时，
+ * 迁移者实际带走 0 资产（v1.4 只能下调迁出份额），迁入者权益丢失，剩余债券权益留在源城实体
+ * 被剩余居民无偿获得。
+ *
+ * 口径（不新增存档字段、不改债券兑付规则）：
+ * - 只拆 `status='active'` 的持债；本金/应计利息/已付利息按迁移比例拆分，源城减少额 = 目标城增加额；
+ *   发行批次的 soldUnits/principal 与兑付规则完全不变，后续付息/到期/破产兑付仍走既有 per-holding 规则；
+ * - 份数按 0.01 份粒度（units = round2(本金/面额)，本金 = round2(份数×面额)），保证持债账本
+ *   “本金 = 份数×面额”不变量；拆分不整的尾差（< 0.01 份 = 面额×0.01）留在源城实体，不虚增资产；
+ * - 目标城同一（发行批次, 持有实体）已有 active 持债时合并，多次迁移不产生碎片持债。
+ */
+const MIGRATION_BOND_UNIT_DECIMALS = 2;
+
+function bondUnitsForPrincipal(principal: number, faceValue: number): number {
+  if (faceValue <= 0 || principal <= 0) return 0;
+  const factor = 10 ** MIGRATION_BOND_UNIT_DECIMALS;
+  return Math.round((principal / faceValue) * factor) / factor;
+}
+
+function bondFaceValueOf(world: WorldState, holding: BondHolding): number {
+  const issuance = world.bonds?.issuances.find((entry) => entry.id === holding.issuanceId);
+  if (issuance && issuance.faceValue > 0) return issuance.faceValue;
+  const implied = holding.units > 0 ? holding.principal / holding.units : 0;
+  return implied > 0 ? implied : 1;
+}
+
+/** 把一段迁移债券并入目标实体：同批次已有 active 持债则合并（每“批次+实体”最多 1 条）。 */
+function mergeMigratedBondHolding(
+  world: WorldState,
+  source: BondHolding,
+  toInvestor: InvestorGroup,
+  units: number,
+  principal: number,
+  accruedInterest: number,
+  interestPaid: number,
+): void {
+  const bonds = world.bonds;
+  if (!bonds || units <= 0 || principal <= 0) return;
+  const holder: BondHolder = { kind: 'investorGroup', id: toInvestor.id };
+  const existing = bonds.holdings.find(
+    (entry) =>
+      entry.issuanceId === source.issuanceId &&
+      entry.status === 'active' &&
+      entry.holder.kind === holder.kind &&
+      entry.holder.id === holder.id &&
+      entry.interestStartTick === source.interestStartTick,
+  );
+  if (existing) {
+    existing.units = round2(existing.units + units);
+    existing.principal = round2(existing.principal + principal);
+    existing.accruedInterest = round2(existing.accruedInterest + accruedInterest);
+    existing.interestPaid = round2(existing.interestPaid + interestPaid);
+    existing.note = `v1.5 §2：跨城迁移并入 ${round2(units)} 份（本金 ${round2(principal)}，来源 ${source.id}，tick ${world.time.tick}）`;
+    return;
+  }
+  bonds.holdings.push({
+    id: `bondholding-${bonds.nextHoldingNumber}`,
+    issuanceId: source.issuanceId,
+    cityId: source.cityId,
+    holder,
+    units: round2(units),
+    principal: round2(principal),
+    purchasedTick: world.time.tick,
+    interestStartTick: source.interestStartTick,
+    maturityTick: source.maturityTick,
+    lastCouponTick: source.lastCouponTick,
+    accruedInterest: round2(accruedInterest),
+    interestPaid: round2(interestPaid),
+    redeemedTick: null,
+    status: 'active',
+    note: `v1.5 §2：跨城迁移自 ${source.id} 按比例拆出的真实持债（本金 ${round2(principal)}，tick ${world.time.tick}）`,
+  });
+  bonds.nextHoldingNumber += 1;
+}
+
+/** 拆分债券持债并按目标实体份额分配；返回真实划转的债券权益价值（本金 + 应计利息）。 */
+function splitBondHoldingsForMigration(
+  world: WorldState,
+  fromInvestors: InvestorGroup[],
+  toInvestors: InvestorGroup[],
+  fraction: number,
+): { valueMoved: number; holdingsMoved: number } {
+  const bonds = world.bonds;
+  if (!bonds || fraction <= 0) return { valueMoved: 0, holdingsMoved: 0 };
+  const fromIds = new Set(fromInvestors.map((investor) => investor.id));
+  const entityWeights = toInvestors.map((investor) => Math.max(0, investor.populationShare));
+  let valueMoved = 0;
+  let holdingsMoved = 0;
+  const sourceHoldings = bonds.holdings.filter(
+    (holding) =>
+      holding.status === 'active' &&
+      holding.holder.kind === 'investorGroup' &&
+      fromIds.has(holding.holder.id),
+  );
+  for (const source of sourceHoldings) {
+    const faceValue = bondFaceValueOf(world, source);
+    const idealPrincipal = round2(Math.max(0, source.principal) * fraction);
+    // 份数按 0.01 份粒度（本金必须是“面额×0.01”的整数倍，才满足持债账本“本金 = 份数×面额”不变量）。
+    const movedUnits = bondUnitsForPrincipal(idealPrincipal, faceValue);
+    const movedPrincipal = round2(movedUnits * faceValue);
+    if (movedUnits <= 0 || movedPrincipal <= 0) continue;
+    if (movedPrincipal > source.principal + 0.005) continue;
+    const ratio = source.principal > 0 ? movedPrincipal / source.principal : 0;
+    const movedAccrued = round2(Math.max(0, source.accruedInterest) * ratio);
+    const movedInterestPaid = round2(Math.max(0, source.interestPaid) * ratio);
+    // 源城持债等额扣减（本金/应计/已付利息三项合计守恒，拆分尾差留在源实体）。
+    source.principal = round2(Math.max(0, source.principal - movedPrincipal));
+    source.accruedInterest = round2(Math.max(0, source.accruedInterest - movedAccrued));
+    source.interestPaid = round2(Math.max(0, source.interestPaid - movedInterestPaid));
+    source.units = bondUnitsForPrincipal(source.principal, faceValue);
+    // 目标城：份数按 0.01 份分给各投资实体（合计严格 = movedUnits），再按份数比例分利息。
+    const unitSlices = allocateMoneyExact(movedUnits, entityWeights);
+    const accruedSlices = allocateMoneyExact(movedAccrued, unitSlices);
+    const interestPaidSlices = allocateMoneyExact(movedInterestPaid, unitSlices);
+    toInvestors.forEach((toInvestor, index) => {
+      const units = unitSlices[index] ?? 0;
+      if (units <= 0) return;
+      const principal = round2(units * faceValue);
+      mergeMigratedBondHolding(
+        world,
+        source,
+        toInvestor,
+        units,
+        principal,
+        accruedSlices[index] ?? 0,
+        interestPaidSlices[index] ?? 0,
+      );
+      holdingsMoved += 1;
+    });
+    valueMoved = round2(valueMoved + movedPrincipal + movedAccrued);
+  }
+  return { valueMoved, holdingsMoved };
+}
+
+/**
+ * v1.3 §2 / v1.4 §3 / v1.5 §2：跨城迁移时居民投资权益随人转移，且必须是**真实资产流转**。
  *
  * v1.4 §3 修复“两城净值不同导致权益价值错配”：
  * 迁移权益不再按“份额 1:1 改挂”，而是按**源城净值/份额**计价出真实价值，
  * 再按**目标城净值/份额**换算为目标城份额：
  * - 价值：迁出者带走的价值 = 迁出有效份额 × 源城净值/份额（源城净资产含现金、持股市值、
  *   未到期国债本息）；源城净资产为 0 时价值为 0，不凭空划转资产、也不给目标城增发份额；
- * - 资产：按“迁移价值/源城净资产”的比例，把现金与持股从源城实体真实划转到目标城实体
- *   （股份总股数不变、两城现金守恒，合计划转价值严格等于迁移价值）；
+ * - 资产：按“迁移价值/源城净资产”的比例，把现金、持股与**未到期债券**从源城实体真实划转到
+ *   目标城实体（股份总股数不变、债券本金/应计不变、两城现金守恒，合计划转价值严格等于迁移价值）；
  * - 份额：目标城新增份额 = 迁移价值 / 目标城净值/份额（目标城零净资产时回退 1:1），
  *   记入目标群体 openingShares（不是“新投入”，不重复计投入额）；
  * - 结果：迁出者、迁出地其他居民、迁入地原居民每份价值均不因迁移而变，无无偿转移。
@@ -258,6 +397,10 @@ export interface MigrationInvestorTransfer {
   cashMoved: number;
   /** 真实划转的持股数量（同一类别总股数不变）。 */
   holdingsMoved: number;
+  /** 真实划转的债券权益价值（未到期本金 + 应计利息）。 */
+  bondValueMoved: number;
+  /** 拆分/并入的持债条数（同一发行批次在目标实体合并）。 */
+  bondHoldingsMoved: number;
   /** 按源城净值/份额计价后随人转移的权益价值。 */
   valueMoved: number;
   /** 按目标城净值/份额换算后新增到目标群体的有效份额。 */
@@ -275,6 +418,8 @@ export function transferInvestorAssetsForMigration(
     effectiveSharesMoved: 0,
     cashMoved: 0,
     holdingsMoved: 0,
+    bondValueMoved: 0,
+    bondHoldingsMoved: 0,
     valueMoved: 0,
     targetSharesAdded: 0,
   };
@@ -378,8 +523,16 @@ export function transferInvestorAssetsForMigration(
     }
   }
 
-  // 2) 现金：迁移价值扣除已划转持股市值后的余额，从源城实体现金扣出并转入目标城实体。
-  const cashTarget = round2(Math.max(0, valueMoved - holdingsValueMoved));
+  // 1b) 债券：按迁移价值占源城净资产的比例拆分未到期持债到目标城实体（v1.5 §2）。
+  //     只拆 active 持债；本金/应计利息/已付利息合计守恒，不新增现金、不改变发行与兑付规则。
+  const bondTransfer = splitBondHoldingsForMigration(world, fromInvestors, toInvestors, fraction);
+  result.bondValueMoved = bondTransfer.valueMoved;
+  result.bondHoldingsMoved = bondTransfer.holdingsMoved;
+
+  // 2) 现金：迁移价值扣除已划转股票市值与债券估值后的余额，从源城实体现金扣出并转入目标城实体。
+  const cashTarget = round2(
+    Math.max(0, valueMoved - holdingsValueMoved - bondTransfer.valueMoved),
+  );
   const fromCashTotal = round2(
     fromInvestors.reduce((sum, investor) => sum + Math.max(0, investor.cash), 0),
   );
@@ -423,9 +576,13 @@ export function transferInvestorAssetsForMigration(
     }
   }
 
-  // 3) 账本随人转移：若源城实体现金不足，实际划转价值可能低于理论迁移价值；
+  // 3) 账本随人转移：若源城实体可划转资产不足，实际划转价值可能低于理论迁移价值；
   //    此时按“实际划转价值”重算迁出份额与目标份额，避免账本份额多于实际资产（无偿转移）。
-  const actualValueMoved = round2(holdingsValueMoved + result.cashMoved);
+  //    v1.5 §2：债券按 0.01 份粒度拆分，可能比理论值多划出几分钱；多出部分不增发目标城份额，
+  //    避免源城剩余居民被多扣（尾差留在目标城实体，量级 < 面额×0.01）。
+  const actualValueMoved = round2(
+    holdingsValueMoved + bondTransfer.valueMoved + result.cashMoved,
+  );
   const shortfall = actualValueMoved + 0.005 < valueMoved;
   if (shortfall) {
     movedSharesActual = Math.min(
@@ -433,6 +590,8 @@ export function transferInvestorAssetsForMigration(
       sharesForInvestorValue(actualValueMoved, fromNavPerShare),
     );
     targetShares = sharesForInvestorValue(actualValueMoved, toNavPerShare);
+  } else if (actualValueMoved > valueMoved + 0.005) {
+    targetShares = sharesForInvestorValue(valueMoved, toNavPerShare);
   }
   const legRemovedShares = shortfall
     ? allocateMoneyExact(movedSharesActual, legMoves.map((move) => move.moved))

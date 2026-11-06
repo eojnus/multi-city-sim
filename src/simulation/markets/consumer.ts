@@ -768,6 +768,10 @@ function runIntercityConsumptionPhase(
     );
     stats.cashPaid = round2((stats.cashPaid ?? 0) + cashPaid);
     stats.effectiveCost = round2((stats.effectiveCost ?? 0) + round2(group.effectiveCost));
+    // v1.5 §3：基本需要商品（food）的居民侧有效需求量，供“有效需求满足率”与基本需要覆盖率同口径核对。
+    stats.basicEffectiveUnits = round2(
+      (stats.basicEffectiveUnits ?? 0) + round2(group.effectiveQty.get('food') ?? 0),
+    );
     stats.basicNeedCoverage =
       (stats.basicNeedUnits ?? 0) > 0.01
         ? Math.round(((stats.basicSoldUnits ?? 0) / (stats.basicNeedUnits ?? 1)) * 10000) / 10000
