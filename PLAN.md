@@ -154,3 +154,37 @@ Lead 独占（其他人只读，需要改动先 message Lead）：`src/simulatio
 - [x] F4 lead：Electron 验收新增挂单维护费/企业财务/72 月档桌面接口闭环检查 → **27/27、0 console 错误**
   （`docs/evidence_v1.6.1/`）；7 个 v17 测试与 acceptance 重锁；交付报告 `DELIVERY_REPORT_v1.6.1.md`；
   全量回归与 commit/push 见交付报告 §6.1/§8。
+
+---
+
+# 存档系统重构与长期优化（第三轮任务书，基线 `31b66272e04bdaa8f0c10f80d5dfc91d551172bf`）
+
+## 目标（用户任务书 2026-11-07）
+
+统一存档管理器 + 分模块快照 + 版本迁移 + 历史治理 + 精简 JSON + gzip；旧明文/旧 gzip 兼容；
+候选世界一次性替换；128MiB 原始数据上限实测；120 月压缩 ≤10MiB 目标（未达标如实报告）；
+新增 persistence 目录与 tests/persistence 8 个测试文件、scripts/save-size-report.ts、
+SAVE_SYSTEM_DESIGN.md、Electron 实机验证；不改经济数值/玩法；推送功能分支。
+
+## 当前进度（round 1）
+
+- [x] 基线确认：HEAD=远端=`31b6627`，基线是祖先，工作区干净（§二）。
+- [x] 现状实测：72 月存档 53,313,078B（pretty JSON）；缩进占约 21MB（39%）；
+      `serializeSave` 用 `JSON.stringify(save,null,2)`；`createSaveFile` 先 deepClone；
+      最大分项 `banking.snapshots` 11.42MB/18,853 条、`householdFinance.loans` 5.14MB、`cities` 3.03MB、
+      `companies` 2.56MB。
+- [x] `src/simulation/persistence/types.ts`：模块接口、顶层格式（formatVersion 10 + kind + worldMeta +
+      modules）、错误码、大小上限（raw 128MiB / 压缩后 64MiB）。
+- [x] `registry.ts`：模块 ID/版本/必填/依赖/归属路径注册校验（重复、重叠、world 最先、依赖缺失/循环）。
+- [x] `migrations.ts`：JSON 解析、格式识别（模块/旧单体/高版本/混合损坏）、worldMeta 校验、顶层迁移入口。
+- [x] `scaffold.ts`：候选世界容器（顶层字段空值，内容由模块恢复；不用看似合理的空默认掩盖损坏）。
+- [x] `saveCoordinator.ts`：导出（模块快照 + minified JSON + 体积/耗时）、恢复（版本校验/迁移/候选世界/
+      跨模块引用/结构/不变量；未知可选模块保留；失败不返回世界）。
+- [x] `referenceValidation.ts`：跨模块引用校验（城市/企业/投资实体/债券批次/贷款/政策/税收/设备委托等）。
+- [x] `tests/persistence/registry.test.ts`：11 项通过（注册表/格式识别/导出恢复/未知模块/失败不污染）。
+- [ ] 数据归属表（两个分析 subagent 进行中）→ `docs/development/SAVE_SYSTEM_DESIGN.md`。
+- [ ] 真实模块实现（world/population/company/marketTrade/equipment/banking/government/bonds/
+      securities/management/politics）+ core/save.ts 委派。
+- [ ] 历史治理 historyPolicy + 月度安全时点执行 + 守恒/幂等测试。
+- [ ] 平台层：file format/大小/并发/备份、saveBridge、gameStore 未知模块透传、save-size-report。
+- [ ] 旧档兼容（明文/gzip/迁移链）、Electron 实机、12/36/72/120 月性能、交付报告、提交推送。
