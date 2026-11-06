@@ -321,7 +321,7 @@ describe('v1.7 存档：协调器导出/恢复', () => {
   it('恢复阶段抛错时不返回世界（当前运行世界由调用方保持不变）', () => {
     const registry = new SaveModuleRegistry();
     registry.register(fakeModule({ id: 'world', ownedPaths: ['seed', 'rngState', 'time', 'note'] }));
-    const failing = fakeModule({ id: 'companies', ownedPaths: ['companies'], dependsOn: ['world'] });
+    const failing = fakeModule({ id: 'company', ownedPaths: ['companies'], dependsOn: ['world'] });
     failing.restore = () => {
       throw new Error('boom');
     };
