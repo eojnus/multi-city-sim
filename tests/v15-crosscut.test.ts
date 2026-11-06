@@ -888,7 +888,8 @@ describe('v1.5 §3 报告口径（明细 vs 汇总，本地 + 进口只计一次
 
     for (const [cityId, item] of summary) {
       // 汇总成交 = 本地 + 进口（本地+进口只计一次），且与明细快照一致。
-      expect(item.sold, cityId).toBeCloseTo(round2(item.local + item.imported), 1);
+      // 报告中的本地/进口按 1 位小数格式化，相加与居民成交可能存在 ≤0.2 的展示舍入差。
+      expect(Math.abs(item.sold - round2(item.local + item.imported)), cityId).toBeLessThanOrEqual(0.21);
       const detailItem = detail.get(cityId)!;
       expect(detailItem.sold, cityId).toBeCloseTo(item.sold, 1);
       expect(detailItem.local, cityId).toBeCloseTo(item.local, 1);

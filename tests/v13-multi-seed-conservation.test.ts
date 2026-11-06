@@ -225,7 +225,8 @@ describe('v1.3 多 seed 守恒/结构观察（36 月，玩家无操作，默认 
 
         measurements.push(measure(seed, simulation.state));
       },
-      240_000,
+      // v1.5：AI 政策资金/转移支付落账后单种子 36 月约需 200–260s（2 核容器），240s 会误超时。
+      600_000,
     );
   }
 

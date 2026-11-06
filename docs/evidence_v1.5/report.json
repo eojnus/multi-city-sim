@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-06T03:44:27.024Z",
+  "generatedAt": "2026-11-06T05:11:22.889Z",
   "electron": "38.8.6",
   "checks": [
     {
@@ -85,7 +85,7 @@
     {
       "name": "存读档保留设备/现金/人口/债券/设备储备/销售历史/生产计划且完全一致",
       "pass": true,
-      "detail": "{\"saved\":true,\"loaded\":true,\"advanced\":\"2026 年 03 月\",\"toasts\":[\"已保存到 manual-1。\",\"已从manual-1恢复（保存于 2026/11/6 03:44:21）。\"],\"diffKeys\":[]}"
+      "detail": "{\"saved\":true,\"loaded\":true,\"advanced\":\"2026 年 03 月\",\"toasts\":[\"已保存到 manual-1。\",\"已从manual-1恢复（保存于 2026/11/6 05:11:18）。\"],\"diffKeys\":[]}"
     },
     {
       "name": "1100x700 无横向溢出且城市标签仍完整",
