@@ -18,7 +18,7 @@ const { registerSaveHandlers } = require('../dist/electron/saveIpc.js');
 
 const root = path.resolve(__dirname, '..');
 const artifacts = path.join(root, 'artifacts', 'acceptance-v09');
-const evidence = path.join(root, 'docs', 'evidence_v1.6');
+const evidence = path.join(root, 'docs', 'evidence_v1.6.1');
 fs.mkdirSync(artifacts, { recursive: true });
 fs.mkdirSync(evidence, { recursive: true });
 const userData = path.join(artifacts, 'electron-user-data');
@@ -644,6 +644,100 @@ app.whenReady().then(async () => {
     await click(win, '[data-action="close-company"]');
     await sleep(400);
 
+    // ---- 8c. v1.6.1：未成交挂单设备仍计入卖方维护费（跨月）+ 企业财务面板 ----
+    step('8c. v1.6.1 未成交挂单设备仍计维护费（跨月）/ 企业财务面板');
+    const listingCheck = await read(win, `(async () => {
+      const s = window.__lanwan.store;
+      const city = s.world.cities.find((entry) => entry.id === 'lanport');
+      // 先记录“挂单前”台数，再挂单（顺序反了会把挂单后台数当成挂单前）。
+      let chosenId = null;
+      let beforeIndustry = 0;
+      let beforeOfferUnits = 0;
+      for (const entry of s.world.companies.filter((item) => item.cityId === city.id && (item.equipment.industry ?? 0) > 0)) {
+        const snapshotBefore = entry.equipment.industry;
+        // 该企业之前可能已有未成交挂单（AI 卖设备），计费台数口径是 equipment + 挂单，快照应等于两者之和。
+        const priorOffers = (s.world.equipmentMarket.offers || [])
+          .filter((offer) => offer.companyId === entry.id && offer.kind === 'industry')
+          .reduce((sum, offer) => sum + offer.units, 0);
+        if (s.sellUsedEquipment(entry.id, 'industry', 1, 999999)) {
+          chosenId = entry.id;
+          beforeIndustry = snapshotBefore;
+          beforeOfferUnits = priorOffers;
+          break;
+        }
+      }
+      if (!chosenId) return { ok: false, reason: '没有可挂单工业设备的企业' };
+      const findCompany = () => s.world.companies.find((entry) => entry.id === chosenId);
+      const offer0 = (s.world.equipmentMarket.offers || []).find((entry) => entry.companyId === chosenId && entry.kind === 'industry');
+      const afterListIndustry = findCompany().equipment.industry;
+      s.tick();
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const company = findCompany();
+      const offersAfter = (s.world.equipmentMarket.offers || []).filter((entry) => entry.companyId === chosenId);
+      const offerUnits = offersAfter.reduce((sum, entry) => sum + entry.units, 0);
+      const equipmentAfterTick = company.equipment.industry;
+      const base = company.maintenanceBase || company.equipment;
+      const prices = company.maintenancePrices || {};
+      const rate = s.simulation.config.equipment.maintenanceMonthlyRate;
+      const expected = ['farm', 'industry', 'energy'].reduce(
+        (sum, kind) => sum + (base[kind] ?? 0) * (prices[kind] ?? 0) * rate,
+        0,
+      );
+      const due = company.lastMonth.maintenanceDue ?? 0;
+      const paid = company.lastMonth.maintenancePaid ?? 0;
+      const arrearsAdded = company.lastMonth.maintenanceArrearsAdded ?? 0;
+      const cancelled = offer0 ? s.cancelUsedEquipment(chosenId, offer0.id) : false;
+      const afterCancelIndustry = findCompany().equipment.industry;
+      s.emit();
+      return {
+        ok: true,
+        company: chosenId,
+        tick: s.world.time.tick,
+        beforeIndustry,
+        beforeOfferUnits,
+        afterListIndustry,
+        offerUnits,
+        baseIndustry: base.industry,
+        expectedDue: Math.round(expected * 100) / 100,
+        due: Math.round(due * 100) / 100,
+        paid,
+        arrearsAdded,
+        cancelled,
+        afterCancelIndustry,
+        equipmentAfterTick,
+      };
+    })()`);
+    const listingOk = listingCheck.ok
+      // 挂单当刻设备 -1；月初快照把挂单 1 台算回，合计 = 挂单前台数。
+      && listingCheck.afterListIndustry === listingCheck.beforeIndustry - 1
+      && listingCheck.offerUnits > 0
+      && listingCheck.baseIndustry === listingCheck.beforeIndustry + listingCheck.beforeOfferUnits
+      && Math.abs(listingCheck.due - listingCheck.expectedDue) <= 0.05
+      && listingCheck.due > 0
+      && Math.abs(listingCheck.paid + listingCheck.arrearsAdded - listingCheck.due) <= 0.05
+      && listingCheck.cancelled === true
+      && listingCheck.afterCancelIndustry === listingCheck.equipmentAfterTick + listingCheck.offerUnits;
+    check('未成交挂单设备仍计入卖方当月维护费（月初快照含挂单台数，撤单返还）', listingOk, JSON.stringify(listingCheck));
+    await capture(win, 'v16-03-listed-maintenance.png');
+
+    await enterCity(win, 'lanport');
+    await clickTab(win, 'companies');
+    await waitFor(win, `document.querySelector('[data-testid="company-row-${listingCheck.company}"]')`, 8000);
+    await openCompany(win, listingCheck.company);
+    await clickTab(win, 'finance');
+    await sleep(600);
+    const financeUi = await read(win, `(() => {
+      const row = Array.from(document.querySelectorAll('tr')).find((item) => (item.textContent || '').includes('设备维护费'));
+      return {
+        hasRow: Boolean(row),
+        rowText: (row ? row.textContent : '').replace(/\s+/g, ' ').trim().slice(0, 160),
+      };
+    })()`);
+    check('企业财务面板显示设备维护费独立费用行', financeUi.hasRow, JSON.stringify(financeUi));
+    await capture(win, 'v16-04-company-finance.png');
+    await click(win, '[data-action="close-company"]');
+    await sleep(400);
+
     // ---- 9. 存读档：设备、现金、人口、债券、设备储备全部往返一致 ----
     step('9. 存读档：设备、现金、人口、债券、设备储备全部往返一致');
     const saveState = await read(win, `(async () => {
@@ -708,6 +802,60 @@ app.whenReady().then(async () => {
     check('1100x700 无横向溢出且城市标签仍完整', small.overflowX === false && small.tabs === 6, JSON.stringify(small));
     win.setSize(1600, 1000);
     await sleep(500);
+
+    // ---- 10b. §三.2：72 个月默认世界经桌面存档接口写入/读取并推进下一个月 ----
+    step('10b. 72 月存档：桌面接口读取→推进 1 月→写入→再读取');
+    const t72Path = '/tmp/v16-acceptance/t72-save.json';
+    if (fs.existsSync(t72Path)) {
+      const t72Text = fs.readFileSync(t72Path, 'utf8');
+      const t72Bytes = Buffer.byteLength(t72Text, 'utf8');
+      fs.writeFileSync(path.join(savesDir, 'manual-t72.json'), t72Text);
+      const t72 = await read(win, `(async () => {
+        const s = window.__lanwan.store;
+        if (typeof s.resetWorld === 'function') {
+          s.resetWorld();
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        }
+        const t0 = performance.now();
+        const loaded = await s.loadSlot('manual-t72');
+        const loadMs = Math.round(performance.now() - t0);
+        const startTick = s.world.time.tick;
+        const companies = s.world.companies.length;
+        const t1 = performance.now();
+        s.tick();
+        const tickMs = Math.round(performance.now() - t1);
+        const t2 = performance.now();
+        const saved = await s.saveSlot('manual-t72b');
+        const saveMs = Math.round(performance.now() - t2);
+        const t3 = performance.now();
+        const reloaded = await s.loadSlot('manual-t72b');
+        const reloadMs = Math.round(performance.now() - t3);
+        return {
+          saved, loaded, reloaded, startTick, advancedTick: s.world.time.tick, companies,
+          loadMs, tickMs, saveMs, reloadMs,
+          toasts: (s.toasts || []).map((entry) => entry.message),
+        };
+      })()`);
+      const savedFile = path.join(savesDir, 'manual-t72b.json');
+      const savedBytes = fs.existsSync(savedFile) ? fs.statSync(savedFile).size : 0;
+      const savedHead = fs.existsSync(savedFile) ? fs.readFileSync(savedFile).subarray(0, 2) : Buffer.alloc(0);
+      // v1.6.1 §三 长期方案：桌面存档对 ≥4MiB 文本 gzip 落盘（.json 后缀 + gzip 魔数，格式版本仍 9）。
+      const savedIsGzip = savedHead.length === 2 && savedHead[0] === 0x1f && savedHead[1] === 0x8b;
+      check(
+        '72 月默认世界经桌面存档接口：读取成功→推进 1 月→写入成功（gzip）→再读取成功',
+        t72.loaded && t72.reloaded && t72.advancedTick === t72.startTick + 1 && t72.saved
+          && savedBytes > 0 && savedBytes < t72Bytes * 0.3 && savedIsGzip,
+        JSON.stringify({
+          sourceBytes: t72Bytes, savedBytes, savedIsGzip, compressionRatio: Number((savedBytes / t72Bytes).toFixed(3)),
+          loadMs: t72.loadMs, tickMs: t72.tickMs, saveMs: t72.saveMs, reloadMs: t72.reloadMs,
+          startTick: t72.startTick, advancedTick: t72.advancedTick, companies: t72.companies,
+          toasts: t72.toasts,
+        }),
+      );
+      await capture(win, 'v16-05-t72-save-load.png');
+    } else {
+      check('72 月存档验收素材缺失（/tmp/v16-acceptance/t72-save.json）', false, '需先运行 npx tsx scripts/tmp-v16-gen-save.ts');
+    }
 
     check('全程无控制台错误（过滤 GPU/GL 噪声）', errors.length === 0, errors.slice(0, 5).join(' | '));
   } catch (error) {
