@@ -374,13 +374,10 @@ DISPLAY=:99 node_modules/electron/dist/electron --no-sandbox --disable-dev-shm-u
 ### 10.3 提交与远端
 
 - 本轮提交链（基线 `f483f609599771663de3e8311aaf1bd608edc707` 之上）：
-  `b2064d7` feat(v1.6) → `aa0ea0a` test(v1.6) → `35cb76d` docs(v1.6) → 交付文档 SHA 回填提交（HEAD，
-  见 `git log -1`）。
-- 推送状态：**未推送**——仓库无 SSH 密钥、无 credential helper，且旧 PAT 已按要求撤销；本轮所有
-  提交在本地 `feature/stock-market-ui-tax` 分支上，`origin/feature/stock-market-ui-tax` 仍为
-  `f483f609599771663de3e8311aaf1bd608edc707`，`origin/main` 仍为
-  `6c45000efc4c406d30e22c0a12bd066fc2df61f7`（未合并、未改写历史）。
-  需要用户提供新 PAT 后按下列方式推送（仅作环境变量，不写入仓库/文件）：
-  `git -c credential.helper='!f(){ echo username=x-access-token; echo "password=$GH_PUSH_TOKEN"; };f'
-  -c http.version=HTTP/1.1 push origin feature/stock-market-ui-tax`；
-  推送后 `git fetch` 核验本地=远端、main 未变，并提醒撤销 token。
+  `b2064d7` feat(v1.6) → `aa0ea0a` test(v1.6) → `35cb76d` docs(v1.6) → `ff2e830` docs（回归结果回填）
+  → **`4a08095` docs（交付 HEAD，已推送）** → 推送 SHA 回填提交（本地=远端，见 `git log -1`）。
+- **推送成功（已核验）**：`f483f60..4a08095  feature/stock-market-ui-tax -> feature/stock-market-ui-tax`；
+  推送后 `git fetch` 实测本地 HEAD = `origin/feature/stock-market-ui-tax` = `4a08095`；
+  `origin/main` 仍 `6c45000efc4c406d30e22c0a12bd066fc2df61f7`（未合并、未改写历史）。
+- 推送使用用户本次提供的新 PAT：只作为单次命令的环境变量 `GH_PUSH_TOKEN` 使用，未写入任何文件或
+  仓库；已在交付时提醒用户验收后撤销该 token。

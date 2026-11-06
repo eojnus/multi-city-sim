@@ -74,11 +74,8 @@ v1.6（按用户 2026-11-06 任务书）：①修复 v1.5 验收遗留（AI 政�
 
 ## Next（按序）
 
-1. **等用户验收/推送**：本地提交已完成；**推送需要用户提供新 PAT**（旧 PAT 已按要求撤销；仓库无
-   SSH key、无 credential helper）。做法：仅作环境变量 `GH_PUSH_TOKEN`：
-   `git -c credential.helper='!f(){ echo username=x-access-token; echo "password=$GH_PUSH_TOKEN"; };f'
-   -c http.version=HTTP/1.1 push origin feature/stock-market-ui-tax`，失败重试 3 次；推送后
-   `git fetch` 核验本地=远端、main 未变，并提醒撤销 token。
+1. **等用户验收**：已推送 `feature/stock-market-ui-tax`（本地/远端 = 推送交付 HEAD `4a08095`；
+   回填提交见 `git log -1`），等待用户验收；验收后提醒用户撤销本次使用的 PAT。
 2. 新会话先做基线确认：`git rev-parse HEAD origin/feature/stock-market-ui-tax origin/main`、
    `git status --short`、`npx tsc --noEmit`。
 3. 若继续开发：沿用仓库约定——基线 SHA、分支不变、不 amend/rebase/force、不合并 main、
@@ -131,7 +128,9 @@ v1.6（按用户 2026-11-06 任务书）：①修复 v1.5 验收遗留（AI 政�
   - `aa0ea0a` test(v1.6)：7 个新测试 + acceptance 重锁 + 兼容回归修复 + 桌面验收脚本
   - `35cb76d` docs(v1.6)：交付报告、README 1.6.0、PLAN、桌面证据（24/24）
   - `ff2e830` docs(v1.6)：全量回归分块结果、提交链与推送状态回填
-  - 本文件的 SHA 回填提交（HEAD，见 `git log -1`）
-- 本地 HEAD = 上述回填提交；**截至本文件提交时未推送**（无 SSH key / 无 credential helper /
-  旧 PAT 已撤销）。`origin/feature/stock-market-ui-tax` 仍 `f483f60`，`origin/main` 仍 `6c45000`。
-- 推送步骤见“Next 1”；推送后把远端 SHA 回填到本文件与交付报告 10.3。
+  - `4a08095` docs(v1.6)：PLAN 收尾状态与提交链 SHA 回填（**已推送的交付 HEAD**）
+- **推送成功（已核验）**：`f483f60..4a08095 feature/stock-market-ui-tax -> feature/stock-market-ui-tax`；
+  推送后 `git fetch` 实测 本地 HEAD = `origin/feature/stock-market-ui-tax` = `4a08095`；
+  `origin/main` 仍 `6c45000`（未合并、未改写历史）。其后仅“推送 SHA 回填” docs 提交（本地=远端，
+  见 `git log -1`）。
+- 用户提供的 PAT 只作为单次命令环境变量使用，未写入任何文件/仓库；已提醒用户在验收后撤销该 token。
