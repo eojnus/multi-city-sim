@@ -5,7 +5,7 @@
  * 唯一的人工构造：把两家企业的经营者临时设为玩家（`governance.controls`），
  * 以便在界面上真实执行设备买卖——这是“玩家经营权限”的测试前置，不改变任何经济数值。
  *
- * 证据截图与 JSON 同时写入 artifacts/（gitignore）与 docs/evidence_v1.4/（入仓）。
+ * 证据截图与 JSON 同时写入 artifacts/（gitignore）与 docs/evidence_v1.5/（入仓）。
  *
  * 用法：Xvfb :99 & DISPLAY=:99 node_modules/electron/dist/electron --no-sandbox \
  *        --disable-dev-shm-usage --enable-unsafe-swiftshader scripts/acceptance-v09.cjs
@@ -17,7 +17,7 @@ const { registerSaveHandlers } = require('../dist/electron/saveIpc.js');
 
 const root = path.resolve(__dirname, '..');
 const artifacts = path.join(root, 'artifacts', 'acceptance-v09');
-const evidence = path.join(root, 'docs', 'evidence_v1.4');
+const evidence = path.join(root, 'docs', 'evidence_v1.5');
 fs.mkdirSync(artifacts, { recursive: true });
 fs.mkdirSync(evidence, { recursive: true });
 const userData = path.join(artifacts, 'electron-user-data');
@@ -265,9 +265,71 @@ app.whenReady().then(async () => {
     })()`);
     const govOk = govPanel.mayor
       ? /不代选/.test(govPanel.mayorText)
-      : govPanel.ai && /失业档位/.test(govPanel.aiText) && /预算/.test(govPanel.aiText) && govPanel.checkup !== null;
+      : govPanel.ai && /失业档位/.test(govPanel.aiText) && !/债务\/GDP\s*[\d.]|月政策预算\s*[\d.]/.test(govPanel.aiText) && govPanel.checkup !== null;
     check('政府面板显示 AI 经济体检/玩家市长不代选政策，数值来自真实体检快照', govOk, JSON.stringify({ ai: govPanel.ai, mayor: govPanel.mayor, aiText: govPanel.aiText, mayorText: govPanel.mayorText }));
-    await capture(win, 'v14-01-gov-ai.png');
+
+    // ---- 3c. v1.5 §1 非市长财政权限：受限数值不出现；上任后出现；市场口径说明 ----
+    step('3c. v1.5 §1 非市长财政权限与市长切换、§3 市场口径说明');
+    const permBefore = await read(win, `(() => {
+      const s = window.__lanwan.store;
+      const view = s.policyView('lanport');
+      const aiText = (document.querySelector('[data-testid="ai-government"]')?.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 600);
+      const restrictedText = (document.querySelector('[data-testid="fiscal-restricted"]')?.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
+      return {
+        isMayor: view.isPlayerMayor,
+        aiRestrictedBlock: Boolean(document.querySelector('[data-testid="ai-checkup-restricted"]')),
+        fiscalRestricted: Boolean(document.querySelector('[data-testid="fiscal-restricted"]')),
+        aiText,
+        restrictedText,
+        allBudgetsNull: view.active.every((policy) => policy.budget === null && policy.spent === null),
+        allDefaultBudgetsNull: view.definitions.every((definition) => definition.defaultBudget === null),
+        historyEmpty: view.history.length === 0,
+      };
+    })()`);
+    const leakFree = permBefore.isMayor || (
+      permBefore.aiRestrictedBlock === false
+      && permBefore.fiscalRestricted === true
+      && !/债务\/GDP\s*[\d.]|债务预警[^\n]{0,8}?[\d.]|到期[^\n]{0,10}?[\d,]{4,}|参考预算\s*[\d,]|政策预算\s*[\d,]/.test(permBefore.aiText)
+      && permBefore.allBudgetsNull
+      && permBefore.allDefaultBudgetsNull
+      && permBefore.historyEmpty
+    );
+    check('非市长：AI 体检不显示债务/GDP/预警/到期/预算，视图数据预算为 null', leakFree, JSON.stringify(permBefore));
+    const mayorSwitch = await read(win, `(() => {
+      const s = window.__lanwan.store;
+      // 生产构建禁用 setMayorDemo 后门；桌面验收用显式构造的身份夹具（与单元测试 appointPlayerMayor 等价的最小状态）。
+      s.world.player.roles.mayorCityId = 'lanport';
+      s.emit();
+      const view = s.policyView('lanport');
+      const restrictedText = (document.querySelector('[data-testid="ai-checkup-restricted"]')?.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 600);
+      const cardText = (document.querySelector('.policy-active-meta')?.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
+      return {
+        isMayor: view.isPlayerMayor,
+        restrictedBlock: Boolean(document.querySelector('[data-testid="ai-checkup-restricted"]')),
+        restrictedText,
+        cardText,
+        budgetVisible: view.active.some((policy) => typeof policy.budget === 'number'),
+        referenceVisible: view.active.some((policy) => typeof policy.referenceBudget === 'number'),
+      };
+    })()`);
+    const mayorOk = mayorSwitch.isMayor && mayorSwitch.restrictedBlock
+      && /债务\/GDP|参考预算|到期压力/.test(mayorSwitch.restrictedText)
+      && mayorSwitch.budgetVisible
+      && (!mayorSwitch.referenceVisible || /本月参考|预留|未支付/.test(mayorSwitch.cardText));
+    check('市长：AI 体检受限财政口径出现，政策卡显示参考/预留/未支付与资金预算', mayorOk, JSON.stringify(mayorSwitch));
+    const mayorReset = await read(win, `(() => { const s = window.__lanwan.store; s.world.player.roles.mayorCityId = null; s.emit(); return s.policyView('lanport').isPlayerMayor; })()`);
+    await sleep(400);
+    check('离任后立即恢复非市长受限视图', mayorReset === false, JSON.stringify({ isPlayerMayor: mayorReset }));
+    await capture(win, 'v15-01-fiscal-permission.png');
+    await clickTab(win, 'market');
+    await sleep(400);
+    const marketScope = await read(win, `(() => {
+      const note = document.querySelector('[data-testid="market-scope-note"]');
+      const header = document.querySelector('[data-testid="market-scope-note"]');
+      return { note: Boolean(note), text: (note?.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 240), header: Boolean(header) };
+    })()`);
+    check('市场快照显示 §3 口径说明（居民实际食品成交 = 本地 + 跨城进口）', marketScope.note && /居民实际食品成交|跨城进口/.test(marketScope.text), JSON.stringify(marketScope));
+    await capture(win, 'v15-02-market-scope.png');
 
     // ---- 4. 玩家经营前置（唯一构造）：设置两家企业的经营者为玩家 ----
     step('4. 玩家经营前置（唯一构造）：设置两家企业的经营者为玩家');

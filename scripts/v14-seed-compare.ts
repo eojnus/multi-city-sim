@@ -77,6 +77,26 @@ function cityReport(world: WorldState, city: City, ai: AccumulatedAi, trade: Acc
     companies.reduce((total, company) => total + (company.lastMonth.equipmentPurchased ?? 0), 0),
   );
   const month = city.lastMonth;
+  // v1.5 §3：食品覆盖率/满足率按居民实际成交（含跨城进口）口径，与主报告 cityFoodMetrics 一致。
+  const statedFoodNeed = round2(
+    groups.reduce((total, group) => total + (group.lastMonth.basicNeedUnits ?? 0), 0),
+  );
+  const statedFoodSold = round2(
+    groups.reduce((total, group) => total + (group.lastMonth.basicSoldUnits ?? 0), 0),
+  );
+  const statedFoodEffective = round2(
+    groups.reduce((total, group) => total + (group.lastMonth.basicEffectiveUnits ?? 0), 0),
+  );
+  const foodImported = round2(foodMarket?.intercityImported ?? 0);
+  const foodExported = round2(
+    world.lastTick.tradeFlows
+      .filter((flow) => flow.good === 'food' && flow.fromCityId === city.id)
+      .reduce((total, flow) => total + flow.qty, 0),
+  );
+  const effectiveFoodNeed = statedFoodNeed > 0.01 ? statedFoodNeed : basicNeed;
+  const residentFoodSold = statedFoodSold > 0.01 ? statedFoodSold : round2((foodMarket?.sold ?? 0) + foodImported);
+  const foodCoverage = effectiveFoodNeed > 0.01 ? residentFoodSold / effectiveFoodNeed : 0;
+  const foodSatisfaction = statedFoodEffective > 0.01 ? residentFoodSold / statedFoodEffective : null;
   const foundedTotal = world.lifecycle.foundings.filter((record) => record.cityId === city.id).length;
   const liquidatedTotal = world.lifecycle.liquidations.filter((record) => record.cityId === city.id).length;
   const lifecycleLimit = DEMO_CONFIG.lifecycle.maxHistory;
@@ -95,10 +115,14 @@ function cityReport(world: WorldState, city: City, ai: AccumulatedAi, trade: Acc
     liquidatedTotal,
     lifecycleTruncated: foundedTotal >= lifecycleLimit || liquidatedTotal >= lifecycleLimit,
     food: {
-      sold: round2(foodMarket?.sold ?? 0),
-      effectiveDemand: round2(foodMarket?.consumerDemand ?? 0),
-      basicNeed: round2(basicNeed),
-      basicNeedCoverage: basicNeed > 0.01 ? Math.round(((foodMarket?.sold ?? 0) / basicNeed) * 1000) / 10 : 0,
+      sold: residentFoodSold,
+      localSold: round2(Math.max(0, residentFoodSold - foodImported)),
+      imported: foodImported,
+      exported: foodExported,
+      effectiveDemand: statedFoodEffective,
+      satisfaction: foodSatisfaction === null ? null : Math.round(foodSatisfaction * 1000) / 10,
+      basicNeed: round2(effectiveFoodNeed),
+      basicNeedCoverage: Math.round(foodCoverage * 1000) / 10,
       price: round2(foodMarket?.price ?? 0),
       capacity: round2(foodCompanies.reduce((total, company) => total + company.capacity, 0)),
       produced: round2(foodCompanies.reduce((total, company) => total + company.lastMonth.produced, 0)),

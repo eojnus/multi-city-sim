@@ -84,6 +84,32 @@ function primeCheckups(world: WorldState, city: City, rate: number, months: numb
  * 把食品供需字段调成“无症状”基线，便于逐项打开 fundingGap / supplyGap：
  * 价格 0 时食品成本为 0（消费预算足够），库存与产能充足，缺货/缺钱缺口都为 0。
  */
+/**
+ * 写入居民群体月度消费六项（v1.5 §4：AI 体检以 Σ group.lastMonth 为准，而不是市场台账）。
+ * 聚合值全部落在第一条群体上、其余清零，保证 Σ 等于指定值。
+ */
+function setGroupConsumption(
+  world: WorldState,
+  city: City,
+  values: {
+    needUnits?: number;
+    effectiveUnits?: number;
+    soldUnits?: number;
+    unmetFunding?: number;
+    supplyShortfallUnits?: number;
+  },
+): void {
+  const groups = world.households.groups.filter((group) => group.cityId === city.id);
+  groups.forEach((group, index) => {
+    const stats = group.lastMonth;
+    stats.basicNeedUnits = index === 0 ? values.needUnits ?? 0 : 0;
+    stats.basicEffectiveUnits = index === 0 ? values.effectiveUnits ?? 0 : 0;
+    stats.basicSoldUnits = index === 0 ? values.soldUnits ?? 0 : 0;
+    stats.unmetFunding = index === 0 ? values.unmetFunding ?? 0 : 0;
+    stats.supplyShortfallUnits = index === 0 ? values.supplyShortfallUnits ?? 0 : 0;
+  });
+}
+
 function neutralizeCheckupInputs(world: WorldState, city: City): void {
   const food = city.market.food;
   food.price = 0;
@@ -93,6 +119,8 @@ function neutralizeCheckupInputs(world: WorldState, city: City): void {
   for (const company of world.companies) {
     if (company.cityId === city.id && company.recipeOutput === 'food') company.capacity = 1_000_000_000;
   }
+  // 居民侧：需要=有效需求=成交，无资金缺口/缺货缺口。
+  setGroupConsumption(world, city, { needUnits: 1_000, effectiveUnits: 1_000, soldUnits: 1_000 });
   city.lastMonth.consumerBudget = 0;
   city.lastMonth.consumerSpend = 0;
   city.lastMonth.householdIncome = 0;
@@ -408,8 +436,8 @@ describe('v1.4 §五（三）动态预算：税收口径、5%–15% 区间与债
     const city = cityOf(world);
     primeCheckups(world, city, 0.9, 3);
     neutralizeCheckupInputs(world, city);
-    city.market.food.price = 1_000;
-    city.lastMonth.consumerBudget = 0;
+    // 居民买不起基本食品：有效需求 800 < 基本需要 1000（资金约束），市场台账不参与判定。
+    setGroupConsumption(world, city, { needUnits: 1_000, effectiveUnits: 800, soldUnits: 800, unmetFunding: 0 });
     world.time.tick += 1;
     setUnemploymentRate(city, 0.9);
     const checkup = runCityEconomicCheckup(world, city, DEMO_CONFIG);
@@ -467,8 +495,8 @@ describe('v1.4 §五（三）动态预算：税收口径、5%–15% 区间与债
     const city = cityOf(world);
     primeCheckups(world, city, 0.9, 3);
     neutralizeCheckupInputs(world, city);
-    city.market.food.price = 1_000;
-    city.lastMonth.consumerBudget = 0;
+    // 居民买不起基本食品：有效需求 800 < 基本需要 1000（资金约束），市场台账不参与判定。
+    setGroupConsumption(world, city, { needUnits: 1_000, effectiveUnits: 800, soldUnits: 800, unmetFunding: 0 });
     // 用固定 GDP 窗口控制债务/GDP：借 1,800 万 / 2,000 万 = 90%（≥85% 预警，未到 100% 破产线）。
     city.gdpWindow = [{ tick: -1, value: 20_000_000, estimated: true }];
     const borrow = borrowForGovernment(world, city, DEMO_CONFIG, 18_000_000, world.time.tick, [], {
@@ -524,8 +552,8 @@ describe('v1.4 §五（三）动态预算：税收口径、5%–15% 区间与债
     const city = cityOf(world);
     primeCheckups(world, city, 0.9, 3);
     neutralizeCheckupInputs(world, city);
-    city.market.food.price = 1_000;
-    city.lastMonth.consumerBudget = 0;
+    // 居民买不起基本食品：有效需求 800 < 基本需要 1000（资金约束），市场台账不参与判定。
+    setGroupConsumption(world, city, { needUnits: 1_000, effectiveUnits: 800, soldUnits: 800, unmetFunding: 0 });
     // 12 个月真实税收各 1 亿 → 月均 1 亿 × 危机档 15% = 1500 万 → 被预算上限 600 万截断。
     world.time.tick = 20;
     setTaxHistory(world, city, Array.from({ length: 12 }, () => 100_000_000), 20);
@@ -552,15 +580,17 @@ describe('v1.4 §五（三）动态预算：税收口径、5%–15% 区间与债
     const city = cityOf(world);
     primeCheckups(world, city, 0.9, 3);
     neutralizeCheckupInputs(world, city);
-    city.market.food.price = 1_000;
-    city.lastMonth.consumerBudget = 0;
+    // 居民买不起基本食品：有效需求 800 < 基本需要 1000（资金约束），市场台账不参与判定。
+    setGroupConsumption(world, city, { needUnits: 1_000, effectiveUnits: 800, soldUnits: 800, unmetFunding: 0 });
     world.time.tick += 1;
     setUnemploymentRate(city, 0.9);
     autoSelectPolicies(world, DEMO_CONFIG, []);
     const policy = activePolicy(world, city.id, 'unemploymentAid')!;
-    // 动态预算已写入政策（远大于旧固定默认），但本月结算时财政被公共工资/福利耗尽。
-    expect(policy.budget).toBe(latestCheckup(world, city.id)!.budget);
-    expect(policy.budget).toBeGreaterThan(DEMO_CONFIG.policies.budgets.unemploymentAid);
+    // 单月参考预算已写入政策（远大于旧固定默认），总预算 = 单月 × 剩余月数；但本月未走
+    // v1.5 §4 资金预留步骤且结算时财政为 0，因此实发必须为 0（不伪造支出）。
+    expect(policy.referenceBudget).toBe(latestCheckup(world, city.id)!.budget);
+    expect(policy.referenceBudget).toBeGreaterThan(DEMO_CONFIG.policies.budgets.unemploymentAid);
+    expect(policy.budget).toBe(round2(policy.referenceBudget! * (policy.monthsRemaining + 1)));
     city.treasury = 0;
     const benefitsBefore = city.lastMonth.benefitsPaid;
     const ledgerBefore = world.fiscal.ledger.length;
@@ -641,9 +671,8 @@ describe('v1.4 §五（二）对症政策：买不起 / 缺货 / 缺岗位 / 技
     const city = cityOf(world);
     primeCheckups(world, city, 0.9, 3);
     neutralizeCheckupInputs(world, city);
-    // 价格高、消费预算 0、库存充足：有供给但买不起。
-    city.market.food.price = 1_000;
-    city.lastMonth.consumerBudget = 0;
+    // 居民买不起基本食品（预算约束）：需要 1000、有效需求 800，市场台账不参与判定。
+    setGroupConsumption(world, city, { needUnits: 1_000, effectiveUnits: 800, soldUnits: 800, unmetFunding: 0 });
     world.time.tick += 1;
     setUnemploymentRate(city, 0.9);
     const checkup = runCityEconomicCheckup(world, city, DEMO_CONFIG);
@@ -688,7 +717,14 @@ describe('v1.4 §五（二）对症政策：买不起 / 缺货 / 缺岗位 / 技
     const city = cityOf(world);
     primeCheckups(world, city, 0.9, 3);
     neutralizeCheckupInputs(world, city);
-    city.market.food.unmetDemand = 1_000;
+    // 居民有支付能力但买不到：有效需求 1000、成交 600（缺货 400 件）。
+    setGroupConsumption(world, city, {
+      needUnits: 1_000,
+      effectiveUnits: 1_000,
+      soldUnits: 600,
+      unmetFunding: 0,
+      supplyShortfallUnits: 400,
+    });
     world.time.tick += 1;
     setUnemploymentRate(city, 0.9);
     const checkup = runCityEconomicCheckup(world, city, DEMO_CONFIG);
@@ -1125,8 +1161,8 @@ describe('v1.4 §五（三）（四）低效停止、玩家市长边界与执行
     const city = cityOf(world);
     primeCheckups(world, city, 0.9, 3);
     neutralizeCheckupInputs(world, city);
-    city.market.food.price = 1_000;
-    city.lastMonth.consumerBudget = 0;
+    // 居民买不起基本食品：有效需求 800 < 基本需要 1000（资金约束），市场台账不参与判定。
+    setGroupConsumption(world, city, { needUnits: 1_000, effectiveUnits: 800, soldUnits: 800, unmetFunding: 0 });
     world.time.tick += 1;
     setUnemploymentRate(city, 0.9);
     const log: LogEntry[] = [];
@@ -1138,9 +1174,11 @@ describe('v1.4 §五（三）（四）低效停止、玩家市长边界与执行
     const policy = activePolicy(world, city.id, 'unemploymentAid')!;
     expect(policy.reason).toContain('AI 高失业决策');
     const checkup = latestCheckup(world, city.id)!;
-    // v1.4 §五（三）：危机档实际写入的政策预算 = 本月动态预算（远大于旧固定默认 500k）。
-    expect(policy.budget).toBe(checkup.budget);
-    expect(policy.budget).toBeGreaterThan(DEMO_CONFIG.policies.budgets.unemploymentAid);
+    // v1.5 §4：referenceBudget 是“单月参考预算”（= 本月动态预算，远大于旧固定默认 500k）；
+    // policy.budget 是展开后的总预算（单月 × 剩余月数），供支出≤预算不变量使用。
+    expect(policy.referenceBudget).toBe(checkup.budget);
+    expect(policy.referenceBudget).toBeGreaterThan(DEMO_CONFIG.policies.budgets.unemploymentAid);
+    expect(policy.budget).toBe(round2(checkup.budget * (policy.monthsRemaining + 1)));
     expect(
       log.some((entry) => entry.message.includes('AI 高失业决策') && entry.message.includes('启动失业救助')),
     ).toBe(true);
@@ -1277,7 +1315,10 @@ describe('v1.4 §五 真实模拟前 3 个月：体检逐月落盘、症状非�
         (policy) => policy.cityId === checkup.cityId && policy.reason.includes('AI 高失业决策'),
       );
       expect(aiPolicy).toBeDefined();
-      expect(aiPolicy!.budget).toBeLessThanOrEqual(checkup.budget);
+      // v1.5 §4（task-18）：政策可能是本月或更早用“先立项后融资”启动的，
+      // 其单月参考预算来自当次体检，不应与本月体检预算强行相等；但必须真实存在且总预算≥单月。
+      expect(aiPolicy!.referenceBudget).toBeGreaterThan(0);
+      expect(aiPolicy!.budget).toBeGreaterThanOrEqual(aiPolicy!.referenceBudget!);
     }
     expect(checkInvariants(world)).toEqual([]);
   });
@@ -1321,6 +1362,86 @@ describe('v1.4 §五（一）生命周期观测：创办/关闭按上一 tick �
 });
 
 // ---------------------------------------------------------------- 边界：关档但真实就业仍可增长
+
+// ---------------------------------------------------------------- v1.5 §4：体检消费口径
+
+describe('v1.5 §4 体检消费口径：使用居民群体六项，不用市场台账', () => {
+  it('有效需求/成交/资金缺口/缺货缺口来自 Σ group.lastMonth，市场台账不参与分类', () => {
+    const world = richWorld();
+    const city = cityOf(world);
+    // 市场台账故意给“缺货/资金缺口”，但居民群体统计显示无缺口 → 不能误报。
+    city.market.food.unmetDemand = 99_999;
+    city.market.food.unmetFunding = 88_888;
+    city.market.food.price = 50;
+    setGroupConsumption(world, city, {
+      needUnits: 10_000,
+      effectiveUnits: 10_000,
+      soldUnits: 10_000,
+      unmetFunding: 0,
+      supplyShortfallUnits: 0,
+    });
+    const ok = runCityEconomicCheckup(world, city, DEMO_CONFIG);
+    expect(ok.foodDemand).toBe(10_000);
+    expect(ok.foodUnmetDemand).toBe(0);
+    expect(ok.foodUnmetFunding).toBe(0);
+    expect(ok.fundingGap).toBe(false);
+    expect(ok.supplyGap).toBe(false);
+    expect(ok.symptoms).not.toContain('买不起但有供给');
+    expect(ok.symptoms).not.toContain('有购买力但缺货');
+    expect(ok.note).toContain('居民基本食品');
+
+    // 真实居民资金缺口：需要 10000、有效需求 8000（预算约束 2000 件没形成有效需求）。
+    world.time.tick += 1;
+    setGroupConsumption(world, city, {
+      needUnits: 10_000,
+      effectiveUnits: 8_000,
+      soldUnits: 8_000,
+      unmetFunding: 500,
+      supplyShortfallUnits: 0,
+    });
+    const funding = runCityEconomicCheckup(world, city, DEMO_CONFIG);
+    expect(funding.foodDemand).toBe(10_000);
+    expect(funding.foodUnmetDemand).toBe(0);
+    expect(funding.foodUnmetFunding).toBe(500);
+    expect(funding.fundingGap).toBe(true);
+    expect(funding.supplyGap).toBe(false);
+    expect(funding.symptoms).toContain('买不起但有供给');
+
+    // 真实缺货：有效需求 10000、成交 7000（缺货 3000 件）。
+    world.time.tick += 1;
+    setGroupConsumption(world, city, {
+      needUnits: 10_000,
+      effectiveUnits: 10_000,
+      soldUnits: 7_000,
+      unmetFunding: 0,
+      supplyShortfallUnits: 3_000,
+    });
+    const supply = runCityEconomicCheckup(world, city, DEMO_CONFIG);
+    expect(supply.foodUnmetDemand).toBe(3_000);
+    expect(supply.foodUnmetFunding).toBe(0);
+    expect(supply.fundingGap).toBe(false);
+    expect(supply.supplyGap).toBe(true);
+    expect(supply.symptoms).toContain('有购买力但缺货');
+    expect(supply.symptoms).not.toContain('买不起但有供给');
+  });
+
+  it('旧存档缺居民消费统计时回退本地市场台账并在 note 标注', () => {
+    const world = richWorld();
+    const city = cityOf(world);
+    for (const group of world.households.groups.filter((entry) => entry.cityId === city.id)) {
+      const stats = group.lastMonth as unknown as Record<string, unknown>;
+      delete stats.basicNeedUnits;
+      delete stats.basicEffectiveUnits;
+      delete stats.basicSoldUnits;
+      delete stats.unmetFunding;
+      delete stats.supplyShortfallUnits;
+    }
+    city.market.food.unmetDemand = 1_234;
+    const checkup = runCityEconomicCheckup(world, city, DEMO_CONFIG);
+    expect(checkup.note).toContain('回退本地市场台账');
+    expect(checkup.foodUnmetDemand).toBe(1_234);
+  });
+});
 
 describe('v1.4 §五 边界：症状字段与档位解耦，不因迟滞丢失真实观测', () => {
   it('10%–20% 承压档在体检中始终带着高失业症状，且预算比例在区间内', () => {

@@ -455,7 +455,7 @@ describe('投资实体资产核算（v1.4 §3）', () => {
     expect(checkInvariants(world)).toEqual([]);
   });
 
-  it('§3.2 跨城迁移：源城实体保留真实债券债权，迁移价值以等价现金划转，债券不重复计也不消失', () => {
+  it('§3.2/v1.5 §2 跨城迁移：债券按比例真实拆分给两城实体，不重复计、不消失、兑付规则不变', () => {
     const world = newWorld();
     const from = cityAt(world, 0);
     const to = cityAt(world, 1);
@@ -476,26 +476,41 @@ describe('投资实体资产核算（v1.4 §3）', () => {
     expect(cityInvestorEquity(world, from.id)).toBe(10_000);
     const totalValueBefore = totalInvestorEquity(world, [from.id, to.id]);
     expect(totalValueBefore).toBe(11_000);
+    const totalBondValueBefore = round2(
+      (world.bonds?.holdings ?? [])
+        .filter((holding) => holding.status === 'active')
+        .reduce((sum, holding) => sum + holding.principal + holding.accruedInterest, 0),
+    );
 
     const source = groupOf(world, from.id, 'unemployed');
     const moving = source.people;
     const result = transferInvestorAssetsForMigration(world, from.id, to.id, moving, moving);
 
-    // 债券不可分割搬走：保留在 A 城实体作为真实债权；迁移价值用等额现金支付，不重复计价。
+    // 迁移价值 5,000 = 债券 2,000（真实拆分给 B 城实体）+ 现金 3,000；股票为 0。
     expect(result.effectiveSharesMoved).toBe(500);
     expect(result.valueMoved).toBe(5_000);
     expect(result.holdingsMoved).toBe(0);
-    expect(result.cashMoved).toBe(5_000);
+    expect(result.bondValueMoved).toBe(2_000);
+    expect(result.bondHoldingsMoved).toBeGreaterThan(0);
+    expect(result.cashMoved).toBe(3_000);
     expect(result.targetSharesAdded).toBe(5_000);
-    expect(investorBondValue(world, holder.id)).toBe(bondValueBefore);
-    const totalBondValue = round2(
+    expect(investorBondValue(world, holder.id)).toBe(2_000);
+    const bondValueOfToInvestors = round2(
+      investorsOf(world, to.id).reduce(
+        (sum, investor) => sum + investorBondValue(world, investor.id),
+        0,
+      ),
+    );
+    expect(bondValueOfToInvestors).toBe(2_000);
+    const totalBondValueAfter = round2(
       (world.bonds?.holdings ?? [])
         .filter((holding) => holding.status === 'active')
         .reduce((sum, holding) => sum + holding.principal + holding.accruedInterest, 0),
     );
-    expect(totalBondValue).toBe(bondValueBefore);
+    // 债券本金/应计合计不变：真实转移，不是凭空造债也不是抹掉。
+    expect(totalBondValueAfter).toBe(totalBondValueBefore);
 
-    // A 城：净资产 5,000 = 现金 1,000 + 债券 4,000，500 份净值仍 10/份；留在 A 的居民价值不变。
+    // A 城：净资产 5,000 = 现金 3,000 + 债券 2,000，500 份净值仍 10/份；留在 A 的居民价值不变。
     const fromEquityAfter = cityInvestorEquity(world, from.id);
     const fromNavAfter = round2(fromEquityAfter / totalEffectiveShares(world, from.id));
     expect(fromEquityAfter).toBe(5_000);

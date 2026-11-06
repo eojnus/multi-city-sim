@@ -7,7 +7,7 @@
 //    锁定期满后可正常挂出。
 // 3. 政府/政策面板：AI 经济体检（档位/3 月均值/趋势/症结/预算与占比/真实与估算税月/
 //    债务 GDP 与 85% 预警/到期压力）、在行政策及原因、本月执行支出/受益/真实岗位；
-//    玩家市长时显示“AI 不代选政策”。
+//    玩家市长时显示“AI 不代选政策”，且财政口径仅市长可见（v1.5 §1 拆公开/受限）。
 import { describe, expect, it } from 'vitest';
 import { GameStore } from '../src/app/gameStore';
 import { Simulation } from '../src/simulation/core/simulation';
@@ -255,8 +255,8 @@ describe('v1.4 企业设备面板：初始实物出资来源/估值/锁定期', 
   });
 });
 
-describe('v1.4 政府/政策面板：AI 经济体检、政策原因与执行追踪', () => {
-  it('非市长（AI 执政）显示体检档位/3 月均值/趋势/症结/预算与占比/税月/债务预警/到期压力', () => {
+describe('v1.4/v1.5 政府/政策面板：AI 体检公开项与市长财政口径', () => {
+  it('非市长（AI 执政）：公开体检项可见，财政口径字段与数值不进入 HTML', () => {
     const store = createStore();
     store.selectCity('lanport');
     expect(store.tick()).toBe(true);
@@ -265,40 +265,46 @@ describe('v1.4 政府/政策面板：AI 经济体检、政策原因与执行追�
     const html = renderRightCity(store, panelState);
 
     expect(html).toContain('data-testid="ai-government"');
+    expect(html).toContain('data-testid="ai-checkup-public"');
     expect(html).toContain('data-testid="ai-checkup-tier"');
     expect(html).toContain('AI 政府 · 经济体检');
     expect(html).toContain(unemploymentTierLabel(checkup!.tier));
     expect(html).toContain(unemploymentTierLabel(checkup!.rawTier));
     expect(html).toContain(pct(checkup!.unemploymentRateAvg3));
     expect(html).toContain(signedPct(checkup!.unemploymentTrend));
-    // 症结（symptoms）逐条来自体检快照；没有症状时显示“无明显症状”。
+    // 公开症状（剔除债务/预算/税收/财政口径条目）逐条渲染。
     expect(html).toContain('data-testid="ai-checkup-symptoms"');
-    if (checkup!.symptoms.length > 0) {
-      for (const symptom of checkup!.symptoms) expect(html).toContain(symptom);
-    } else {
-      expect(html).toContain('无明显症状');
-    }
-    // 月预算与档位占比；真实/估算税月；债务/GDP 与 85% 预警线；到期压力（债券 + 贷款）。
-    expect(html).toContain(money(checkup!.budget));
-    expect(html).toContain(pct(checkup!.budgetShare));
-    expect(html).toContain(
-      `真实 ${num(checkup!.taxMonthsReal)} 月 / 估算 ${num(checkup!.taxMonthsEstimated)} 月`,
+    const publicSymptomList = checkup!.symptoms.filter(
+      (symptom) => !/债务|预算|税收|财政/.test(symptom),
     );
-    expect(html).toContain(money(checkup!.monthlyTaxRevenueReal));
-    expect(html).toContain(money(checkup!.monthlyTaxRevenueEstimated));
-    expect(html).toContain('data-testid="ai-checkup-debt"');
-    expect(html).toContain(pct(checkup!.debtRatio));
-    expect(html).toContain('85%');
-    expect(html).toContain(pct(checkup!.debtServicePressure));
-    expect(html).toContain(money(checkup!.bondDue));
-    expect(html).toContain(money(checkup!.loanDue));
-    expect(html).toContain('预算参考');
-    // 非市长不得出现市长专属财政面板。
-    expect(html).not.toContain('data-testid="mayor-fiscal-panel"');
+    for (const symptom of publicSymptomList) expect(html).toContain(symptom);
+    // 公开的就业/招聘/食品供需指标保留。
+    expect(html).toContain('就业 / 失业 / 劳动力');
+    expect(html).toContain('上月招聘 / 裁员');
+    expect(html).toContain('食品库存覆盖');
+
+    // 市长财政口径：字段 testid、明细标签与数值都不出现在非市长 HTML。
     expect(html).toContain('data-testid="fiscal-restricted"');
+    expect(html).toContain('data-restricted-scope="ai-checkup"');
+    expect(html).not.toContain('data-testid="ai-checkup-restricted"');
+    expect(html).not.toContain('data-testid="ai-checkup-debt"');
+    expect(html).not.toContain('data-testid="ai-checkup-budget"');
+    expect(html).not.toContain('data-testid="ai-checkup-tax"');
+    expect(html).not.toContain('data-testid="ai-checkup-due"');
+    expect(html).not.toContain('<i>月政策预算</i>');
+    expect(html).not.toContain('<i>税收参考月数</i>');
+    expect(html).not.toContain('<i>债务 / GDP</i>');
+    expect(html).not.toContain('<i>本月到期压力</i>');
+    expect(html).not.toContain('占参考税收');
+    expect(html).not.toContain('预警线 85%');
+    expect(html).not.toContain('预算参考：');
+    expect(html).not.toContain(money(checkup!.budget));
+    expect(html).not.toContain(money(checkup!.monthlyTaxRevenueEstimated));
+    expect(html).not.toContain('data-testid="mayor-fiscal-panel"');
+    expect(html).not.toContain('data-testid="fiscal-debt-ratio"');
   });
 
-  it('在行政策显示启动原因与最近一次真实执行（支出/受益/真实岗位）', () => {
+  it('在行政策：非市长可见原因/受益/真实岗位，支出金额隐藏', () => {
     const store = createStore();
     store.selectCity('lanport');
     expect(store.tick()).toBe(true);
@@ -310,26 +316,57 @@ describe('v1.4 政府/政策面板：AI 经济体检、政策原因与执行追�
 
     expect(html).toContain(`data-testid="policy-reason-${policy!.policyId}"`);
     expect(html).toContain('启动原因：');
-    expect(html).toContain(policy!.reason);
+    expect(html).toContain('非玩家政府自动选择');
     expect(html).toContain(`data-testid="policy-run-${policy!.policyId}"`);
     expect(html).toContain(tickDate(latestRun!.tick));
-    expect(html).toContain(money(latestRun!.spent));
     expect(html).toContain(`受益 <b>${num(latestRun!.beneficiaries)}</b>`);
     expect(html).toContain('真实岗位');
-    expect(html).toContain(`来源：${latestRun!.fundingSource}`);
-    expect(html).toContain(latestRun!.reason);
+    // 支出/资金来源属市长财政口径：非市长只看到占位。
+    expect(html).toContain('支出 <b>—</b>');
+    if (latestRun!.spent > 0.005) {
+      expect(html).not.toContain(`支出 <b>${money(latestRun!.spent)}</b>`);
+    }
+    expect(html).not.toContain(`来源：${latestRun!.fundingSource}`);
+    expect(html).not.toContain('已支付');
+    expect(html).not.toContain('预留工资');
+    expect(html).toContain('政策预算额度与城市财政流水仅该城市市长可见');
   });
 
-  it('玩家市长：显示“AI 不代选政策”，不显示 AI 体检决策块', () => {
+  it('玩家市长：显示“AI 不代选政策”，财政口径（预算/税月/债务/到期/余额）完整可见', () => {
     const store = createStore();
     store.selectCity('lanport');
     expect(store.tick()).toBe(true);
     store.setMayorDemo('lanport');
+    const checkup = latestCheckup(store.world, 'lanport');
+    expect(checkup).toBeTruthy();
     const html = renderRightCity(store, panelState);
+
     expect(html).toContain('data-testid="ai-mayor-status"');
     expect(html).toContain('AI 不代选政策');
-    expect(html).not.toContain('data-testid="ai-government"');
-    // 市长仍能看到自己的财政面板与政策操作入口。
+    expect(html).toContain('data-testid="ai-government"');
+    expect(html).toContain('data-testid="ai-checkup-restricted"');
+    expect(html).toContain('data-testid="ai-checkup-budget"');
+    expect(html).toContain('data-testid="ai-checkup-tax"');
+    expect(html).toContain('data-testid="ai-checkup-debt"');
+    expect(html).toContain('data-testid="ai-checkup-due"');
+    expect(html).toContain('data-testid="ai-checkup-treasury"');
+    expect(html).toContain('data-testid="ai-checkup-budget-note"');
+    expect(html).toContain(money(checkup!.budget));
+    expect(html).toContain(pct(checkup!.budgetShare));
+    expect(html).toContain(
+      `真实 ${num(checkup!.taxMonthsReal)} 月 / 估算 ${num(checkup!.taxMonthsEstimated)} 月`,
+    );
+    expect(html).toContain(money(checkup!.monthlyTaxRevenueReal));
+    expect(html).toContain(money(checkup!.monthlyTaxRevenueEstimated));
+    expect(html).toContain(pct(checkup!.debtRatio));
+    expect(html).toContain('85%');
+    expect(html).toContain(pct(checkup!.debtServicePressure));
+    expect(html).toContain(money(checkup!.bondDue));
+    expect(html).toContain(money(checkup!.loanDue));
+    expect(html).toContain(money(checkup!.treasury));
+    expect(html).toContain('预算参考');
+    // 市长视角不再显示受限占位，但保留财政流水与政策操作入口。
+    expect(html).not.toContain('data-testid="fiscal-restricted"');
     expect(html).toContain('data-testid="fiscal-ledger"');
     expect(html).toContain('data-action="stop-policy"');
     expect(html).toContain('data-testid="policy-reason-');
@@ -342,5 +379,6 @@ describe('v1.4 政府/政策面板：AI 经济体检、政策原因与执行追�
     expect(html).toContain('data-testid="ai-checkup-empty"');
     expect(html).toContain('尚无记录');
     expect(html).toContain('不会在没有体检数据时凭空选择政策');
+    expect(html).not.toContain('data-testid="ai-checkup-restricted"');
   });
 });

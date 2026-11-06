@@ -2,31 +2,35 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { Simulation } from '../../src/simulation/core/simulation';
 import type { BondHolding, WorldState } from '../../src/simulation/contracts/types';
 import { checkInvariants } from '../../src/simulation/core/invariants';
+import { round2 } from '../../src/simulation/core/math';
 
 /**
  * F 组「真实破产样本」：固定条件 36 个月、玩家无操作、默认种子 20261101。
  * 复现命令：npx vitest run tests/acceptance/bankruptcy-real-run.test.ts --maxWorkers=1 --testTimeout=300000
  *
- * v1.4 最终代码（§3 投资权益净值/债券估值、§4 新企业初始设备、§5 AI 政府高失业决策、
- * §6 经济循环与报告口径落地后）的实测序列：
- *   - 36 月内三城均未触发政府破产（records 为空），负债率随债券滚动上升但全程 < 100%：
- *     t36 负债率 岚港 46.1%（normal）、铁谷 20.1%（normal）、青原 17.6%（normal）；
- *   - 36 期债券全部成交（计划=成交=3,037,246，未售 0），每城 12 期，全部 active；
- *   - 持债 994 笔（active 986 / 已清算企业历史持债 8；企业 756 / 居民实体 238 / 玩家 0），
- *     同城 342 / 跨城 644 / 历史 8；票息流水 315 笔（首笔 t15），无破产兑付流水；
- *   - 无 bondAdvance、无 writtenOff 政府贷款（government.loans 全为 0）。
+ * v1.5 最终代码（§1 非市长财政投影、§2 债券无流动性迁移拆分、§4 AI 政策“先立项后融资”
+ * 与真实借款、§5 初始设备入口、§3 报告口径落地后）的实测序列：
+ *   - 36 月内三城均未触发政府破产（records 为空），负债率随债券+政策借款上升但全程 < 100%：
+ *     t36 负债率 岚港 34.3%（normal）、铁谷 34.8%（normal）、青原 46.9%（normal）；
+ *   - 36 期债券全部成交（计划=成交=3,079,910，未售 0），每城 12 期，全部 active；
+ *   - 持债 1,112 笔（active 1,106 / 已清算企业历史持债 6；企业 849 / 居民实体 263 / 玩家 0），
+ *     同城 166 / 跨城 940 / 历史 6；票息流水 1,123 笔（首笔 t13），无破产兑付流水；
+ *   - v1.5 §4 AI 政策真实借款：每城 35 笔 active 政府贷款（purpose=government，24 期），
+ *     政策资金记录 24 个月/城（t13–t36）：参考 2.88 亿、预留/实支/借款到账均 1.9198 亿、
+ *     未支付 0（预算修正后政策全额执行；未支付不计受益/收入）；
+ *   - 无 bondAdvance、无 writtenOff 政府贷款（所有贷款 active，勾销记录为 0）。
  *
- * 相对 v1.3 的变化来自 §4/§5/§6：新企业自带初始设备让创办更早开工、AI 高失业决策（含
- * 动态预算）改变政策支出与就业、消费/生产口径（含 refundGain）变化改变税收与融资节奏 →
- * 债券成交、持债数与负债率整体上移（岚港 t36 由 27.5% 升至 46.1%）。
- * 本文件按“空序列”如实锁定结构与守恒：不伪造破产数值，保留全部可验证的守恒/结构断言
- * （AC-F-R1~R8：计划=成交+未售、持债份数=成交份数、无破产兑付/垫付、不变量为空、
- *  政府持股来源结构、三城保持 solvent）。
+ * 相对 v1.4 的变化来自 §4 政策融资：AI 高失业政策在财政为 0 时“先立项、后真实借款”，
+ * 因此出现政府贷款与贷款利息、负债率与债券/持债规模变化（岚港 t36 由 46.1% 降至 34.3%，
+ * 青原由 17.6% 升至 46.9%）。本文件按“空序列”如实锁定结构与守恒，不伪造破产数值。
+ * 保留全部可验证的守恒/结构断言（AC-F-R1~R9：计划=成交+未售、持债份数=成交份数、
+ *  无破产兑付/垫付、不变量为空、政府持股来源结构、三城保持 solvent、政策资金三口径与
+ *  政府贷款/债务分解守恒）。
  *
- * 性能注意：v1.4 下 36 月默认模拟单次约 3 分钟（2 核共享环境更慢），
+ * 性能注意：v1.5 下 36 月默认模拟单次约 3 分钟（2 核共享环境更慢），
  * 因此 beforeAll 的 hookTimeout 放宽到 600s；单测超时由命令行 --testTimeout 控制。
  */
-describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v1.4 最终口径）', () => {
+describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v1.5 最终口径）', () => {
   let world: WorldState;
   /** 每月月末的负债率快照（tick → cityId → lastDebt）。 */
   const monthEndRatio = new Map<number, Map<string, { ratio: number; riskLevel: string }>>();
@@ -82,24 +86,24 @@ describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v
   it('F-R2 风险分级：t19/t27/t28/t36 负债率按真实轨迹锁定，且全程未达 100%', () => {
     const expected: Record<number, Record<string, { ratio: number; riskLevel: string }>> = {
       19: {
-        lanport: { ratio: 0.153947, riskLevel: 'normal' },
-        ironvale: { ratio: 0.157726, riskLevel: 'normal' },
-        greenfield: { ratio: 0.1705, riskLevel: 'normal' },
+        lanport: { ratio: 0.164062, riskLevel: 'normal' },
+        ironvale: { ratio: 0.190172, riskLevel: 'normal' },
+        greenfield: { ratio: 0.209353, riskLevel: 'normal' },
       },
       27: {
-        lanport: { ratio: 0.299964, riskLevel: 'normal' },
-        ironvale: { ratio: 0.214138, riskLevel: 'normal' },
-        greenfield: { ratio: 0.23213, riskLevel: 'normal' },
+        lanport: { ratio: 0.261608, riskLevel: 'normal' },
+        ironvale: { ratio: 0.289739, riskLevel: 'normal' },
+        greenfield: { ratio: 0.349548, riskLevel: 'normal' },
       },
       28: {
-        lanport: { ratio: 0.327362, riskLevel: 'normal' },
-        ironvale: { ratio: 0.212269, riskLevel: 'normal' },
-        greenfield: { ratio: 0.222755, riskLevel: 'normal' },
+        lanport: { ratio: 0.270273, riskLevel: 'normal' },
+        ironvale: { ratio: 0.296507, riskLevel: 'normal' },
+        greenfield: { ratio: 0.359797, riskLevel: 'normal' },
       },
       36: {
-        lanport: { ratio: 0.46144, riskLevel: 'normal' },
-        ironvale: { ratio: 0.200738, riskLevel: 'normal' },
-        greenfield: { ratio: 0.175611, riskLevel: 'normal' },
+        lanport: { ratio: 0.342509, riskLevel: 'normal' },
+        ironvale: { ratio: 0.347935, riskLevel: 'normal' },
+        greenfield: { ratio: 0.469003, riskLevel: 'normal' },
       },
     };
     for (const [tick, cities] of Object.entries(expected)) {
@@ -121,10 +125,10 @@ describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v
 
   it('F-R3 无破产兑付：债券流水仅票息，无 bankruptcyRedemption/垫付贷款；未付票息只计欠息', () => {
     const payments = world.bonds!.payments;
-    expect(payments).toHaveLength(315);
+    expect(payments).toHaveLength(1123);
     expect(payments.every((payment) => payment.kind === 'coupon')).toBe(true);
     expect(payments.filter((payment) => payment.kind === 'bankruptcyRedemption')).toHaveLength(0);
-    expect(Math.min(...payments.map((payment) => payment.tick))).toBe(15);
+    expect(Math.min(...payments.map((payment) => payment.tick))).toBe(13);
 
     for (const issuance of allIssuances()) {
       expect(issuance.status).toBe('active');
@@ -136,9 +140,9 @@ describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v
     // v1.3 财政轨迹下部分票息未付（欠息累积但未触发破产）：欠息只可能出现在
     // “首期票息已到期”的批次上；未到票息期的批次欠息必须为 0。
     const arrearsIssuances = allIssuances().filter((issuance) => issuance.arrearsInterest > 0.005);
-    expect(arrearsIssuances).toHaveLength(33);
+    expect(arrearsIssuances).toHaveLength(32);
     expect(arrearsIssuances.reduce((sum, issuance) => sum + issuance.arrearsInterest, 0)).toBeCloseTo(
-      116_768_880,
+      46_490_480,
       2,
     );
     for (const issuance of allIssuances()) {
@@ -156,20 +160,27 @@ describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v
         expect(issuance.couponsPaid).toBeGreaterThanOrEqual(1);
       }
     }
-    // 无破产兑付 → 不存在 bondAdvance 贷款，也不存在勾销贷款。
+    // 无破产兑付 → 不存在 bondAdvance 贷款，也不存在勾销贷款；政府贷款全部来自
+    // v1.5 §4 政策“先立项后融资”的真实银行放款（purpose=government，24 期，active）。
     const allGovernmentLoans = world.cities.flatMap((entry) => entry.government!.loans);
-    expect(allGovernmentLoans).toHaveLength(0);
+    expect(allGovernmentLoans.length).toBeGreaterThan(0);
+    for (const loan of allGovernmentLoans) {
+      expect(loan.status).toBe('active');
+      expect(loan.purpose).toBe('government');
+      expect(loan.outstanding).toBeGreaterThanOrEqual(0);
+      expect(loan.outstanding).toBeLessThanOrEqual(loan.principal + 0.01);
+    }
     expect(allGovernmentLoans.filter((loan) => loan.purpose === 'bondAdvance')).toHaveLength(0);
     expect(allGovernmentLoans.filter((loan) => loan.status === 'writtenOff')).toHaveLength(0);
     expect(world.bonds!.payments.filter((payment) => payment.kind === 'bankruptcyRedemption')).toHaveLength(0);
   });
 
-  it('F-R4 债券认购：计划=成交+未售（总量守恒），持有人为居民实体或企业（644 跨城 / 342 同城 / 8 历史）', () => {
+  it('F-R4 债券认购：计划=成交+未售（总量守恒），持有人为居民实体或企业（940 跨城 / 166 同城 / 6 历史）', () => {
     const totalPlan = allIssuances().reduce((sum, issuance) => sum + issuance.planUnits, 0);
     const totalSold = allIssuances().reduce((sum, issuance) => sum + issuance.soldUnits, 0);
     const totalUnsold = allIssuances().reduce((sum, issuance) => sum + issuance.unsoldUnits, 0);
-    expect(totalPlan).toBe(3_037_246);
-    expect(totalSold).toBe(3_037_246);
+    expect(totalPlan).toBe(3_079_910);
+    expect(totalSold).toBe(3_079_910);
     expect(totalUnsold).toBe(0);
     expect(totalSold + totalUnsold).toBe(totalPlan);
     expect(allIssuances()).toHaveLength(36);
@@ -184,11 +195,13 @@ describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v
       const holdingUnits = world.bonds!.holdings
         .filter((holding) => holding.issuanceId === issuance.id)
         .reduce((sum, holding) => sum + holding.units, 0);
-      expect(holdingUnits).toBe(issuance.soldUnits);
+      // v1.5 §2 跨城迁移会按 0.01 份粒度拆分持债（本金=份数×面额不变），份数合计会有
+      // 浮点累计尾差，故用分币级近似而非整数相等；守恒语义不变（仍等于成交份数）。
+      expect(holdingUnits).toBeCloseTo(issuance.soldUnits, 2);
     }
 
     const holdings = world.bonds!.holdings;
-    expect(holdings).toHaveLength(994);
+    expect(holdings).toHaveLength(1112);
     // 认购顺序为玩家→居民投资实体→企业；持有主体只能是这三类（银行不得认购）。
     expect(holdings.every((holding) => holding.holder.kind !== 'player')).toBe(true);
     expect(
@@ -213,19 +226,20 @@ describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v
       if (holderCity === issuance!.cityId) sameCity += 1;
       else crossCity += 1;
     }
-    expect(crossCity).toBe(644);
-    expect(sameCity).toBe(342);
-    expect(historicalHoldings).toBe(8);
-    expect(holdings.filter((holding) => holding.holder.kind === 'company')).toHaveLength(756);
-    expect(holdings.filter((holding) => holding.holder.kind === 'investorGroup')).toHaveLength(238);
-    // 无破产兑付时，除 8 笔历史持债外其余全部 active（994 − 8 = 986）。
-    expect(holdings.filter((holding) => holding.status === 'active')).toHaveLength(986);
+    expect(crossCity).toBe(940);
+    expect(sameCity).toBe(166);
+    expect(historicalHoldings).toBe(6);
+    expect(holdings.filter((holding) => holding.holder.kind === 'company')).toHaveLength(849);
+    expect(holdings.filter((holding) => holding.holder.kind === 'investorGroup')).toHaveLength(263);
+    // 无破产兑付时，除 6 笔历史持债外其余全部 active（1112 − 6 = 1106）。
+    expect(holdings.filter((holding) => holding.status === 'active')).toHaveLength(1106);
   });
 
-  it('F-R5 债务勾销：无破产勾销，政府债务全部为未偿债券本金', () => {
+  it('F-R5 债务勾销：无破产勾销；债务 = 未偿债券本息 + v1.5 政策借款本息（分解守恒）', () => {
     for (const entry of world.cities) {
       expect(entry.government!.records).toHaveLength(0);
-      expect(entry.government!.loans).toHaveLength(0);
+      // v1.5 §4：政策“先立项后融资”产生真实政府贷款（每城 35 笔，全部 active）。
+      expect(entry.government!.loans).toHaveLength(35);
       expect(entry.treasury).toBe(0);
     }
     // 城市级勾销合计为 0；所有 writtenOff 贷款为空（不抹账、不留尾）。
@@ -233,10 +247,32 @@ describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v
       expect(entry.government!.records.reduce((sum, record) => sum + record.advancesWrittenOff, 0)).toBe(0);
       expect(entry.government!.records.reduce((sum, record) => sum + record.bankLoansWrittenOff, 0)).toBe(0);
     }
-    // 36 月末政府债务汇总锁定（v1.3 真实轨迹）。
-    expect(city('lanport').government!.lastDebt?.totalDebt ?? 0).toBeCloseTo(1_092_467_763.35, 2);
-    expect(city('ironvale').government!.lastDebt?.totalDebt ?? 0).toBeCloseTo(1_095_948_499.99, 2);
-    expect(city('greenfield').government!.lastDebt?.totalDebt ?? 0).toBeCloseTo(969_521_196.69, 2);
+    // 36 月末政府债务汇总锁定（v1.5 真实轨迹）。
+    expect(city('lanport').government!.lastDebt?.totalDebt ?? 0).toBeCloseTo(1_295_512_849.94, 2);
+    expect(city('ironvale').government!.lastDebt?.totalDebt ?? 0).toBeCloseTo(1_349_457_875.28, 2);
+    expect(city('greenfield').government!.lastDebt?.totalDebt ?? 0).toBeCloseTo(1_155_290_789.37, 2);
+
+    // 债务分解恒等式：totalDebt = 债券本金 + 政策贷款本金 + 债券计提利息 + 贷款利息；
+    // 且贷款口径 = 该城 active 政府贷款的未偿本金/利息合计（同一份数据，不重复造债）。
+    for (const entry of world.cities) {
+      const debt = entry.government!.lastDebt!;
+      const activeLoans = entry.government!.loans.filter((loan) => loan.status === 'active');
+      const loanPrincipal = activeLoans.reduce((sum, loan) => sum + loan.outstanding, 0);
+      const loanInterest = activeLoans.reduce(
+        (sum, loan) => sum + loan.accruedInterest + loan.arrearsInterest,
+        0,
+      );
+      expect(debt.bankLoanPrincipal).toBeCloseTo(loanPrincipal, 2);
+      expect(debt.loanAccruedInterest).toBeCloseTo(loanInterest, 2);
+      expect(debt.totalDebt).toBeCloseTo(
+        debt.bankLoanPrincipal +
+          debt.bondPrincipalOutstanding +
+          debt.loanAccruedInterest +
+          debt.bondAccruedInterest,
+        2,
+      );
+      expect(debt.totalDebt).toBeGreaterThan(0);
+    }
   });
 
   it('F-R6 无破产重选：破产触发选举为 0，未进入看守期', () => {
@@ -278,11 +314,11 @@ describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v
     expect(checkInvariants(world)).toEqual([]);
   });
 
-  it('F-R8 36 月末财政状态：三城 solvent，负债率 46.1%/20.1%/17.6%', () => {
+  it('F-R8 36 月末财政状态：三城 solvent，负债率 34.3%/34.8%/46.9%', () => {
     const expected: Record<string, { ratio: number; level: string; total: number }> = {
-      lanport: { ratio: 0.46144, level: 'normal', total: 1_092_467_763.35 },
-      ironvale: { ratio: 0.200738, level: 'normal', total: 1_095_948_499.99 },
-      greenfield: { ratio: 0.175611, level: 'normal', total: 969_521_196.69 },
+      lanport: { ratio: 0.342509, level: 'normal', total: 1_295_512_849.94 },
+      ironvale: { ratio: 0.347935, level: 'normal', total: 1_349_457_875.28 },
+      greenfield: { ratio: 0.469003, level: 'normal', total: 1_155_290_789.37 },
     };
     for (const [cityId, item] of Object.entries(expected)) {
       const entry = city(cityId);
@@ -290,11 +326,96 @@ describe('AC-F-R 真实 36 月破产序列（seed 20261101，玩家无操作，v
       expect(entry.government!.lastDebt?.debtRatio ?? 0).toBeCloseTo(item.ratio, 5);
       expect(entry.government!.lastDebt?.riskLevel).toBe(item.level);
       expect(entry.government!.lastDebt?.totalDebt ?? 0).toBeCloseTo(item.total, 2);
-      // 无破产 → 每城 12 期债券全部 active，无政府贷款。
+      // 无破产 → 每城 12 期债券全部 active；v1.5 政策借款为 35 笔 active 政府贷款。
       const cityIssuances = allIssuances().filter((issuance) => issuance.cityId === cityId);
       expect(cityIssuances).toHaveLength(12);
       expect(cityIssuances.every((issuance) => issuance.status === 'active')).toBe(true);
-      expect(entry.government!.loans).toHaveLength(0);
+      expect(entry.government!.loans).toHaveLength(35);
+      expect(entry.government!.loans.every((loan) => loan.status === 'active')).toBe(true);
+    }
+    expect(checkInvariants(world)).toEqual([]);
+  });
+
+  it('F-R9 v1.5 §4 政策资金三口径：24 月/城，实支≤预留、未支付不计受益，借款=预留且为真实到账', () => {
+    const expected: Record<
+      string,
+      { reference: number; reserved: number; spent: number; unpaid: number; borrowed: number }
+    > = {
+      lanport: {
+        reference: 288_000_000,
+        reserved: 191_980_800,
+        spent: 191_980_800,
+        unpaid: 0,
+        borrowed: 191_980_800,
+      },
+      ironvale: {
+        reference: 288_000_000,
+        reserved: 191_980_800,
+        spent: 191_980_800,
+        unpaid: 0,
+        borrowed: 191_980_800,
+      },
+      greenfield: {
+        reference: 287_020_600.32,
+        reserved: 191_458_540.27,
+        spent: 191_458_540.27,
+        unpaid: 0,
+        borrowed: 191_458_540.27,
+      },
+    };
+    const months = world.policies.fundingMonths ?? [];
+    for (const [cityId, item] of Object.entries(expected)) {
+      const traces = months
+        .filter((trace) => trace.cityId === cityId)
+        .sort((left, right) => left.tick - right.tick);
+      // 保留窗口 24 月，t13 起 AI 危机政策每月真实立项→融资→预留→实支。
+      expect(traces).toHaveLength(24);
+      expect(traces[0]!.tick).toBe(13);
+      expect(traces[traces.length - 1]!.tick).toBe(36);
+      for (const trace of traces) {
+        expect(trace.spent).toBeGreaterThanOrEqual(0);
+        expect(trace.spent).toBeLessThanOrEqual(trace.reserved + 0.01);
+        expect(trace.unpaid).toBeGreaterThanOrEqual(0);
+        expect(trace.borrowingProceeds).toBeGreaterThanOrEqual(0);
+        expect(['treasury', 'bankLoan', 'none']).toContain(trace.fundingSource);
+        expect(trace.debtRatioAfterBorrowing).toBeLessThan(1);
+        // 三口径分离且守恒：实支 + 未支付 = 本月预留资金需求。
+        expect(trace.spent + trace.unpaid).toBeCloseTo(trace.reserved, 2);
+        // 预留只能来自真实到账资金：借款到账 ≥ 预留中来自借款的部分（本轨迹借款=预留）。
+        expect(trace.borrowingProceeds + 1e-6).toBeGreaterThanOrEqual(trace.reserved);
+      }
+      const aggregate = {
+        reference: round2(traces.reduce((sum, trace) => sum + trace.referenceBudget, 0)),
+        reserved: round2(traces.reduce((sum, trace) => sum + trace.reserved, 0)),
+        spent: round2(traces.reduce((sum, trace) => sum + trace.spent, 0)),
+        unpaid: round2(traces.reduce((sum, trace) => sum + trace.unpaid, 0)),
+        borrowed: round2(traces.reduce((sum, trace) => sum + trace.borrowingProceeds, 0)),
+      };
+      expect(aggregate.reference).toBeCloseTo(item.reference, 2);
+      expect(aggregate.reserved).toBeCloseTo(item.reserved, 2);
+      expect(aggregate.spent).toBeCloseTo(item.spent, 2);
+      expect(aggregate.unpaid).toBeCloseTo(item.unpaid, 2);
+      expect(aggregate.borrowed).toBeCloseTo(item.borrowed, 2);
+      expect(aggregate.spent + aggregate.unpaid).toBeCloseTo(aggregate.reserved, 2);
+      // 借款是真实银行放款：该城政府贷款本金合计与资金记录借款到账同源（不为 0）。
+      const activeLoanPrincipal = round2(
+        city(cityId)
+          .government!.loans.filter((loan) => loan.status === 'active')
+          .reduce((sum, loan) => sum + loan.principal, 0),
+      );
+      expect(activeLoanPrincipal).toBeGreaterThan(0);
+      expect(activeLoanPrincipal).toBeGreaterThanOrEqual(aggregate.borrowed - 0.01);
+    }
+    // 政策执行记录：实支与受益来自真实执行（未支付部分不计受益/收入）。
+    const crisisRuns = [...world.policies.active, ...world.policies.history]
+      .filter((policy) => policy.reason.startsWith('AI 高失业决策'))
+      .flatMap((policy) => policy.tracking?.runs ?? []);
+    expect(crisisRuns.length).toBeGreaterThan(0);
+    expect(crisisRuns.reduce((sum, run) => sum + run.spent, 0)).toBeGreaterThan(0);
+    expect(crisisRuns.reduce((sum, run) => sum + run.beneficiaries, 0)).toBeGreaterThan(0);
+    for (const run of crisisRuns) {
+      expect(run.spent).toBeGreaterThanOrEqual(0);
+      expect(run.fiscalImpact).toBeLessThanOrEqual(0);
     }
     expect(checkInvariants(world)).toEqual([]);
   });

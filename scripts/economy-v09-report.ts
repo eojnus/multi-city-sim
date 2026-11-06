@@ -21,6 +21,7 @@ import { GOODS } from '../src/data/demo-data';
 import { foundingAttempts, foundingAttemptsTruncated } from '../src/simulation/companies/founding';
 import { investorFundingReport } from '../src/simulation/investors/investors';
 import { policyName } from '../src/simulation/policies/definitions';
+import { policyFundingMonthlyReport } from '../src/simulation/policies/policies';
 
 function argNumber(flag: string, fallback: number): number {
   const raw = process.argv.find((arg) => arg.startsWith(`${flag}=`));
@@ -436,9 +437,13 @@ function cityConsumption(world: WorldState, cityId: string) {
     groups.reduce((total, group) => total + group.people, 0) * (foodGood?.perCapitaMonthlyNeed ?? 0),
   );
   const basicNeedQty = statedNeed > 0.01 ? round2(statedNeed) : fallbackNeed;
-  const basicNeedSold = statedSold > 0.01 ? round2(statedSold) : round2(
-    world.cities.find((city) => city.id === cityId)?.market['food']?.sold ?? 0,
-  );
+  // 旧档无群体落账时：只能近似为“本地市场成交 + 跨城进口”（不含出口，避免与 §3 居民实际成交口径冲突）。
+  const basicNeedSold = statedSold > 0.01
+    ? round2(statedSold)
+    : round2(
+        (world.cities.find((city) => city.id === cityId)?.market['food']?.sold ?? 0) +
+          (world.cities.find((city) => city.id === cityId)?.market['food']?.intercityImported ?? 0),
+      );
   const basicNeedCoverage = basicNeedQty > 0.01 ? basicNeedSold / basicNeedQty : null;
   return {
     desiredCost,
@@ -702,11 +707,64 @@ function foundingAttemptsThisTick(world: WorldState, cityId: string) {
   return foundingAttempts(world).filter((attempt) => attempt.tick === tick && attempt.cityId === cityId);
 }
 
-/** 食品有效需求满足率：成交 / 消费端有效需求（居民+跨城居民在本地市场）。 */
-function foodSatisfaction(world: WorldState, city: City): { sold: number; demand: number; rate: number | null } {
-  const stats = city.market['food'];
-  if (!stats || stats.consumerDemand <= 0.01) return { sold: stats?.sold ?? 0, demand: 0, rate: null };
-  return { sold: stats.sold, demand: stats.consumerDemand, rate: stats.sold / stats.consumerDemand };
+/**
+ * v1.5 §3：食品成交/覆盖率统一口径（居民侧权威 = household.lastMonth 落账）。
+ *
+ * - 居民实际食品成交 residentSold = Σ 群体 basicSoldUnits（含本地购买与跨城进口购买）；
+ * - 进口 imported = city.market['food'].intercityImported（买方城市账本，只计一次）；
+ * - 本地居民成交 localResidentSold = residentSold − imported；
+ * - 本地账本 sold（市场口径，含卖给其他城市居民的成交）与出口 exported = Σ tradeFlows(fromCity=city) 可交叉核对；
+ * - 基本需要量 basicNeed = Σ 群体 basicNeedUnits（旧档回退 人口×人均需要）；
+ * - 基本需要覆盖率 = residentSold / basicNeed；
+ * - 有效需求满足率 = residentSold / effectiveDemand（effectiveDemand = Σ basicEffectiveUnits，旧档缺省则 n/a）。
+ */
+function cityFoodMetrics(world: WorldState, city: City) {
+  const groups = world.households.groups.filter((group) => group.cityId === city.id);
+  const foodGood = GOODS.find((good) => good.id === 'food');
+  const statedNeed = round2(groups.reduce((sum, group) => sum + (group.lastMonth.basicNeedUnits ?? 0), 0));
+  const statedSold = round2(groups.reduce((sum, group) => sum + (group.lastMonth.basicSoldUnits ?? 0), 0));
+  const statedEffective = round2(
+    groups.reduce((sum, group) => sum + (group.lastMonth.basicEffectiveUnits ?? 0), 0),
+  );
+  const fallbackNeed = round2(
+    city.population.total * (foodGood?.perCapitaMonthlyNeed ?? 0),
+  );
+  const market = city.market['food'];
+  const ledgerSold = round2(market?.sold ?? 0);
+  const imported = round2(market?.intercityImported ?? 0);
+  const exported = round2(
+    world.lastTick.tradeFlows
+      .filter((flow) => flow.good === 'food' && flow.fromCityId === city.id)
+      .reduce((sum, flow) => sum + flow.qty, 0),
+  );
+  const flowImported = round2(
+    world.lastTick.tradeFlows
+      .filter((flow) => flow.good === 'food' && flow.toCityId === city.id)
+      .reduce((sum, flow) => sum + flow.qty, 0),
+  );
+  const householdBased = statedSold > 0.01 || statedNeed > 0.01;
+  const residentSold = householdBased ? statedSold : round2(ledgerSold + imported);
+  const basicNeed = statedNeed > 0.01 ? statedNeed : fallbackNeed;
+  const effectiveDemand = statedEffective;
+  const localResidentSold = round2(Math.max(0, residentSold - imported));
+  const coverage = basicNeed > 0.01 ? residentSold / basicNeed : null;
+  const satisfaction = effectiveDemand > 0.01 ? residentSold / effectiveDemand : null;
+  return {
+    source: householdBased ? ('household' as const) : ('market-fallback' as const),
+    residentSold,
+    localResidentSold,
+    imported,
+    exported,
+    ledgerSold,
+    basicNeed,
+    effectiveDemand,
+    coverage,
+    satisfaction,
+    // 食品无企业投入需求（只作消费/产出），故本地居民成交应等于本地市场账本成交；
+    // 跨城进口只记在买方账本，且与当月收货贸易流合计一致（全局只计一次）。
+    crossCheck: round2(localResidentSold - ledgerSold),
+    importCheck: round2(imported - flowImported),
+  };
 }
 
 const initialEmployment = new Map<string, { employed: number; total: number }>();
@@ -754,7 +812,7 @@ function printCheckpoint(world: WorldState) {
       `食品链 食品厂 ${chain.food.count} 家 产能 ${num(chain.food.capacity)} 计划 ${num(chain.food.planned)} 产 ${num(chain.food.produced)} 售 ${num(chain.food.sold)} 现金 ${money(chain.food.cash)} 欠薪 ${money(chain.food.arrears)} 利润 ${money(chain.food.profit)}｜粮食厂 ${chain.grain.count} 家 产能 ${num(chain.grain.capacity)} 计划 ${num(chain.grain.planned)} 产 ${num(chain.grain.produced)} 售 ${num(chain.grain.sold)} 欠薪 ${money(chain.grain.arrears)}｜能源厂 ${chain.energy.count} 家 产 ${num(chain.energy.produced)} 售 ${num(chain.energy.sold)} 欠薪 ${money(chain.energy.arrears)}`,
     );
     console.log(
-      `谷食物流 谷物 价 ${num(chain.grainMarket?.price)} 需求 ${num(chain.grainMarket?.producerRequired)} 成交 ${num(chain.grainMarket?.sold)} 库存 ${num(chain.grainMarket?.closingStock)} 进口 ${num(chain.grainMarket?.intercityImported)}｜食品 价 ${num(chain.foodMarket?.price)} 成交 ${num(chain.foodMarket?.sold)} 需求 ${num(chain.foodMarket?.consumerDemand)} 库存 ${num(chain.foodMarket?.closingStock)} 进口 ${num(chain.foodMarket?.intercityImported)}｜能源 价 ${num(chain.energyMarket?.price)} 成交 ${num(chain.energyMarket?.sold)} 库存 ${num(chain.energyMarket?.closingStock)}`,
+      `谷食物流（本地市场口径：成交不含跨城出口，进口见下一行） 谷物 价 ${num(chain.grainMarket?.price)} 需求 ${num(chain.grainMarket?.producerRequired)} 成交 ${num(chain.grainMarket?.sold)} 库存 ${num(chain.grainMarket?.closingStock)} 进口 ${num(chain.grainMarket?.intercityImported)}｜食品 价 ${num(chain.foodMarket?.price)} 成交 ${num(chain.foodMarket?.sold)} 需求 ${num(chain.foodMarket?.consumerDemand)} 库存 ${num(chain.foodMarket?.closingStock)} 进口 ${num(chain.foodMarket?.intercityImported)}｜能源 价 ${num(chain.energyMarket?.price)} 成交 ${num(chain.energyMarket?.sold)} 库存 ${num(chain.energyMarket?.closingStock)}`,
     );
     const trade = intercityTradeThisTick(world, city.id);
     console.log(
@@ -772,6 +830,13 @@ function printCheckpoint(world: WorldState) {
         : `AI 政府 本月无体检快照（玩家市长或未启用 AI）｜执行 ${aiPolicy.runsThisTick} 项：支出 ${money(aiPolicy.spentThisTick)} 受益 ${num(aiPolicy.beneficiaries)} 真实岗位 ${num(aiPolicy.jobsEffect)}`,
     );
     if (aiPolicy.decisions) console.log(`AI 政策 在行：${aiPolicy.decisions}｜原因：${aiPolicy.reasons.join('；') || '无'}`);
+    // v1.5 §4：三口径（参考预算 / 已预留 / 实际支出）与真实资金顺序（税收→公共工资/福利→借款到账→预留→实支）。
+    const policyFunding = policyFundingMonthlyReport(world, city.id, world.time.tick);
+    console.log(
+      policyFunding
+        ? `AI 政策资金 参考预算 ${money(policyFunding.referenceBudget)}｜真实预留 ${money(policyFunding.reserved)}｜实际支出 ${money(policyFunding.spent)}｜未支付 ${money(policyFunding.unpaid)}｜来源 ${policyFunding.fundingSource}｜为政策真实借款 ${money(policyFunding.borrowingProceeds)}（债务/GDP ${pct(policyFunding.debtRatioBefore)}→${pct(policyFunding.debtRatioAfterBorrowing)}）｜前置 税收 ${money(policyFunding.taxReceived)}/公共工资 ${money(policyFunding.publicWages)}/福利 ${money(policyFunding.benefitsPaid)}｜顺序 ${policyFunding.stages.map((stage) => stage.stage).join('→')}`
+        : 'AI 政策资金 本月无资金追踪记录（玩家市长城市/非 AI 危机政策/旧档）',
+    );
     const equity = investorEquityStats(world, city.id);
     console.log(
       `居民投资权益 有效份额 ${num(equity.totalShares)}（累计投入 ${num(equity.contributed)} + 开局 ${num(equity.opening)}）｜持有人 ${equity.holders}/${equity.groups} 群体｜实体现金 ${money(equity.entityCash)}｜债券估值 ${money(equity.bondsValue)}｜净资产 ${money(equity.netWorth)}｜每份净值 ${num(equity.navPerShare, 4)}｜零人仍持份 ${equity.zeroPeopleWithShares}（${num(equity.zeroPeopleShares)} 份）`,
@@ -840,9 +905,9 @@ function printCheckpoint(world: WorldState) {
     console.log(
       `创业尝试 本月 ${attempts.length} 次（成立 ${foundedNow} / 被拒 ${rejectedNow.length}${obstacleText ? `；障碍 ${obstacleText}` : ''}）`,
     );
-    const satisfaction = foodSatisfaction(world, city);
+    const food = cityFoodMetrics(world, city);
     console.log(
-      `食品满足率 ${satisfaction.rate === null ? '无有效需求（n/a）' : pct(satisfaction.rate)}（成交 ${num(satisfaction.sold, 1)} / 有效需求 ${num(satisfaction.demand, 1)}）`,
+      `食品口径 居民实际成交 ${num(food.residentSold, 1)} 件（本地 ${num(food.localResidentSold, 1)} + 进口 ${num(food.imported, 1)}；本地账本 ${num(food.ledgerSold, 1)}/出口 ${num(food.exported, 1)}）｜基本需要 ${num(food.basicNeed, 1)}｜基本需要覆盖率 ${food.coverage === null ? 'n/a' : pct(food.coverage)}｜有效需求满足率 ${food.satisfaction === null ? 'n/a（旧档缺有效需求口径）' : pct(food.satisfaction)}（有效需求 ${num(food.effectiveDemand, 1)}）｜校验 本地居民−账本 ${num(food.crossCheck, 1)}/进口−收货流 ${num(food.importCheck, 2)}｜口径 ${food.source}`,
     );
     console.log(
       `食品 ${describeGood('食品', marketStats(city, 'food'))}`,
@@ -1021,6 +1086,22 @@ function printSummary(world: WorldState) {
     console.log(
       `${city.name} AI 政策累计（逐月真实执行，脚本累计）：执行 ${aiTotalsCity.runs} 次｜支出 ${money(aiTotalsCity.spent)}｜受益 ${num(aiTotalsCity.beneficiaries)}｜真实岗位 ${num(aiTotalsCity.jobsEffect)}｜债务预警月数 ${aiTotalsCity.debtWarningMonths}｜政策 ${[...aiTotalsCity.policyIds].sort().join('/') || '无'}`,
     );
+    // v1.5 §4：持久化 fundingMonths 窗口累计（保留最近 24 月，超出截断；不是全期累计）。
+    const fundingMonths = (world.policies.fundingMonths ?? []).filter((entry) => entry.cityId === city.id);
+    const fundingWindow = fundingMonths.length >= DEMO_CONFIG.policies.aiLabor.policyFunding.retentionMonths;
+    const fundingTotal = fundingMonths.reduce(
+      (sum, entry) => ({
+        reference: sum.reference + entry.referenceBudget,
+        reserved: sum.reserved + entry.reserved,
+        spent: sum.spent + entry.spent,
+        unpaid: sum.unpaid + entry.unpaid,
+        borrowed: sum.borrowed + entry.borrowingProceeds,
+      }),
+      { reference: 0, reserved: 0, spent: 0, unpaid: 0, borrowed: 0 },
+    );
+    console.log(
+      `${city.name} AI 政策资金窗口（${fundingMonths.length} 月${fundingWindow ? `，保留上限 ${DEMO_CONFIG.policies.aiLabor.policyFunding.retentionMonths} 月，可能已截断` : ''}）：参考 ${money(fundingTotal.reference)}｜预留 ${money(fundingTotal.reserved)}｜实支 ${money(fundingTotal.spent)}｜未支付 ${money(fundingTotal.unpaid)}｜政策借款到账 ${money(fundingTotal.borrowed)}`,
+    );
     console.log(
       `${city.name} 跨城贸易累计（关键商品，脚本逐月累计）：进口 ${num(tradeTotalsCity.importQty, 1)} 件/¥${num(tradeTotalsCity.importValue, 1)}｜出口 ${num(tradeTotalsCity.exportQty, 1)} 件/¥${num(tradeTotalsCity.exportValue, 1)}${goodText ? `｜${goodText}` : ''}`,
     );
@@ -1066,12 +1147,21 @@ function printSummary(world: WorldState) {
       .join(' / ') || '无'}`,
   );
   const foodGood = GOODS.find((good) => good.id === 'food');
+  const allImported = round2(
+    world.cities.reduce((sum, city) => sum + (city.market['food']?.intercityImported ?? 0), 0),
+  );
+  const allExported = round2(
+    world.lastTick.tradeFlows
+      .filter((flow) => flow.good === 'food')
+      .reduce((sum, flow) => sum + flow.qty, 0),
+  );
+  console.log(
+    `食品跨城口径校验（当月）：三城进口合计 ${num(allImported, 1)} 件｜跨城成交流合计 ${num(allExported, 1)} 件｜差 ${num(round2(allImported - allExported), 2)}（应≈0，进口只计一次）`,
+  );
   for (const city of world.cities) {
-    const satisfaction = foodSatisfaction(world, city);
-    const basicNeed = Math.round(city.population.total * (foodGood?.perCapitaMonthlyNeed ?? 0) * 100) / 100;
-    const coverage = basicNeed > 0 ? city.market['food']?.sold / basicNeed : null;
+    const food = cityFoodMetrics(world, city);
     console.log(
-      `基本食品需要量 ${num(basicNeed)} 件/月（人均 ${foodGood?.perCapitaMonthlyNeed ?? 0}×人口 ${num(city.population.total)}）｜成交覆盖 ${coverage === null ? '—' : `${(coverage * 100).toFixed(1)}%`}（注意：有效需求受预算限制，覆盖低说明“买得起的需求”之外仍有基本面缺口）`,
+      `基本食品 需要量 ${num(food.basicNeed)} 件/月（人均 ${foodGood?.perCapitaMonthlyNeed ?? 0}×人口 ${num(city.population.total)}）｜居民实际成交 ${num(food.residentSold, 1)} 件（本地 ${num(food.localResidentSold, 1)} + 进口 ${num(food.imported, 1)}）｜基本需要覆盖率 ${food.coverage === null ? '—' : `${(food.coverage * 100).toFixed(1)}%`}｜有效需求满足率 ${food.satisfaction === null ? 'n/a' : `${(food.satisfaction * 100).toFixed(1)}%`}（有效需求 ${num(food.effectiveDemand, 1)}）｜市场账本成交（当月） ${num(food.ledgerSold, 1)}/出口（当月） ${num(food.exported, 1)}｜校验 本地居民−账本 ${num(food.crossCheck, 1)}/进口−收货流 ${num(food.importCheck, 2)}｜口径 ${food.source}`,
     );
     const initial = initialEmployment.get(city.id);
     // 失业率口径 = 失业 / 劳动力（就业+失业），与 checkpoint 的“失业率”一致。
@@ -1081,7 +1171,7 @@ function printSummary(world: WorldState) {
     const initialRate = initial ? (initial.total - initial.employed) / initial.total : null;
     const delta = initialRate === null ? '' : `｜失业率 ${pct(rate)}（较首个观察点 ${(rate - initialRate >= 0 ? '+' : '') + ((rate - initialRate) * 100).toFixed(1)}pp）`;
     console.log(
-      `食品满足率 ${city.name}：${satisfaction.rate === null ? 'n/a（无有效需求）' : pct(satisfaction.rate)}（成交 ${num(satisfaction.sold, 1)} / 有效需求 ${num(satisfaction.demand, 1)}）${delta}`,
+      `食品满足率 ${city.name}：${food.satisfaction === null ? 'n/a（无有效需求/旧档）' : pct(food.satisfaction)}（居民实际成交 ${num(food.residentSold, 1)} / 有效需求 ${num(food.effectiveDemand, 1)}；其中本地 ${num(food.localResidentSold, 1)} + 进口 ${num(food.imported, 1)}）${delta}`,
     );
   }
 
