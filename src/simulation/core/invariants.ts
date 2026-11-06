@@ -886,9 +886,11 @@ export function checkGovernmentDebtInvariants(world: WorldState, problems: strin
       const aggregate = holdingsByIssuance.get(issuance.id);
       const aggregateUnits = aggregate?.units ?? 0;
       const aggregatePrincipal = aggregate?.principal ?? 0;
-      // v1.5 §2：跨城迁移按比例拆分持债后份数为 0.01 份粒度（小数），逐笔 round2 后
-      // 合计可能有 ≤0.01 份的浮点/尾差；本金/应计仍按 0.01 信用点对账。真实错账至少
-      // 1 份 = 面额（1000），该容差不会掩盖问题。
+      // v1.5 §2 / v1.6 §P5：跨城迁移会拆分持债。v1.6 起份数为“本金/面额”的内部全精度值
+      // （本金仍以 0.01 信用点为权威，面额 1000 时 1 分 = 1e-5 份），新产生的持债
+      // “本金 = round2(份数×面额)”逐笔精确成立；这里保留 0.01 份/0.01 信用点容差是为了
+      // 兼容旧档（v1.5 及以前份数是 0.01 份粒度，逐笔 round2 后合计可能有 ≤0.01 份浮点尾差），
+      // 以及多笔持有合并时的浮点误差。真实错账至少 1 份 = 面额（1000），该容差不会掩盖问题。
       if (Math.abs(issuance.soldUnits - aggregateUnits) > 0.01) {
         problems.push(
           `债券批次 ${issuance.id}: 实售份数 ${issuance.soldUnits} 与持债份数合计 ${aggregateUnits} 不一致`,

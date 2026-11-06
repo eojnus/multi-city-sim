@@ -240,25 +240,37 @@ function attributeInvestorDividends(
 }
 
 /**
- * v1.5 §2：跨城迁移时把源城投资实体的**未到期政府债券**按迁移价值比例真实拆分给目标城实体。
+ * v1.5 §2 / v1.6 §P5：跨城迁移时把源城投资实体的**未到期政府债券**按迁移价值比例真实拆分给目标城实体。
  *
  * 为什么需要：v1.4 及以前迁移只划转现金与股票；当源城实体现金/股票为 0、净资产全是未到期债券时，
  * 迁移者实际带走 0 资产（v1.4 只能下调迁出份额），迁入者权益丢失，剩余债券权益留在源城实体
  * 被剩余居民无偿获得。
  *
- * 口径（不新增存档字段、不改债券兑付规则）：
+ * 口径（v1.6 起不新增存档字段、不改债券兑付规则）：
  * - 只拆 `status='active'` 的持债；本金/应计利息/已付利息按迁移比例拆分，源城减少额 = 目标城增加额；
  *   发行批次的 soldUnits/principal 与兑付规则完全不变，后续付息/到期/破产兑付仍走既有 per-holding 规则；
- * - 份数按 0.01 份粒度（units = round2(本金/面额)，本金 = round2(份数×面额)），保证持债账本
- *   “本金 = 份数×面额”不变量；拆分不整的尾差（< 0.01 份 = 面额×0.01）留在源城实体，不虚增资产；
+ * - 精度（PLAN D4 方案①“内部高精度份额”）：**本金以信用点分（round2）为权威粒度**，份数不再
+ *   四舍五入到 0.01 份，而是按 `本金 / 面额` 保留内部全精度（面额 1000 时 1 分 = 1e-5 份，
+ *   优于任务要求的 1e-6 份级）。旧实现 0.01 份粒度 = 面额×0.01 = 10 信用点（面额 1000），
+ *   迁移应带走 4 信用点时 round 成 0 份、权益留在源城；新实现拆 0.004 份 = 4 信用点，
+ *   迁移者不丢权益；
+ * - 拆分残差：只会剩下“不足 1 分”的金额（每笔每持债 ≤0.005 信用点）。0.01 信用点是全仿真
+ *   账本（现金/应计/兑付流水）的最小记账单位，任何账本都无法表示更小金额，所以这部分既
+ *   不会消失也不会被重复计——它留在源持债本金里，后续迁移继续按比例拆分、到期/破产按余额
+ *   兑付。因此不需要 tailPrincipal 字段，也不需要改存档格式（SAVE_FORMAT_VERSION 不必因
+ *   本项 +1；v1.6 的 D5 版本号仍由 Lead 统一决定）；
  * - 目标城同一（发行批次, 持有实体）已有 active 持债时合并，多次迁移不产生碎片持债。
  */
-const MIGRATION_BOND_UNIT_DECIMALS = 2;
 
+/**
+ * v1.6 §P5：本金（信用点，分粒度为权威）→ 内部持债份数。
+ * 不做 0.01 份舍入：份数 = 本金 / 面额，保留内部全精度。
+ * 这样迁移应带走 4 信用点（面额 1000）时得到 0.004 份而不是 0；不变量
+ * “本金 = round2(份数×面额)” 在全精度下自动成立（本金本身已是分）。
+ */
 function bondUnitsForPrincipal(principal: number, faceValue: number): number {
   if (faceValue <= 0 || principal <= 0) return 0;
-  const factor = 10 ** MIGRATION_BOND_UNIT_DECIMALS;
-  return Math.round((principal / faceValue) * factor) / factor;
+  return principal / faceValue;
 }
 
 function bondFaceValueOf(world: WorldState, holding: BondHolding): number {
@@ -268,18 +280,23 @@ function bondFaceValueOf(world: WorldState, holding: BondHolding): number {
   return implied > 0 ? implied : 1;
 }
 
-/** 把一段迁移债券并入目标实体：同批次已有 active 持债则合并（每“批次+实体”最多 1 条）。 */
+/**
+ * 把一段迁移债券并入目标实体：同批次已有 active 持债则合并（每“批次+实体”最多 1 条）。
+ * v1.6 §P5：份数由合并后的本金/面额推导（内部全精度），不再 round2 到 0.01 份，
+ * 保证小额多次迁移累加不因份数舍入丢失。
+ */
 function mergeMigratedBondHolding(
   world: WorldState,
   source: BondHolding,
   toInvestor: InvestorGroup,
-  units: number,
+  faceValue: number,
   principal: number,
   accruedInterest: number,
   interestPaid: number,
 ): void {
   const bonds = world.bonds;
-  if (!bonds || units <= 0 || principal <= 0) return;
+  const movedPrincipal = round2(principal);
+  if (!bonds || movedPrincipal <= 0 || faceValue <= 0) return;
   const holder: BondHolder = { kind: 'investorGroup', id: toInvestor.id };
   const existing = bonds.holdings.find(
     (entry) =>
@@ -290,11 +307,11 @@ function mergeMigratedBondHolding(
       entry.interestStartTick === source.interestStartTick,
   );
   if (existing) {
-    existing.units = round2(existing.units + units);
-    existing.principal = round2(existing.principal + principal);
+    existing.principal = round2(existing.principal + movedPrincipal);
+    existing.units = bondUnitsForPrincipal(existing.principal, faceValue);
     existing.accruedInterest = round2(existing.accruedInterest + accruedInterest);
     existing.interestPaid = round2(existing.interestPaid + interestPaid);
-    existing.note = `v1.5 §2：跨城迁移并入 ${round2(units)} 份（本金 ${round2(principal)}，来源 ${source.id}，tick ${world.time.tick}）`;
+    existing.note = `v1.5 §2 / v1.6 §P5：跨城迁移并入 ${existing.units} 份（本金 ${existing.principal}，来源 ${source.id}，tick ${world.time.tick}）`;
     return;
   }
   bonds.holdings.push({
@@ -302,8 +319,8 @@ function mergeMigratedBondHolding(
     issuanceId: source.issuanceId,
     cityId: source.cityId,
     holder,
-    units: round2(units),
-    principal: round2(principal),
+    units: bondUnitsForPrincipal(movedPrincipal, faceValue),
+    principal: movedPrincipal,
     purchasedTick: world.time.tick,
     interestStartTick: source.interestStartTick,
     maturityTick: source.maturityTick,
@@ -312,7 +329,7 @@ function mergeMigratedBondHolding(
     interestPaid: round2(interestPaid),
     redeemedTick: null,
     status: 'active',
-    note: `v1.5 §2：跨城迁移自 ${source.id} 按比例拆出的真实持债（本金 ${round2(principal)}，tick ${world.time.tick}）`,
+    note: `v1.5 §2 / v1.6 §P5：跨城迁移自 ${source.id} 按比例拆出的真实持债（本金 ${movedPrincipal}，tick ${world.time.tick}）`,
   });
   bonds.nextHoldingNumber += 1;
 }
@@ -338,11 +355,10 @@ function splitBondHoldingsForMigration(
   );
   for (const source of sourceHoldings) {
     const faceValue = bondFaceValueOf(world, source);
-    const idealPrincipal = round2(Math.max(0, source.principal) * fraction);
-    // 份数按 0.01 份粒度（本金必须是“面额×0.01”的整数倍，才满足持债账本“本金 = 份数×面额”不变量）。
-    const movedUnits = bondUnitsForPrincipal(idealPrincipal, faceValue);
-    const movedPrincipal = round2(movedUnits * faceValue);
-    if (movedUnits <= 0 || movedPrincipal <= 0) continue;
+    // v1.6 §P5：本金以“分”为权威粒度；份数由本金/面额内部全精度推导，不再四舍五入到 0.01 份。
+    // 因此迁移应带走 4 信用点（面额 1000 → 0.004 份）时能真实拆出，不再 round 成 0 份留源城。
+    const movedPrincipal = round2(Math.max(0, source.principal) * fraction);
+    if (movedPrincipal <= 0) continue;
     if (movedPrincipal > source.principal + 0.005) continue;
     const ratio = source.principal > 0 ? movedPrincipal / source.principal : 0;
     const movedAccrued = round2(Math.max(0, source.accruedInterest) * ratio);
@@ -352,19 +368,19 @@ function splitBondHoldingsForMigration(
     source.accruedInterest = round2(Math.max(0, source.accruedInterest - movedAccrued));
     source.interestPaid = round2(Math.max(0, source.interestPaid - movedInterestPaid));
     source.units = bondUnitsForPrincipal(source.principal, faceValue);
-    // 目标城：份数按 0.01 份分给各投资实体（合计严格 = movedUnits），再按份数比例分利息。
-    const unitSlices = allocateMoneyExact(movedUnits, entityWeights);
-    const accruedSlices = allocateMoneyExact(movedAccrued, unitSlices);
-    const interestPaidSlices = allocateMoneyExact(movedInterestPaid, unitSlices);
+    // 目标城：本金按分币精确分给各投资实体（合计严格 = movedPrincipal），份数由各自本金/面额推导，
+    // 利息按本金切片比例分（分币精确），利息合计也严格守恒。
+    const principalSlices = allocateMoneyExact(movedPrincipal, entityWeights);
+    const accruedSlices = allocateMoneyExact(movedAccrued, principalSlices);
+    const interestPaidSlices = allocateMoneyExact(movedInterestPaid, principalSlices);
     toInvestors.forEach((toInvestor, index) => {
-      const units = unitSlices[index] ?? 0;
-      if (units <= 0) return;
-      const principal = round2(units * faceValue);
+      const principal = round2(principalSlices[index] ?? 0);
+      if (principal <= 0) return;
       mergeMigratedBondHolding(
         world,
         source,
         toInvestor,
-        units,
+        faceValue,
         principal,
         accruedSlices[index] ?? 0,
         interestPaidSlices[index] ?? 0,
@@ -578,8 +594,9 @@ export function transferInvestorAssetsForMigration(
 
   // 3) 账本随人转移：若源城实体可划转资产不足，实际划转价值可能低于理论迁移价值；
   //    此时按“实际划转价值”重算迁出份额与目标份额，避免账本份额多于实际资产（无偿转移）。
-  //    v1.5 §2：债券按 0.01 份粒度拆分，可能比理论值多划出几分钱；多出部分不增发目标城份额，
-  //    避免源城剩余居民被多扣（尾差留在目标城实体，量级 < 面额×0.01）。
+  //    v1.6 §P5：债券份数内部全精度（本金按分守恒），拆分误差只剩“不足 1 分”的残差，
+  //    不再有 v1.5 的“0.01 份 = 面额×0.01”量级误差；现金/股票仍按既有分币/0.01 股粒度，
+  //    因此仍保留 shortfall 保护：实际划转少于理论价值时按实际值重算份额。
   const actualValueMoved = round2(
     holdingsValueMoved + bondTransfer.valueMoved + result.cashMoved,
   );

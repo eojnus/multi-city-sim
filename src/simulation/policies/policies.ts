@@ -4,6 +4,7 @@ import type {
   City,
   FiscalEntry,
   LogEntry,
+  PolicyBudgetAllocation,
   PolicyDomain,
   PolicyExecutionRecord,
   PolicyFundingMonth,
@@ -11,6 +12,7 @@ import type {
   PolicyHistoryEntry,
   PolicyId,
   PolicyTracking,
+  PublicJobsMonth,
   SectorId,
   WorldState,
 } from '../contracts/types';
@@ -296,6 +298,10 @@ function releasePublicWorksJobs(world: WorldState, policy: ActivePolicy): number
   // tracking 中保留设立岗位数/启动时在岗人数/工资来源，供事后核对预留 vs 实付 vs 财政账本。
   policy.effects.jobsRemoved = removed;
   if (releasedEmployees > 0) policy.effects.employeesRemoved = releasedEmployees;
+  // v1.6 §一.2：撤销岗位计入本月公共岗位统计（撤销≠新增，单独一项）。
+  if (removed > 0) {
+    recordPublicJobsMonth(world, policy.cityId, world.time.tick, { jobsRemoved: removed });
+  }
   return removed;
 }
 
@@ -335,6 +341,237 @@ function policyReferenceBudget(policy: ActivePolicy, config: DemoConfig): number
   return round2(Math.max(0, policy.referenceBudget ?? config.policies.budgets[policy.policyId]));
 }
 
+// ---------------------------------------------------------------- v1.6 §一.1：月政策预算总额度与分配
+
+/** AI 危机政策的优先级（数值越小越优先；仅用于同权重时的分配余数排序，与 ai-labor 对症顺序一致）。 */
+const CRISIS_POLICY_PRIORITY: readonly PolicyId[] = [
+  'unemploymentAid',
+  'publicJobs',
+  'hiringSubsidy',
+  'vocationalTraining',
+  'equipmentSubsidy',
+  'keyIndustrySupport',
+  'intercityTradeSupport',
+  'startupSupport',
+  'retentionSubsidy',
+  'companyRelief',
+  'researchGrant',
+  'educationInvestment',
+  'housingSupport',
+  'taxAdjustment',
+  'transportInvestment',
+];
+
+function crisisPolicyPriority(policyId: PolicyId): number {
+  const index = CRISIS_POLICY_PRIORITY.indexOf(policyId);
+  return index >= 0 ? index : CRISIS_POLICY_PRIORITY.length;
+}
+
+/**
+ * v1.6 §一.1：当月“月政策预算”总额度（AI 危机政策的合计参考预算，不是每项各自额度）。
+ *
+ * - 优先取当月经济体检的 budget（quota）；
+ * - 当月没有体检快照时（旧档/测试直调）回退最近一次体检的 budget，并在调用方 note 标注；
+ * - 完全没有体检记录时返回 source='none'，调用方沿用各政策自己的参考预算（旧行为）。
+ */
+export function monthlyPolicyQuota(
+  world: WorldState,
+  cityId: string,
+): { quota: number; tick: number | null; source: 'checkup' | 'checkupStale' | 'none' } {
+  const checkups = (world.policies.checkups ?? []).filter((entry) => entry.cityId === cityId);
+  const current = checkups.find((entry) => entry.tick === world.time.tick);
+  if (current) {
+    return { quota: round2(Math.max(0, current.budget)), tick: current.tick, source: 'checkup' };
+  }
+  let latestTick: number | null = null;
+  let latestBudget = 0;
+  for (const checkup of checkups) {
+    if (checkup.tick >= world.time.tick) continue;
+    if (latestTick === null || checkup.tick > latestTick) {
+      latestTick = checkup.tick;
+      latestBudget = checkup.budget;
+    }
+  }
+  if (latestTick !== null) {
+    return { quota: round2(Math.max(0, latestBudget)), tick: latestTick, source: 'checkupStale' };
+  }
+  return { quota: 0, tick: null, source: 'none' };
+}
+
+/**
+ * v1.6 §一.1：把当月总额度按各政策“参考需求”权重用最大余数法分配到全部 active AI 危机政策。
+ *
+ * 规则（写死、可测）：
+ * - weight_i = policyReferenceBudget(policy_i)（决策口径的单月参考需求）；
+ * - usable = min(quota, Σweight)；Σallocation = usable（浮点按分币精确，容差 ≤0.01）；
+ *   需求不足时剩余额度只是“未使用额度”，不虚构需求；
+ * - allocation_i ≤ weight_i，同一笔额度只分配一次（不得每项政策各自拿满整月额度）；
+ * - 没有任何体检记录（旧档/直调）时回退各政策自己的参考预算，保持旧行为。
+ */
+function allocateMonthlyCrisisBudgets(
+  world: WorldState,
+  cityId: string,
+  policies: readonly ActivePolicy[],
+  config: DemoConfig,
+): {
+  quota: number;
+  quotaTick: number | null;
+  quotaSource: 'checkup' | 'checkupStale' | 'none';
+  allocations: Map<string, number>;
+  totalDemand: number;
+} {
+  const info = monthlyPolicyQuota(world, cityId);
+  const quotaInfo = { quota: info.quota, quotaTick: info.tick, quotaSource: info.source };
+  const demands = policies.map((policy) => policyReferenceBudget(policy, config));
+  const totalDemand = round2(demands.reduce((sum, value) => sum + value, 0));
+  const allocations = new Map<string, number>();
+  if (info.source === 'none') {
+    policies.forEach((policy, index) => allocations.set(policy.id, demands[index] ?? 0));
+    return { ...quotaInfo, allocations, totalDemand };
+  }
+  const usable = round2(Math.min(info.quota, totalDemand));
+  // 稳定排序：需求大的优先拿分币余数，其次按政策优先级/ID，保证结果确定可复现。
+  const order = policies
+    .map((policy, index) => ({
+      policy,
+      demand: demands[index] ?? 0,
+      priority: crisisPolicyPriority(policy.policyId),
+    }))
+    .sort(
+      (a, b) =>
+        b.demand - a.demand ||
+        a.priority - b.priority ||
+        a.policy.policyId.localeCompare(b.policy.policyId) ||
+        a.policy.id.localeCompare(b.policy.id),
+    );
+  const shares = allocateMoneyExact(usable, order.map((entry) => entry.demand));
+  order.forEach((entry, index) => {
+    allocations.set(entry.policy.id, shares[index] ?? 0);
+  });
+  return { ...quotaInfo, allocations, totalDemand };
+}
+
+// ---------------------------------------------------------------- v1.6 §一.2：公共岗位月度统计
+
+/** 公共岗位统计保留月数（与政策资金窗口一致，避免存档无限增长）。 */
+const PUBLIC_JOBS_STATS_RETENTION = 24;
+
+function finalizePublicJobsMonth(world: WorldState, cityId: string, tick: number): void {
+  const months = (world.policies.publicJobsMonths ?? []).filter((entry) => entry.cityId === cityId);
+  const record = months.find((entry) => entry.tick === tick);
+  if (!record) return;
+  let previous: PublicJobsMonth | null = null;
+  for (const entry of months) {
+    if (entry.tick >= tick) continue;
+    if (!previous || entry.tick > previous.tick) previous = entry;
+  }
+  record.jobsAddedCumulative = round2((previous?.jobsAddedCumulative ?? 0) + record.jobsAdded);
+  record.jobsRemovedCumulative = round2((previous?.jobsRemovedCumulative ?? 0) + record.jobsRemoved);
+  record.personMonthsCumulative = round2((previous?.personMonthsCumulative ?? 0) + record.headcount);
+  record.wagesPaidCumulative = round2((previous?.wagesPaidCumulative ?? 0) + record.wagesPaid);
+  record.jobsOutstanding = Math.max(
+    0,
+    round2(record.jobsAddedCumulative - record.jobsRemovedCumulative),
+  );
+  record.note = `本月新增岗位 ${record.jobsAdded} 个（岗位数，不是人次）；月末实际在岗 ${record.headcount} 人（headcount）；撤销岗位 ${record.jobsRemoved} 个；实付工资 ${record.wagesPaid.toFixed(2)}（信用点，fiscal.publicWages 实付归属）。累计：新增岗位 ${record.jobsAddedCumulative} 个 / 在岗 ${record.personMonthsCumulative} 人次（人次 ≠ 新增人数）/ 撤销 ${record.jobsRemovedCumulative} 个 / 实付工资 ${record.wagesPaidCumulative.toFixed(2)}。`;
+  // 每城只保留最近 N 个月；累计字段是绝对值，裁剪后仍可追溯。
+  const all = world.policies.publicJobsMonths ?? [];
+  const cityMonths = all
+    .filter((entry) => entry.cityId === cityId)
+    .sort((a, b) => a.tick - b.tick);
+  if (cityMonths.length > PUBLIC_JOBS_STATS_RETENTION) {
+    const dropTicks = new Set(
+      cityMonths
+        .slice(0, cityMonths.length - PUBLIC_JOBS_STATS_RETENTION)
+        .map((entry) => entry.tick),
+    );
+    world.policies.publicJobsMonths = all.filter(
+      (entry) => entry.cityId !== cityId || !dropTicks.has(entry.tick),
+    );
+    record.note = `${record.note}（每城保留最近 ${PUBLIC_JOBS_STATS_RETENTION} 个月，更早记录已截断；累计字段仍为全期值。）`;
+  }
+}
+
+/**
+ * 记录公共岗位月度统计（同城同 tick 幂等累加）。
+ *
+ * headcount 是“月末在岗人数”快照（直接覆盖，不累加）；jobsAdded/jobsRemoved/wagesPaid 是
+ * 本月发生额（累加）。所有金额单位为信用点，人数为整数。
+ */
+function recordPublicJobsMonth(
+  world: WorldState,
+  cityId: string,
+  tick: number,
+  delta: Partial<Pick<PublicJobsMonth, 'jobsAdded' | 'headcount' | 'jobsRemoved' | 'wagesPaid'>>,
+): void {
+  world.policies.publicJobsMonths ??= [];
+  let record = world.policies.publicJobsMonths.find(
+    (entry) => entry.cityId === cityId && entry.tick === tick,
+  );
+  if (!record) {
+    record = {
+      tick,
+      cityId,
+      jobsAdded: 0,
+      headcount: 0,
+      jobsRemoved: 0,
+      wagesPaid: 0,
+      jobsAddedCumulative: 0,
+      personMonthsCumulative: 0,
+      jobsRemovedCumulative: 0,
+      wagesPaidCumulative: 0,
+      jobsOutstanding: 0,
+      note: '',
+    };
+    world.policies.publicJobsMonths.push(record);
+  }
+  record.jobsAdded = round2(record.jobsAdded + (delta.jobsAdded ?? 0));
+  record.jobsRemoved = round2(record.jobsRemoved + (delta.jobsRemoved ?? 0));
+  record.wagesPaid = round2(record.wagesPaid + (delta.wagesPaid ?? 0));
+  if (delta.headcount !== undefined) {
+    record.headcount = Math.max(0, Math.round(delta.headcount));
+  }
+  finalizePublicJobsMonth(world, cityId, tick);
+}
+
+/**
+ * v1.6 §一.2：报告/UI 读取某城公共岗位统计（月度 + 全期累计 + 当前在岗快照）。
+ *
+ * 注意口径：jobsAddedCumulative 是去重岗位数；personMonthsCumulative 是“在岗人次”
+ * （Σ 各月 headcount），不能当新增人数使用。旧存档没有统计字段时全部返回 0/空。
+ */
+export function publicJobsStats(
+  world: WorldState,
+  cityId: string,
+): {
+  latest: PublicJobsMonth | null;
+  months: PublicJobsMonth[];
+  jobsAddedCumulative: number;
+  personMonthsCumulative: number;
+  jobsRemovedCumulative: number;
+  wagesPaidCumulative: number;
+  jobsOutstanding: number;
+  currentJobs: number;
+  currentEmployees: number;
+} {
+  const months = [...(world.policies.publicJobsMonths ?? [])]
+    .filter((entry) => entry.cityId === cityId)
+    .sort((a, b) => a.tick - b.tick);
+  const latest = months.length > 0 ? months[months.length - 1]! : null;
+  const city = world.cities.find((entry) => entry.id === cityId);
+  return {
+    latest,
+    months,
+    jobsAddedCumulative: latest?.jobsAddedCumulative ?? 0,
+    personMonthsCumulative: latest?.personMonthsCumulative ?? 0,
+    jobsRemovedCumulative: latest?.jobsRemovedCumulative ?? 0,
+    wagesPaidCumulative: latest?.wagesPaidCumulative ?? 0,
+    jobsOutstanding: latest?.jobsOutstanding ?? 0,
+    currentJobs: Math.max(0, Math.round(city?.publicSector.jobs ?? 0)),
+    currentEmployees: Math.max(0, Math.round(city?.publicSector.employees ?? 0)),
+  };
+}
+
 function ledgerAmountSum(
   world: WorldState,
   cityId: string,
@@ -362,10 +599,12 @@ function expectedPolicyCashClaim(
   city: City,
   policy: ActivePolicy,
   config: DemoConfig,
+  monthlyBudget: number,
   hiresByCompany?: Record<string, number>,
 ): number {
-  // v1.5 §4：参考预算/预留按“单月”口径；即使总预算已被前几个月支出，本月仍按参考预算评估真实需求。
-  const reference = policyReferenceBudget(policy, config);
+  // v1.6 §一.1：参考预算/预留按“本月分项额度”口径；即使总预算已被前几个月支出，
+  // 本月仍只在本月额度（总额度按权重分配后的分项）内评估真实需求，不得重复使用同一笔预算。
+  const reference = round2(Math.max(0, monthlyBudget));
   if (reference <= 0 || policy.monthsRemaining <= 0) return 0;
   switch (policy.policyId) {
     case 'unemploymentAid': {
@@ -482,16 +721,35 @@ export function preparePolicyFunding(
   const tick = world.time.tick;
   for (const city of [...world.cities].sort((a, b) => a.id.localeCompare(b.id))) {
     if (playerIsMayor(world, city.id)) continue;
-    const policies = activePoliciesFor(world, city.id).filter((policy) => isAiCrisisPolicy(policy));
+    const policies = activePoliciesFor(world, city.id)
+      .filter((policy) => isAiCrisisPolicy(policy))
+      .sort(
+        (a, b) =>
+          crisisPolicyPriority(a.policyId) - crisisPolicyPriority(b.policyId) ||
+          a.policyId.localeCompare(b.policyId) ||
+          a.id.localeCompare(b.id),
+      );
     if (policies.length === 0) continue;
 
-    const referenceBudget = round2(
-      policies.reduce((sum, policy) => sum + policyReferenceBudget(policy, config), 0),
-    );
+    // v1.6 §一.1：本月总额度（当月体检 budget）按参考需求权重分配给当月全部 AI 危机政策；
+    // 同一笔额度只分配一次，Σ分项 ≤ 总额度（不再每项各自拿满整月额度）。
+    const allocationInfo = allocateMonthlyCrisisBudgets(world, city.id, policies, config);
     const targets = policies.map((policy) => ({
       policy,
-      claim: expectedPolicyCashClaim(world, city, policy, config, context.hiresByCompany),
+      allocation: round2(allocationInfo.allocations.get(policy.id) ?? 0),
+      claim: 0,
     }));
+    for (const target of targets) {
+      target.claim = expectedPolicyCashClaim(
+        world,
+        city,
+        target.policy,
+        config,
+        target.allocation,
+        context.hiresByCompany,
+      );
+    }
+    const referenceBudget = round2(targets.reduce((sum, entry) => sum + entry.allocation, 0));
     const desired = round2(targets.reduce((sum, entry) => sum + entry.claim, 0));
 
     const treasuryBeforeFunding = round2(city.treasury);
@@ -528,26 +786,44 @@ export function preparePolicyFunding(
       }
     }
 
-    // 预留只能来自真实到账资金（财政余额含本步骤真实借款）。
+    // 预留只能来自真实到账资金（财政余额含本步骤真实借款），且每项不超过本月分项额度。
     let pool = round2(city.treasury);
     let reservedTotal = 0;
     let unpaidTotal = 0;
+    const budgetEntries: PolicyBudgetAllocation[] = [];
     for (const target of targets) {
       const policy = target.policy;
-      const reserve = round2(Math.min(target.claim, Math.max(0, pool)));
+      const reserve = round2(Math.min(target.claim, target.allocation, Math.max(0, pool)));
       pool = round2(pool - reserve);
       reservedTotal = round2(reservedTotal + reserve);
-      unpaidTotal = round2(unpaidTotal + Math.max(0, target.claim - reserve));
+      const unpaid = round2(Math.max(0, target.claim - reserve));
+      unpaidTotal = round2(unpaidTotal + unpaid);
       policy.reservedThisMonth = reserve;
-      policy.unpaidThisMonth = round2(Math.max(0, target.claim - reserve));
+      policy.unpaidThisMonth = unpaid;
       policy.fundingSourceThisMonth =
         reserve <= 0 ? 'none' : borrowingProceeds > 0 ? 'bankLoan' : 'treasury';
       // 本月实支从 0 开始计；reservedTick 让 payFromPolicy 只在本月执行时按预留封顶。
       policy.effects.spentThisMonth = 0;
       policy.effects.reservedTick = tick;
       policy.effects.expectedClaim = target.claim;
+      budgetEntries.push({
+        policyInstanceId: policy.id,
+        policyId: policy.policyId,
+        referenceBudget: target.allocation,
+        claim: target.claim,
+        reserved: reserve,
+        spent: 0,
+        unpaid,
+        publicWagesAttributed: 0,
+      });
     }
 
+    const quotaNote =
+      allocationInfo.quotaSource === 'checkup'
+        ? `当月体检 t${allocationInfo.quotaTick}`
+        : allocationInfo.quotaSource === 'checkupStale'
+          ? `最近体检 t${allocationInfo.quotaTick}（当月无快照）`
+          : '无体检记录，沿用各政策参考预算';
     const trace: PolicyFundingMonth = {
       tick,
       cityId: city.id,
@@ -564,7 +840,15 @@ export function preparePolicyFunding(
       spent: 0,
       unpaid: unpaidTotal,
       fundingSource: borrowingProceeds > 0 ? 'bankLoan' : reservedTotal > 0 ? 'treasury' : 'none',
-      note: `参考预算 ${referenceBudget.toFixed(0)}（${policies.length} 项）；缺口 ${deficit.toFixed(0)}；借款到账 ${borrowingProceeds.toFixed(0)}`,
+      note: `本月总额度 ${allocationInfo.quota.toFixed(0)}（${quotaNote}）；按参考需求权重分配 ${referenceBudget.toFixed(0)}（${
+        policies.length
+      } 项：${targets
+        .map((entry) => `${policyName(entry.policy.policyId)} ${entry.allocation.toFixed(0)}`)
+        .join('、')}）；分项额度合计 = 本月额度分配；缺口 ${deficit.toFixed(0)}；借款到账 ${borrowingProceeds.toFixed(0)}`,
+      quota: allocationInfo.quota,
+      policyBudgets: budgetEntries,
+      publicWagesAttributed: 0,
+      publicWagesOverQuota: 0,
     };
     trace.essentialSpending = round2(trace.publicWages + trace.benefitsPaid);
     world.policies.fundingMonths.push(trace);
@@ -591,7 +875,7 @@ export function preparePolicyFunding(
       kind: 'government',
       // 预算/债务/财政余额属市长财政口径。
       visibility: { scope: 'mayor', cityId: city.id },
-      message: `${city.name} 政策资金顺序：决策参考预算 ${referenceBudget.toFixed(0)} → 税收到账 ${trace.taxReceived.toFixed(0)} → 公共工资 ${trace.publicWages.toFixed(0)} / 福利 ${trace.benefitsPaid.toFixed(0)} → 政策前财政余额 ${treasuryBeforeFunding.toFixed(0)} → 政策借款到账 ${borrowingProceeds.toFixed(0)}（债务/GDP ${(debtRatioBefore * 100).toFixed(1)}% → ${(debtRatioAfterBorrowing * 100).toFixed(1)}%）→ 预留 ${reservedTotal.toFixed(0)}（来源 ${trace.fundingSource}）。`,
+      message: `${city.name} 政策资金顺序：本月总额度 ${allocationInfo.quota.toFixed(0)} → 分项参考预算合计 ${referenceBudget.toFixed(0)}（${policies.length} 项）→ 税收到账 ${trace.taxReceived.toFixed(0)} → 公共工资 ${trace.publicWages.toFixed(0)} / 福利 ${trace.benefitsPaid.toFixed(0)} → 政策前财政余额 ${treasuryBeforeFunding.toFixed(0)} → 政策借款到账 ${borrowingProceeds.toFixed(0)}（债务/GDP ${(debtRatioBefore * 100).toFixed(1)}% → ${(debtRatioAfterBorrowing * 100).toFixed(1)}%）→ 预留 ${reservedTotal.toFixed(0)}（来源 ${trace.fundingSource}）。`,
     });
   }
 }
@@ -603,40 +887,88 @@ function finalizePolicyFunding(
   config: DemoConfig,
   log: LogEntry[],
 ): void {
+  const tick = world.time.tick;
   const trace = (world.policies.fundingMonths ?? []).find(
-    (entry) => entry.cityId === city.id && entry.tick === world.time.tick,
+    (entry) => entry.cityId === city.id && entry.tick === tick,
   );
   if (!trace) return;
   const candidates = [
     ...activePoliciesFor(world, city.id),
-    ...world.policies.history.filter((entry) => entry.cityId === city.id && entry.endedTick === world.time.tick),
-  ].filter((policy) => isAiCrisisPolicy(policy) && policy.effects.reservedTick === world.time.tick);
+    ...world.policies.history.filter((entry) => entry.cityId === city.id && entry.endedTick === tick),
+  ].filter((policy) => isAiCrisisPolicy(policy) && policy.effects.reservedTick === tick);
   const seen = new Set<string>();
   let reference = 0;
   let reserved = 0;
   let spent = 0;
   let unpaid = 0;
+  let publicWagesInSpent = 0;
+  const entries = trace.policyBudgets ?? [];
+  trace.policyBudgets = entries;
   for (const policy of candidates) {
     if (seen.has(policy.id)) continue;
     seen.add(policy.id);
     const spentThisMonth = round2(Math.max(0, policy.effects.spentThisMonth ?? 0));
     const claim = round2(Math.max(0, policy.effects.expectedClaim ?? 0));
-    policy.unpaidThisMonth = round2(Math.max(0, claim - spentThisMonth));
-    reference = round2(reference + policyReferenceBudget(policy, config));
-    reserved = round2(reserved + (policy.reservedThisMonth ?? 0));
+    const policyUnpaid = round2(Math.max(0, claim - spentThisMonth));
+    policy.unpaidThisMonth = policyUnpaid;
+    const publicWage = round2(Math.max(0, policy.effects.publicWagePaidThisMonth ?? 0));
+    publicWagesInSpent = round2(publicWagesInSpent + publicWage);
+    let entry = entries.find(
+      (item) =>
+        (item.policyInstanceId !== undefined && item.policyInstanceId === policy.id) ||
+        (item.policyInstanceId === undefined && item.policyId === policy.policyId),
+    );
+    if (!entry) {
+      // 兜底：prepare 理论已写分项；缺失时按本月决策参考预算补一条（不虚构资金）。
+      entry = {
+        policyInstanceId: policy.id,
+        policyId: policy.policyId,
+        referenceBudget: policyReferenceBudget(policy, config),
+        claim,
+        reserved: round2(Math.max(0, policy.reservedThisMonth ?? 0)),
+        spent: 0,
+        unpaid: 0,
+        publicWagesAttributed: 0,
+      };
+      entries.push(entry);
+    }
+    entry.claim = claim;
+    entry.reserved = round2(Math.max(0, policy.reservedThisMonth ?? 0));
+    entry.spent = spentThisMonth;
+    entry.unpaid = policyUnpaid;
+    entry.publicWagesAttributed = publicWage;
+    reference = round2(reference + entry.referenceBudget);
+    reserved = round2(reserved + entry.reserved);
     spent = round2(spent + spentThisMonth);
-    unpaid = round2(unpaid + policy.unpaidThisMonth);
+    unpaid = round2(unpaid + policyUnpaid);
   }
   trace.referenceBudget = reference;
   trace.reserved = reserved;
   trace.spent = spent;
   trace.unpaid = unpaid;
-  trace.note = `${trace.note}；实支 ${spent.toFixed(0)}，未支付 ${unpaid.toFixed(0)}（未支付不计受益/收入）`;
+  // v1.6 §一.2：公共岗位实发工资按 fiscal.publicWages 真实支付记录归属。
+  // 分项顶格计入 spent 的部分由政策实支承载；实发超出分项额度/预留的部分单列（已经真实支付，
+  // 不是为凑边界改写工资），报告可按“实支 + 未支付 ≤ 额度 + 超额度实发部分”核对。
+  const publicJobsCandidate = candidates.some((policy) => policy.policyId === 'publicJobs');
+  const publicJobsRecord = publicJobsCandidate
+    ? (world.policies.publicJobsMonths ?? []).find(
+        (entry) => entry.cityId === city.id && entry.tick === tick,
+      )
+    : undefined;
+  const publicJobsAllocation = round2(
+    entries
+      .filter((entry) => entry.policyId === 'publicJobs')
+      .reduce((sum, entry) => sum + entry.referenceBudget, 0),
+  );
+  const publicWagesReal = round2(Math.max(0, publicJobsRecord?.wagesPaid ?? publicWagesInSpent));
+  trace.publicWagesAttributed = publicWagesReal;
+  trace.publicWagesOverQuota = round2(Math.max(0, publicWagesReal - Math.min(publicWagesInSpent, publicJobsAllocation)));
+  trace.note = `${trace.note}；实支 ${spent.toFixed(0)}，未支付 ${unpaid.toFixed(0)}（未支付不计受益/收入）；公共工资按实付记录归属 ${publicWagesReal.toFixed(0)}（其中未计入政策实支的超额度部分 ${(trace.publicWagesOverQuota ?? 0).toFixed(0)}，不伪造工资）`;
   log.push({
-    tick: world.time.tick,
+    tick,
     kind: 'government',
     visibility: { scope: 'mayor', cityId: city.id },
-    message: `${city.name} 政策执行：预留 ${reserved.toFixed(0)} → 实支 ${spent.toFixed(0)} / 未支付 ${unpaid.toFixed(0)}（资金已真实到账后才支付）。`,
+    message: `${city.name} 政策执行：预留 ${reserved.toFixed(0)} → 实支 ${spent.toFixed(0)} / 未支付 ${unpaid.toFixed(0)}（本月额度 ${(trace.quota ?? reference).toFixed(0)} → 分项 ${reference.toFixed(0)}；资金已真实到账后才支付）。`,
   });
 }
 
@@ -675,6 +1007,14 @@ export interface PolicyFundingReport {
   fundingSource: PolicyFundingSource;
   note: string;
   stages: PolicyFundingReportStage[];
+  /** v1.6 §一.1：本月“月政策预算”总额度（体检 budget；旧档缺省回退为分项合计）。 */
+  quota: number;
+  /** v1.6 §一.1：本月按政策分项分配（Σ referenceBudget = 本月额度分配，不重复使用同一笔预算）。 */
+  policyBudgets: PolicyBudgetAllocation[];
+  /** v1.6 §一.2：本月按真实支付记录归属政策的公共工资（可能含超出分项额度的实发部分）。 */
+  publicWagesAttributed: number;
+  /** v1.6 §一.2：公共工资实发中未计入政策实支的超额度部分（边界加项，不伪造工资）。 */
+  publicWagesOverQuota: number;
 }
 
 /**
@@ -752,6 +1092,10 @@ export function policyFundingMonthlyReport(
     fundingSource: trace.fundingSource,
     note: trace.note,
     stages,
+    quota: round2(trace.quota ?? trace.referenceBudget),
+    policyBudgets: trace.policyBudgets ?? [],
+    publicWagesAttributed: round2(trace.publicWagesAttributed ?? 0),
+    publicWagesOverQuota: round2(trace.publicWagesOverQuota ?? 0),
   };
 }
 
@@ -989,12 +1333,24 @@ export function startPolicy(
       visibility: { scope: 'mayor', cityId: city.id },
       message: `${city.name} 公共岗位计划：设立 ${jobsToAdd} 个岗位（期限 ${policy.monthsRemaining} 个月），预留工资 ${reservedWages.toFixed(0)}，由公共工资科目按月实付。`,
     });
+    // v1.6 §一.2：本月新增岗位计入公共岗位统计（岗位数，不是人次；设立是一次性事件）。
+    recordPublicJobsMonth(world, city.id, world.time.tick, { jobsAdded: jobsToAdd });
   }
 
   // v1.5 §4：公共岗位等政策会在上面覆盖 budget（预留工资口径）；这里再按可执行次数
   // 重置总上限，保证完成时 spent ≤ budget（否则存档校验失败）。
   if (options.deferFunding) {
     policy.budget = round2(Math.max(policy.budget, budget * budgetExecutions));
+    if (policyId === 'publicJobs') {
+      // v1.6 §一.2：AI 危机公共岗位的总预算按“全期限在岗工资上限”展开，使已发生的必要公共工资
+      // 能按真实支付记录完整归属政策预算、不因累计上限被截断（只放宽上限，不改写/重复工资）。
+      const createdJobs = Math.max(0, Math.round(policy.effects.jobsCreated ?? 0));
+      const wageRate = Math.max(
+        0,
+        policy.tracking?.publicWorksWageRate ?? city.publicSector.wageRate,
+      );
+      policy.budget = round2(Math.max(policy.budget, createdJobs * wageRate * budgetExecutions));
+    }
   }
   world.policies.active.push(policy);
   recordRun(world, cityId, policyId);
@@ -1445,18 +1801,25 @@ export function settlePolicies(
         }
         case 'publicJobs': {
           // v1.4 §五：岗位工资由财政公共工资科目按月真实支付（fiscal.ts publicWages）。
-          // 这里不再次扣财政，只核对“实际在岗（扣除启动基线）”并把支出计入政策预算/追踪，
-          // 避免预扣 + 实付重复扣费，也避免预留资金“消失”。
+          // v1.6 §一.2：这里不再次扣财政，只按真实支付记录归属政策预算：
+          // - realizedWage = 本月真实在岗（扣除启动基线）× 工资率，是 fiscal 已实付的公共工资部分；
+          // - 计入政策实支的金额不超过本月分项预留/累计预算上限，保证“实支 ≤ 预留”与 spent ≤ budget；
+          // - 实发工资本身按真实记录保存（公共岗位月度统计），不因预算上限改写或重复扣工资。
           const tracking = ensureTracking(policy);
           const created = Math.max(0, Math.round(tracking.publicWorksJobs ?? policy.effects.jobsCreated ?? 0));
           const baselineEmployees = Math.max(0, Math.round(tracking.publicWorksBaselineEmployees ?? 0));
           const actualEmployees = Math.max(0, city.publicSector.employees - baselineEmployees);
           const funded = Math.min(created, actualEmployees);
           const wageRate = Math.max(0, tracking.publicWorksWageRate ?? city.publicSector.wageRate);
-          const monthlyWage = round2(funded * wageRate);
+          const realizedWage = round2(funded * wageRate);
           const spentBeforeThisCase = policy.spent;
-          policy.spent = round2(Math.min(policy.budget, policy.spent + monthlyWage));
-          const attributed = round2(policy.spent - spentBeforeThisCase);
+          const fundedThisMonth = policy.effects.reservedTick === world.time.tick;
+          const budgetLeft = round2(Math.max(0, policy.budget - policy.spent));
+          const reservedLeft = fundedThisMonth
+            ? round2(Math.max(0, policy.reservedThisMonth ?? 0))
+            : budgetLeft;
+          const attributed = round2(Math.min(realizedWage, reservedLeft, budgetLeft));
+          policy.spent = round2(policy.spent + attributed);
           // 该笔钱由 fiscal.ts 的公共工资科目真实支付（不是 policySpending 流水），
           // 计入本月政策实支口径，用于“预留 vs 实支 vs 未支付”与资金追踪。
           policy.effects.spentThisMonth = round2((policy.effects.spentThisMonth ?? 0) + attributed);
@@ -1464,6 +1827,13 @@ export function settlePolicies(
           policy.effects.jobs = city.publicSector.jobs;
           policy.effects.publicWagePaid = round2((policy.effects.publicWagePaid ?? 0) + attributed);
           policy.effects.publicJobsFilled = funded;
+          // v1.6 §一.2：公共岗位统计分别记录“月末实际在岗人数（headcount）”与“实付工资”；
+          // 本月新增岗位在 startPolicy 设立时已记录，撤销在 releasePublicWorksJobs 记录。
+          recordPublicJobsMonth(world, city.id, world.time.tick, {
+            headcount: funded,
+            wagesPaid: realizedWage,
+          });
+          const jobsAddedThisMonth = policy.startedTick === world.time.tick ? funded : 0;
           execution = {
             tick: world.time.tick,
             reason: '公共工程：按真实在岗人数支付公共工资（预算预留、不预扣）',
@@ -1471,9 +1841,10 @@ export function settlePolicies(
             periodMonths: 1,
             spent: attributed,
             beneficiaries: funded,
-            jobsEffect: 0,
+            // 真实就业净效果：设立当月为真实到岗人数，之后为 0；撤岗月由 release 修正为负数。
+            jobsEffect: jobsAddedThisMonth,
             fiscalImpact: -attributed,
-            note: `设立 ${created} 个岗位，实际在岗 ${funded} 人；工资由 fiscal.ts 公共工资科目实付，本记录只做预算归属与核对。`,
+            note: `设立 ${created} 个岗位，本月实际在岗 ${funded} 人；实付工资 ${realizedWage.toFixed(0)}（fiscal.publicWages 实付），其中计入政策实支 ${attributed.toFixed(0)}；本记录只做预算归属与核对，不重复扣财政。`,
           };
           break;
         }
@@ -1500,7 +1871,18 @@ export function settlePolicies(
         const spentThisMonth = round2(Math.max(0, policy.effects.spentThisMonth ?? 0));
         const claim = round2(Math.max(0, policy.effects.expectedClaim ?? 0));
         policy.unpaidThisMonth = round2(Math.max(0, claim - spentThisMonth));
-        execution.referenceBudget = policyReferenceBudget(policy, config);
+        // v1.6 §一.1：执行记录里的参考预算取“本月分项额度”（总额度按权重分配后的份额），
+        // 不是每项政策各自拿满整月额度。
+        const allocationEntry = (world.policies.fundingMonths ?? [])
+          .find((entry) => entry.cityId === city.id && entry.tick === world.time.tick)
+          ?.policyBudgets?.find(
+            (entry) =>
+              (entry.policyInstanceId !== undefined && entry.policyInstanceId === policy.id) ||
+              (entry.policyInstanceId === undefined && entry.policyId === policy.policyId),
+          );
+        execution.referenceBudget = allocationEntry
+          ? allocationEntry.referenceBudget
+          : policyReferenceBudget(policy, config);
         execution.reserved = policy.reservedThisMonth ?? 0;
         execution.unpaid = policy.unpaidThisMonth;
         execution.fundingSource =
@@ -1515,6 +1897,8 @@ export function settlePolicies(
           // 公共工程到期：撤岗，工资随岗位真实退出。
           const released = releasePublicWorksJobs(world, policy);
           if (released > 0) {
+            // 撤岗计为真实就业负效果（jobsEffect 是“净效果”，在岗撤销不是新增）。
+            execution.jobsEffect = round2((execution.jobsEffect ?? 0) - released);
             log.push({
               tick: world.time.tick,
               kind: 'government',
@@ -1530,6 +1914,7 @@ export function settlePolicies(
       // 效果差可调整停止：连续多个月有支出却无受益/无就业效果。
       if (policyIneffective(policy, config)) {
         const released = releasePublicWorksJobs(world, policy);
+        execution.jobsEffect = round2((execution.jobsEffect ?? 0) - released);
         closePolicy(world, policy, world.time.tick, 'cancelled');
         log.push({
           tick: world.time.tick,
@@ -1542,6 +1927,8 @@ export function settlePolicies(
     }
     // v1.5 §4：本城本月政策执行完毕后，把真实实支/未支付写回 fundingMonths（三口径持久化）。
     finalizePolicyFunding(world, city, config, log);
+    // v1.6 §一.2：本城本月公共岗位统计收口（幂等：同 tick 多次变更只保留发生额之和）。
+    finalizePublicJobsMonth(world, city.id, world.time.tick);
   }
 }
 

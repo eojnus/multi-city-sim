@@ -100,7 +100,23 @@ export interface FoundingCandidate {
   unitCapacity: number;
   /** 按可触达销量需要的设备台数（未按资金裁剪）。 */
   demandUnits: number;
+  /** v1.6 §三：同城同行业最近 foundingHerdMonths 个月的新办企业数（防羊群）。 */
+  recentFoundings?: number;
+  /**
+   * v1.6 §三：同城同类月供给能力 / 月真实需求估计。>1.5 表示产能已明显超过需求，
+   * 再进入只会加剧同行业羊群与价格战。
+   */
+  demandCoverage?: number;
+  /** v1.6 §四.4：每单位产出分摊的设备维护费（进单位毛利/创业评分）。 */
+  unitMaintenanceCost?: number;
 }
+
+/** v1.6 §三：防羊群观察窗口（月）：同城同行业近期新办数量。 */
+export const FOUNDING_HERD_MONTHS = 3;
+/** v1.6 §三：近 FOUNDING_HERD_MONTHS 月同城同行业新办达到该数量即视为羊群风险。 */
+export const FOUNDING_HERD_LIMIT = 3;
+/** v1.6 §三：同城同类月供给能力/月需求超过该倍数视为产能饱和。 */
+export const FOUNDING_SATURATION_COVERAGE = 2;
 
 // ---------------------------------------------------------------- v1.0 评估类型
 
@@ -188,6 +204,12 @@ export interface FoundingAssessment {
     founderEquity: number;
     loanAvailable: number;
     financingGap: number;
+    /** v1.6 §三：近 FOUNDING_HERD_MONTHS 月同城同行业已新办企业数（防羊群）。 */
+    recentFoundings?: number;
+    /** v1.6 §三：同城同类供给能力 / 月需求估计（>2 视为饱和）。 */
+    demandCoverage?: number;
+    /** v1.6 §四.4：每单位产出的设备维护费估计。 */
+    unitMaintenanceCost?: number;
   };
   scaleTiers: FoundingScaleTier[];
   feasibleTier: FoundingScaleTier | null;
@@ -993,6 +1015,21 @@ function evaluateOutput(
     (company) => company.cityId === city.id && company.recipeOutput === output,
   );
   const competitorCapacity = competitors.reduce((sum, company) => sum + Math.max(0, company.capacity), 0);
+  // v1.6 §三：防羊群信号——近期同城同行业新办数、同类近月真实销量与月需求供给比。
+  // 只统计“往期月份”的创办（tick < 当前）：同一 tick 内的多次创办由月度上限与竞争
+  // 份额评分约束，不把本 tick 自己刚办的企业算成羊群证据（否则资源充足的世界会因
+  // “同月连续创办”自我阻断）。
+  const recentFoundings = (world.lifecycle?.foundings ?? []).filter(
+    (record) =>
+      record.cityId === city.id &&
+      record.recipeOutput === output &&
+      record.tick < world.time.tick &&
+      record.tick >= world.time.tick - FOUNDING_HERD_MONTHS,
+  ).length;
+  const peerMonthlySales = recentSales3m(world, city.id, output) / 3;
+  const monthlyDemand = Math.max(0, demand, sold, unmet, peerMonthlySales);
+  const demandCoverage =
+    monthlyDemand > 0.01 ? (competitorCapacity + unitCapacity) / monthlyDemand : 0;
 
   // 1) 售价：相对基准的偏离 + 近期趋势（都是归一化百分点，不直接与需求数量比）。
   const priceScore =
@@ -1003,9 +1040,20 @@ function evaluateOutput(
   const demandScore = clamp(unmetShare * 25, 0, 20) + (sold > 0 ? 3 : 0);
 
   // 3) 竞争：同城竞争者数量与产能份额；没有竞争者时给进入奖励。
+  // v1.6 §三：再加入“产能饱和”与“近期同行业羊群”惩罚——即使缺口占比不低，若同城同类
+  // 产能已超过月需求 2 倍，或近 3 月已新办 ≥3 家，继续进入只会稀释所有人的订单。
   const capacityShare = unitCapacity / Math.max(1e-9, competitorCapacity + unitCapacity);
+  const saturationPenalty =
+    monthlyDemand > 0.01
+      ? clamp((demandCoverage - 1.5) * 10, 0, 10)
+      : 0;
+  const herdPenalty = Math.min(12, recentFoundings * 4);
   const competitionScore = clamp(
-    15 * (1 - capacityShare) - competitors.length * 2 + (competitors.length === 0 ? 10 : 0),
+    15 * (1 - capacityShare) -
+      competitors.length * 2 -
+      saturationPenalty -
+      herdPenalty +
+      (competitors.length === 0 ? 10 : 0),
     -10,
     15,
   );
@@ -1039,15 +1087,27 @@ function evaluateOutput(
     config.intercity.maxMarkup,
   );
   const transportCostPerUnit = inputCostPerUnit * importMarkup;
-  const unitMargin = price - inputCostPerUnit - wagePerUnit - transportCostPerUnit;
+  // v1.6 §四.4：每单位产出分摊的设备维护费 = 单台月维护费(单价×费率) ÷ 单台月产能。
+  // 维护费是持有设备的真实月度支出，必须进单位毛利与创业回报判断。
+  const maintenanceRate = Math.max(0, config.equipment.maintenanceMonthlyRate ?? 0);
+  const unitMaintenanceCost = round2((unitPrice * maintenanceRate) / Math.max(1, unitCapacity));
+  const unitMargin =
+    price - inputCostPerUnit - wagePerUnit - transportCostPerUnit - unitMaintenanceCost;
   const marginRatio = unitMargin / price;
   const costScore = clamp(marginRatio * 50, -25, 20);
 
   // 7) 利润：按“同城竞争者份额”估算可触达销量，再看单位毛利与启动资本的回报。
+  // v1.6 §三：可触达销量不能再把全城缺口整块当成新企业的订单——先按新进入者的
+  // 产能份额分摊；同时考虑“已有同类销量”说明的月需求。
   const targetShare = 1 / (competitors.length + 1);
-  // 可触达销量是“新企业按份额能卖出的量”，可超过单台设备产能（由此决定买几台），
-  // 但受每月最多可购设备数约束，避免在极端未满足需求下估算出无限规模。
-  const estimatedDemand = Math.max(unmet, (demand + sold) * targetShare);
+  const entrantCapacityShare =
+    competitorCapacity + unitCapacity > 0.01
+      ? unitCapacity / (competitorCapacity + unitCapacity)
+      : targetShare;
+  const estimatedDemand = Math.max(
+    unmet * entrantCapacityShare,
+    (demand + sold + peerMonthlySales) * targetShare,
+  );
   const reachableSales = Math.max(
     0,
     Math.min(estimatedDemand, unitCapacity * config.equipment.maxBuyUnitsPerMonth),
@@ -1089,6 +1149,15 @@ function evaluateOutput(
   reasons.push(
     `同城竞争者 ${competitors.length} 家、合计产能 ${round2(competitorCapacity)}，预计可获得 ${round2(targetShare * 100)}% 份额、月销量 ${round2(reachableSales)}`,
   );
+  if (recentFoundings > 0) {
+    reasons.push(
+      `近 ${FOUNDING_HERD_MONTHS} 月同城同行业已新办 ${recentFoundings} 家（羊群惩罚 −${round2(herdPenalty)}），月需求估计 ${round2(monthlyDemand)}、供给/需求 ${demandCoverage > 0 ? round2(demandCoverage).toFixed(2) : '无需求基准'}`,
+    );
+  } else if (monthlyDemand > 0.01) {
+    reasons.push(
+      `月需求估计 ${round2(monthlyDemand)}（成交/缺口/近期销量取大），同城供给/需求 ${round2(demandCoverage).toFixed(2)} 倍${saturationPenalty > 0 ? `（产能饱和惩罚 −${round2(saturationPenalty)}）` : ''}`,
+    );
+  }
   reasons.push(
     `可用${catalog.name} ${equipment.total} 台（本地 ${equipment.local} + 政府 ${equipment.government} + 其他城市 ${equipment.intercity}），本地单价 ${round2(unitPrice)}`,
   );
@@ -1098,7 +1167,7 @@ function evaluateOutput(
       : `原料本地覆盖 ${round2(localCoverage * 100)}%，单位原料成本 ${round2(inputCostPerUnit)}，跨城运输加成 ${round2(importMarkup * 100)}%`,
   );
   reasons.push(
-    `单位毛利 ${round2(unitMargin)}（工资 ${round2(wagePerUnit)}/单位），预计月利润 ${round2(expectedMonthlyProfit)}，启动资本约 ${suggestedCapital.toFixed(0)}`,
+    `单位毛利 ${round2(unitMargin)}（工资 ${round2(wagePerUnit)}/单位，维护费 ${round2(unitMaintenanceCost)}/单位），预计月利润 ${round2(expectedMonthlyProfit)}，启动资本约 ${suggestedCapital.toFixed(0)}`,
   );
 
   return {
@@ -1124,6 +1193,9 @@ function evaluateOutput(
     unitPrice,
     unitCapacity: round2(unitCapacity),
     demandUnits,
+    recentFoundings,
+    demandCoverage: monthlyDemand > 0.01 ? round2(demandCoverage) : 0,
+    unitMaintenanceCost,
   };
 }
 
@@ -1166,9 +1238,39 @@ export function pickFoundingCandidate(
     if (candidate.expectedMonthlyProfit <= 0) continue;
     if (candidate.reachableSales <= 0) continue;
     if (candidate.availableEquipmentUnits <= 0) continue;
+    // v1.6 §三：同行业羊群/饱和时不再进入（理由见 foundingSaturated）。
+    if (
+      (candidate.recentFoundings ?? 0) >= FOUNDING_HERD_LIMIT &&
+      (candidate.demandCoverage ?? 0) > 1
+    ) {
+      continue;
+    }
     return candidate;
   }
   return null;
+}
+
+/**
+ * v1.6 §三：是否已出现同行业羊群/饱和，AI 不应再进入该行业。
+ *
+ * 判定（保守，避免把正常增长误判成羊群）：
+ * - 近 FOUNDING_HERD_MONTHS 月同城同行业已新办 ≥ FOUNDING_HERD_LIMIT 家；
+ * - 且同城同类月供给能力已达月需求 1 倍以上（再进入会摊薄订单）。
+ * 仅用于 AI 选择行业；评分里的饱和/羊群惩罚对所有候选始终生效。
+ */
+export function foundingSaturated(assessment: FoundingAssessment): {
+  saturated: boolean;
+  note: string;
+} {
+  const recent = assessment.metrics.recentFoundings ?? 0;
+  const coverage = assessment.metrics.demandCoverage ?? 0;
+  if (recent >= FOUNDING_HERD_LIMIT && coverage > 1) {
+    return {
+      saturated: true,
+      note: `近 ${FOUNDING_HERD_MONTHS} 月同城同行业已新办 ${recent} 家、供给/需求 ${coverage.toFixed(2)} 倍，暂不继续进入`,
+    };
+  }
+  return { saturated: false, note: '' };
 }
 
 /** 按“需求台数、可负担资金、可购设备、每月上限”裁剪后的启动设备数量（v0.9 兼容 API）。 */
@@ -1346,6 +1448,9 @@ export function assessFounding(
       financingGap: round2(
         Math.max(0, referenceTier.totalCapital - referenceTier.founderEquity - referenceTier.loanPrincipal),
       ),
+      recentFoundings: candidate.recentFoundings ?? 0,
+      demandCoverage: candidate.demandCoverage ?? 0,
+      unitMaintenanceCost: candidate.unitMaintenanceCost ?? 0,
     },
     scaleTiers: tiers,
     feasibleTier,
@@ -1383,6 +1488,8 @@ export function pickFoundingOpportunity(
     if (assessment.score < FOUNDING_MIN_SCORE) continue;
     if (assessment.metrics.payableUnmetDemand + assessment.metrics.recentSales3m <= 0) continue;
     if (!assessment.feasibleTier) continue;
+    // v1.6 §三：避免同行业羊群（近期已密集新办且供给已覆盖需求）。
+    if (foundingSaturated(assessment).saturated) continue;
     return assessment;
   }
   return null;

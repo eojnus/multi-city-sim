@@ -9,8 +9,13 @@ import type { DemoConfig } from '../../data/config';
 import { GOODS, PRODUCTIVITY, RECIPES } from '../../data/demo-data';
 import { clamp, round2 } from '../core/math';
 import { monthlyWageBill } from './company';
+import {
+  companyMonthlyFixedCost,
+  companyMonthlyMaintenance,
+  companyUnitCost,
+} from './cost';
 import { laborCapacity, companyProductivityMultiplier } from '../production/production';
-import { equipmentCapacityFor } from '../equipment/equipment';
+import { equipmentCapacityFor, lockedInitialEquipmentUnits } from '../equipment/equipment';
 import { workforceSkillMultiplier } from '../labor/workforce';
 import { retentionSubsidyPerEmployee } from '../policies/query';
 
@@ -103,7 +108,14 @@ export function materialSupportedOutput(
   }
   if (unitCost <= 0) return Number.POSITIVE_INFINITY;
   const wage = monthlyWageBill(company, config);
-  const ownBudget = Math.max(0, round2(company.cash - wage * config.company.wageReserveMonths));
+  // v1.6 §四.4：设备维护费同样是必须保留的月度固定支出，不能把“留着发工资”的钱
+  // 全部算成可采购原料的预算。
+  const maintenance = companyMonthlyMaintenance(world, company, config);
+  const reserveMonths = config.company.wageReserveMonths;
+  const ownBudget = Math.max(
+    0,
+    round2(company.cash - (wage + maintenance) * reserveMonths),
+  );
   const budget = round2(ownBudget + Math.max(0, workingCapitalRoom));
   return Math.max(0, (inventoryValue + budget) / unitCost);
 }
@@ -191,31 +203,74 @@ export interface DemandShareSignal {
   peers: number;
   /** 分摊给本企业的额外需求 = 全城缺货 × 份额。 */
   extraDemand: number;
-  /** 本月实际纳入计划的吸收量 = 额外需求 × unmetDemandAbsorption。 */
+  /**
+   * v1.6：本城“想买但买不起”（market.unmetFunding）中，按本企业份额与可信转化率
+   * （收入增长/信贷恢复）折算的潜在需求。不是确定订单，只按吸收比例进计划。
+   */
+  fundingOpportunity: number;
+  /**
+   * v1.6：合理降价可形成的销售机会。只对资金缺口部分按价格弹性折算，并要求当前报价
+   * 相对单位成本仍有降价空间（否则降价既亏本也换不来订单）。
+   */
+  priceCutOpportunity: number;
+  /**
+   * v1.6：可达跨城市场。其他城市的可支付缺口 × 本企业全国产能份额 × 距离/运价可达性；
+   * 用于“本城没缺口、但有跨城机会”时不至于完全忽略。
+   */
+  intercityOpportunity: number;
+  /** v1.6：潜在需求合计 = funding + priceCut + intercity（本企业份额，未吸收）。 */
+  latentDemand: number;
+  /** v1.6：本企业可触达需求合计 = extraDemand + latentDemand（未吸收，供计划估算目标库存）。 */
+  reachableDemand: number;
+  /** 本月实际纳入计划的缺货吸收量 = 额外需求 × unmetDemandAbsorption。 */
   absorbed: number;
+  /** v1.6：潜在需求按同一吸收比例纳入计划的量。 */
+  latentAbsorbed: number;
 }
 
-/**
- * 把城市缺货信号按“同城同产出”企业的合理份额分摊给本企业。
- *
- * 份额首版 = 50% 设备产能份额 + 50% 近 N 月销量份额；没有销量数据时只用产能份额。
- * 由于 Σ产能份额 = 1、Σ销量份额 = 1（无销量企业销量份额记 0），Σ份额 ≤ 1，
- * 因此全城缺口不会被每家企业重复计入。销量份额用近 N 月实际销量（含出口）估计。
- */
-export function companyDemandShare(
-  world: WorldState,
-  company: Company,
-  config: DemoConfig,
-): DemandShareSignal {
-  const empty: DemandShareSignal = {
+/** 城市间距离（与 markets/intercity 的演示口径一致）。 */
+function intercityKm(a: WorldState['cities'][number], b: WorldState['cities'][number]): number {
+  return Math.sqrt((a.region.x - b.region.x) ** 2 + (a.region.y - b.region.y) ** 2) * 0.35;
+}
+
+/** 空的需求信号（城市不存在/无同城同类企业时使用）。 */
+export function emptyDemandSignal(): DemandShareSignal {
+  return {
     cityShortage: 0,
     share: 0,
     capacityShare: 0,
     salesShare: 0,
     peers: 0,
     extraDemand: 0,
+    fundingOpportunity: 0,
+    priceCutOpportunity: 0,
+    intercityOpportunity: 0,
+    latentDemand: 0,
+    reachableDemand: 0,
     absorbed: 0,
+    latentAbsorbed: 0,
   };
+}
+
+/**
+ * 把城市缺货信号按“同城同产出”企业的合理份额分摊给本企业。
+ *
+ * 份额 = 50% 设备产能份额 + 50% 近 N 月销量份额；没有销量数据时只用产能份额。
+ * 由于 Σ产能份额 = 1、Σ销量份额 = 1（无销量企业销量份额记 0），Σ份额 ≤ 1，
+ * 因此全城缺口不会被每家企业重复计入。销量份额用近 N 月实际销量（含出口）估计。
+ *
+ * v1.6：除“有支付能力的缺货”外，另外估计三个不会被重复分配的需求来源：
+ * - 资金缺口（unmetFunding）× 份额 × fundingDemandShare（收入增长/信贷恢复能转化的部分）；
+ * - 降价机会：资金缺口 × 份额 × priceCutDemandShare × 当前报价的可降价空间；
+ * - 跨城可达需求：其他城市可支付缺口 × 本企业全国产能份额 × 距离运价可达性 × 权重。
+ * 三者全部是“潜在需求”，以吸收比例进入计划，且产能/劳动上限仍在后面生效。
+ */
+export function companyDemandShare(
+  world: WorldState,
+  company: Company,
+  config: DemoConfig,
+): DemandShareSignal {
+  const empty = emptyDemandSignal();
   const city = world.cities.find((entry) => entry.id === company.cityId);
   if (!city) return empty;
   const planCfg = config.production.plan;
@@ -242,6 +297,56 @@ export function companyDemandShare(
     1,
   );
   const extraDemand = round2(cityShortage * share);
+
+  // ---- v1.6 潜在需求 1：资金缺口（想买但买不起） ----
+  const market = city.market[company.recipeOutput];
+  const unmetFunding = Math.max(0, market?.unmetFunding ?? 0);
+  const fundingOpportunity = round2(
+    unmetFunding * share * clamp(planCfg.fundingDemandShare, 0, 1),
+  );
+
+  // ---- v1.6 潜在需求 2：合理降价可形成的销售机会 ----
+  const price = Math.max(0.01, market?.price ?? 0.01);
+  const quoted = Math.max(0.01, round2(price * (company.priceFactor > 0 ? company.priceFactor : 1)));
+  const unit = companyUnitCost(world, company, config);
+  const costFloor = unit.total > 0.01 ? unit.total * (1 + config.companyAi.pricing.minUnitMargin) : 0;
+  const discountRoom = quoted > 0 ? clamp((quoted - costFloor) / quoted, 0, 0.5) : 0;
+  const priceCutOpportunity = round2(
+    unmetFunding * share * clamp(planCfg.priceCutDemandShare, 0, 1) * (discountRoom / 0.1),
+  );
+
+  // ---- v1.6 潜在需求 3：可达跨城市场 ----
+  let intercityOpportunity = 0;
+  const producers = world.companies.filter((entry) => entry.recipeOutput === company.recipeOutput);
+  const nationalCapacity = producers.reduce(
+    (total, entry) => total + Math.max(0, equipmentLimitFor(world, entry, config)),
+    0,
+  );
+  const nationalShare =
+    nationalCapacity > 0.01
+      ? companyCapacity / nationalCapacity
+      : 1 / Math.max(1, producers.length);
+  const maxMarkup = Math.max(1e-9, config.intercity.maxMarkup);
+  for (const other of world.cities) {
+    if (other.id === city.id) continue;
+    const otherMarket = other.market[company.recipeOutput];
+    const otherShortage = payableShortageFromMarket(otherMarket, company.recipeOutput);
+    if (otherShortage <= 0.01) continue;
+    const km = intercityKm(city, other);
+    const markup = clamp(
+      km * config.intercity.transportMarkupPerKm,
+      config.intercity.minMarkup,
+      config.intercity.maxMarkup,
+    );
+    // 距离越远运价越高、越不可达（0–1）。
+    const reachability = clamp(1 - markup / maxMarkup, 0.1, 1);
+    intercityOpportunity +=
+      otherShortage * nationalShare * reachability * clamp(planCfg.intercityDemandWeight, 0, 1);
+  }
+  intercityOpportunity = round2(intercityOpportunity);
+
+  const latentDemand = round2(fundingOpportunity + priceCutOpportunity + intercityOpportunity);
+  const reachableDemand = round2(extraDemand + latentDemand);
   return {
     cityShortage,
     share,
@@ -249,7 +354,13 @@ export function companyDemandShare(
     salesShare,
     peers: peers.length,
     extraDemand,
+    fundingOpportunity,
+    priceCutOpportunity,
+    intercityOpportunity,
+    latentDemand,
+    reachableDemand,
     absorbed: round2(extraDemand * planCfg.unmetDemandAbsorption),
+    latentAbsorbed: round2(latentDemand * planCfg.unmetDemandAbsorption),
   };
 }
 
@@ -313,10 +424,15 @@ export function assessExpansion(
         : 0;
 
   const wageBill = monthlyWageBill(company, config);
+  // v1.6 §四.4：维护费是持有设备的真实月度支出，扩产保留资金必须同时覆盖
+  // “维护费 × 保留月数”，否则会高估可用于买设备的现金。
+  const maintenanceBill = companyMonthlyMaintenance(world, company, config);
   const debt = Math.max(0, company.debt ?? 0);
   const interest = Math.max(0, company.lastMonth?.interestPaid ?? 0);
   const debtService = round2(interest + debt / Math.max(1, planCfg.expansionDebtMonths));
-  const reserve = round2(wageBill * planCfg.expansionReserveWageMonths + debtService);
+  const reserve = round2(
+    (wageBill + maintenanceBill) * planCfg.expansionReserveWageMonths + debtService,
+  );
   const cashAfterReserve = round2(company.cash - reserve);
 
   const utilizationOk =
@@ -384,6 +500,122 @@ export function assessExpansion(
   };
 }
 
+export interface EquipmentSurplusAssessment {
+  eligible: boolean;
+  /** 持有设备台数（含锁定期内的实物出资）。 */
+  ownedUnits: number;
+  /** 可出售台数（扣除实物出资锁定）。 */
+  sellableUnits: number;
+  /** 建议挂单出售的台数（0 表示不出售）。 */
+  unitsToSell: number;
+  lastUtilization: number;
+  plannedUtilization: number;
+  /** 现金可支撑的月固定成本数（工资+维护费+偿债）。 */
+  cashMonths: number;
+  reasons: string[];
+}
+
+/**
+ * v1.6 §三：判断企业是否应出售“多余设备”。
+ *
+ * 任务书要求企业可合理减产/裁员/出售多余设备。判定很保守，只在同时满足时触发：
+ * - 设备长期闲置：上月利用率 < 30% 且本月计划利用率 < 40%；
+ * - 经营压力：现金不足 1.2 个月固定成本，或成品库存超过 stuckInventoryMonths；
+ * - 本城无真实可支付缺货（有需求时优先增产而不是卖设备）；
+ * - 有可出售台数（实物出资锁定期内设备不可卖，由 lockedInitialEquipmentUnits 扣除）。
+ * 出售台数最多为可售台数的一半，且按闲置程度折算，避免一次性卖掉全部资产。
+ * 具体挂单由 planning 调用 equipment.listUsedEquipment 执行（真实买家成交才转移资金）。
+ */
+export function assessEquipmentSurplus(
+  world: WorldState,
+  company: Company,
+  config: DemoConfig,
+): EquipmentSurplusAssessment {
+  const planCfg = config.production.plan;
+  const plan = company.productionPlan;
+  const equipmentLimit = Math.max(
+    0,
+    plan?.equipmentLimit ?? equipmentLimitFor(world, company, config),
+  );
+  const ownedUnits =
+    Math.max(0, company.equipment?.farm ?? 0) +
+    Math.max(0, company.equipment?.industry ?? 0) +
+    Math.max(0, company.equipment?.energy ?? 0);
+  // v1.4 §4 防套利：创办实物出资的锁定期内，该类设备整体不得出售/转让。
+  // 既有守恒测试（tests/v14-conservation.test.ts）要求锁定期内“该类台数只增不减”，
+  // 因此这里保守处理：只要锁定期未满，就不出售任何设备（本 AI 卖的就是本行业设备，
+  // 与实物出资类别相同），而不是只扣除 locked 台数后卖其余。
+  const grant = company.initialEquipment;
+  const grantLocked = !!grant && world.time.tick < grant.lockUntilTick;
+  const locked = (['farm', 'industry', 'energy'] as const).reduce(
+    (sum, kind) => sum + lockedInitialEquipmentUnits(company, world.time.tick, kind),
+    0,
+  );
+  const sellableUnits = grantLocked ? 0 : Math.max(0, Math.floor(ownedUnits - locked));
+  const lastUtilization =
+    equipmentLimit > 0.01
+      ? Math.max(0, (company.previousMonth?.produced ?? 0) / equipmentLimit)
+      : 0;
+  const plannedUtilization =
+    equipmentLimit > 0.01 ? Math.max(0, (plan?.plannedOutput ?? 0) / equipmentLimit) : 0;
+  const fixed = companyMonthlyFixedCost(world, company, config);
+  const cashMonths = fixed.total > 0 ? company.cash / fixed.total : Number.POSITIVE_INFINITY;
+  const salesReference = Math.max(0, plan?.salesReference ?? 0);
+  const stock = Math.max(0, company.inventory[company.recipeOutput] ?? 0);
+  const overstocked =
+    salesReference > 0.01 && stock > planCfg.stuckInventoryMonths * salesReference;
+  const city = world.cities.find((entry) => entry.id === company.cityId);
+  const shortage = city ? cityShortageFor(world, city, company.recipeOutput) : 0;
+
+  const idle =
+    lastUtilization < 0.3 && plannedUtilization < 0.4;
+  const pressured = cashMonths < 1.2 || overstocked;
+  const eligible =
+    ownedUnits > 0.01 &&
+    sellableUnits > 0 &&
+    idle &&
+    pressured &&
+    shortage <= IDLE_DEMAND_EPSILON;
+  const idleRatio = Math.max(0, 1 - Math.max(plannedUtilization, 0.25));
+  const unitsToSell = eligible
+    ? Math.max(1, Math.min(Math.floor(sellableUnits / 2), Math.floor(sellableUnits * idleRatio)))
+    : 0;
+
+  const reasons: string[] = [];
+  if (eligible) {
+    reasons.push(
+      `设备长期闲置（上月利用率 ${(lastUtilization * 100).toFixed(1)}%、本月计划 ${(plannedUtilization * 100).toFixed(1)}%），现金约 ${Number.isFinite(cashMonths) ? cashMonths.toFixed(2) : '∞'} 个月固定成本${overstocked ? '、成品积压' : ''}，且本城无真实缺货：出售 ${unitsToSell} 台多余设备（可售 ${sellableUnits}，锁定 ${locked} 台为实物出资）`,
+    );
+  } else if (ownedUnits > 0.01) {
+    if (grantLocked) {
+      reasons.push(
+        `创办者实物出资设备仍在锁定期内（至第 ${grant!.lockUntilTick} 期）：不得出售/转让，暂不出售设备`,
+      );
+    } else if (shortage > IDLE_DEMAND_EPSILON) {
+      reasons.push(`本城存在可支付缺货 ${shortage.toFixed(2)}：优先用现有设备增产，不出售设备`);
+    } else if (!idle) {
+      reasons.push(
+        `设备利用率（上月 ${(lastUtilization * 100).toFixed(1)}% / 本月计划 ${(plannedUtilization * 100).toFixed(1)}%）仍高于出售阈值，暂不出售设备`,
+      );
+    } else if (!pressured) {
+      reasons.push(`现金与库存压力不足，设备闲置但暂不出售（保留恢复产能）`);
+    }
+  }
+  return {
+    eligible,
+    ownedUnits,
+    sellableUnits,
+    unitsToSell,
+    lastUtilization,
+    plannedUtilization,
+    cashMonths,
+    reasons,
+  };
+}
+
+/** 判定“有真实可支付缺货”的容差。 */
+const IDLE_DEMAND_EPSILON = 0.01;
+
 /**
  * 重算并写回企业生产计划。同一 tick 内重复调用是幂等的（直接返回已有计划），
  * 避免同一月内多次平滑叠加；跨月后第一次调用会维护销量历史。
@@ -425,24 +657,33 @@ export function recomputeProductionPlan(
   const stock = Math.max(0, company.inventory[outputId] ?? 0);
   // v1.0：有支付能力但缺货的未满足需求 → 按本企业可触达份额吸收 20% 进计划。
   // v1.1：改为有效需求口径（不使用 producerRequired / unmetFunding）。
-  const demandSignal = city
-    ? companyDemandShare(world, company, config)
-    : { cityShortage: 0, share: 0, absorbed: 0, extraDemand: 0, capacityShare: 0, salesShare: 0, peers: 0 };
+  // v1.6：在缺货之外再估计“资金缺口/降价机会/可达跨城”三类潜在需求（各自按份额，
+  // 不把居民买不起的数量当确定订单，也不完全忽略）。
+  const demandSignal = city ? companyDemandShare(world, company, config) : emptyDemandSignal();
   // v1.1：过去零销量但存在真实有效缺货时，目标库存也要参考缺货需求，
   // 否则 salesReference=0 → targetInventory=0，计划会被“历史零销量”锁死在低位。
-  const demandReference = round2(Math.max(salesReference, demandSignal.extraDemand));
+  const demandReference = round2(Math.max(salesReference, demandSignal.reachableDemand));
   const targetInventory = round2(demandReference * planCfg.targetInventoryMonths);
-  let desired = round2(salesReference + demandSignal.absorbed + (targetInventory - stock));
+  let desired = round2(
+    salesReference +
+      demandSignal.absorbed +
+      demandSignal.latentAbsorbed +
+      (targetInventory - stock),
+  );
 
   const laborLimit = city ? laborCapacity(company, city, config, world) : 0;
   const materialLimit = materialSupportedOutput(world, company, config, workingCapitalRoom);
   const wageBill = monthlyWageBill(company, config);
+  // v1.6 §四.4：现金能撑几个月按“工资 + 设备维护费”这组月度固定支出计算，
+  // 否则维护费会被 AI 当成不存在的支出，继续满负荷分红/投资。
+  const maintenanceBill = companyMonthlyMaintenance(world, company, config);
   // 稳岗补贴由财政分担在岗员工工资：计算现金压力时按补贴后净工资账单，避免补贴期间仍被迫裁员。
   const retentionSubsidy = city
     ? retentionSubsidyPerEmployee(world, city.id, company.wageRate, config)
     : 0;
   const netWageBill = Math.max(0, wageBill - retentionSubsidy * company.employees);
-  const cashMonths = netWageBill > 0 ? company.cash / netWageBill : Number.POSITIVE_INFINITY;
+  const monthlyFixed = round2(netWageBill + maintenanceBill);
+  const cashMonths = monthlyFixed > 0 ? company.cash / monthlyFixed : Number.POSITIVE_INFINITY;
 
   // ---- 3) 紧急下调条件：库存严重积压 / 现金不足 / 原料与资金仅支撑很低产量 ----
   const stuck = salesReference > 0.01 && stock > planCfg.stuckInventoryMonths * salesReference;
@@ -478,7 +719,7 @@ export function recomputeProductionPlan(
   // 销售参考 109,639、计划 88,926、员工从 1,104 降到 249）。此时允许直接恢复到
   // min(desired, 设备/劳动/原料上限)，目标库存与库存积压仍由 desired 约束。
   const priorSalesReference = existing?.salesReference ?? 0;
-  const cashBufferMonths = netWageBill > 0 ? company.cash / netWageBill : Number.POSITIVE_INFINITY;
+  const cashBufferMonths = monthlyFixed > 0 ? company.cash / monthlyFixed : Number.POSITIVE_INFINITY;
   const recentProfit = (company.recentProfits ?? []).reduce((total, entry) => total + entry, 0);
   const financiallyAble =
     !cashTight && (recentProfit > 0 || cashBufferMonths >= config.company.wageReserveMonths * 3);
@@ -509,11 +750,34 @@ export function recomputeProductionPlan(
     desired > recoveryCeiling + 0.01 &&
     recoveryCap > recoveryCeiling + 0.01 &&
     financiallyAble;
+  // v1.6 §三：设备尚有余量 + 真实可支付缺货 + 有盈利时的“需求驱动增产”通道。
+  // 任务书要求：有盈利、有可触达需求、设备有余量的企业，优先用现有设备增产（采购真实
+  // 原料 → 招聘 → 增产），而不是继续按 ±20% 爬坡、更不是先买新设备。
+  // 与 canReaccelerate 的区别：不要求“需求已持续高于上期计划”，只要求真实缺货且设备未
+  // 跑满；但仍要求“上月/近期有盈利”（排除僵尸与纯缺货投机）且现金不紧张。
+  const lastUtilization =
+    equipmentLimit > 0.01
+      ? Math.max(0, (company.previousMonth?.produced ?? 0) / equipmentLimit)
+      : 0;
+  const spareEquipment = equipmentLimit > 0.01 && lastUtilization < planCfg.demandRampUtilization;
+  const profitableNow =
+    (company.previousMonth?.profit ?? 0) > 0 || (company.recentProfits ?? []).some((entry) => entry > 0);
+  const demandRamp =
+    !emergency &&
+    spareEquipment &&
+    demandSignal.extraDemand > 0.01 &&
+    profitableNow &&
+    financiallyAble &&
+    desired > base * (1 + planCfg.maxDownAdjust) + 0.01;
   if (base > 0) {
     const lower = base * (1 - (emergency ? planCfg.emergencyDownAdjust : planCfg.maxDownAdjust));
     const upper = recoveryCeiling;
     const floor = recoveringFromZeroSales ? Math.min(lower, desired) : lower;
-    smoothed = canReaccelerate ? Math.min(desired, recoveryCap) : clamp(desired, floor, upper);
+    smoothed = canReaccelerate
+      ? Math.min(desired, recoveryCap)
+      : demandRamp
+        ? Math.min(desired, recoveryCap)
+        : clamp(desired, floor, upper);
   } else {
     smoothed = desired;
   }
@@ -532,9 +796,10 @@ export function recomputeProductionPlan(
   const plannedOutput = round2(Math.max(0, Math.min(intended, laborLimit)));
   // v1.4 §6.2：恢复通道下，岗位需求按“需求可支撑的产出”而不是被平滑限速的本月计划推导，
   // 否则企业在爬坡期会因 plannedJobs < 现有人数而持续裁员，劳动产能反而缩小。
-  const jobOutputTarget = canReaccelerate
-    ? Math.max(intended, Math.min(desired, equipmentLimit))
-    : intended;
+  const jobOutputTarget =
+    canReaccelerate || demandRamp
+      ? Math.max(intended, Math.min(desired, equipmentLimit))
+      : intended;
   const rawPlannedJobs =
     laborLimit > 0 && company.employees > 0
       ? Math.max(
@@ -602,6 +867,16 @@ export function recomputeProductionPlan(
       `近 ${historyMonths} 月无实际成交，但存在 ${demandSignal.extraDemand.toFixed(2)} 的有效缺货份额：按缺货信号恢复计划，不因历史零销量锁死（上限仍为 +${(planCfg.maxUpAdjust * 100).toFixed(0)}%）`,
     );
   }
+  if (demandSignal.latentDemand > 0.01) {
+    reasons.push(
+      `潜在需求 ${demandSignal.latentDemand.toFixed(2)}（资金缺口折算 ${demandSignal.fundingOpportunity.toFixed(2)} + 降价机会 ${demandSignal.priceCutOpportunity.toFixed(2)} + 可达跨城 ${demandSignal.intercityOpportunity.toFixed(2)}）：只按 ${(planCfg.unmetDemandAbsorption * 100).toFixed(0)}% 作为机会吸收，不当确定订单`,
+    );
+  }
+  if (demandRamp) {
+    reasons.push(
+      `有盈利且有本城可支付缺货 ${demandSignal.extraDemand.toFixed(2)}，上月设备利用率 ${(lastUtilization * 100).toFixed(1)}% 尚有余量（<${(planCfg.demandRampUtilization * 100).toFixed(0)}%）：优先用现有设备增产至 ${smoothed.toFixed(2)}（劳动/原料不足时招工与采购原料，不靠买新设备）`,
+    );
+  }
   if (canReaccelerate) {
     reasons.push(
       `需求持续高于上期限速（上期计划 ${base.toFixed(2)} / 上期销售参考 ${priorSalesReference.toFixed(2)}）：本月按需求恢复至 ${smoothed.toFixed(2)}（设备上限 ${equipmentLimit.toFixed(2)}、劳动上限 ${laborLimit.toFixed(2)}、原料可支撑 ${Number.isFinite(materialLimit) ? materialLimit.toFixed(2) : '不受限'}），不再受 +${(planCfg.maxUpAdjust * 100).toFixed(0)}% 平滑压制`,
@@ -629,7 +904,7 @@ export function recomputeProductionPlan(
   if (stuck) reasons.push(`成品库存超过 ${planCfg.stuckInventoryMonths} 个月销量，紧急下调`);
   if (cashTight)
     reasons.push(
-      `现金仅够 ${Number.isFinite(cashMonths) ? cashMonths.toFixed(2) : '∞'} 个月工资，紧急下调`,
+      `现金仅够 ${Number.isFinite(cashMonths) ? cashMonths.toFixed(2) : '∞'} 个月工资+维护费，紧急下调`,
     );
   if (materialTight) reasons.push('原料或采购资金不足，紧急下调');
   if (plannedOutput < intended - 0.01) {
@@ -650,6 +925,10 @@ export function recomputeProductionPlan(
     plannedJobs,
     emergency,
     reasons,
+    // v1.6：需求估计留痕（可触达需求/潜在机会/维护费），供 AI 决策、界面与测试读取。
+    reachableDemand: demandSignal.reachableDemand,
+    latentDemand: demandSignal.latentDemand,
+    maintenanceCost: maintenanceBill,
   };
   company.productionPlan = plan;
   // 岗位需求由计划产量推出（供招聘/裁员使用），不再绑定历史产能。

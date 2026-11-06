@@ -9,6 +9,10 @@ import { requestCompanyWorkingCapital } from '../management/financing';
 import { distributeDividend, playerTotalShares } from '../securities/securities';
 import { accrueDividendTax } from '../government/taxes';
 import { ensureInventoryCost } from './inventory-cost';
+import {
+  maintenanceArrearsOf,
+  settleCompanyMaintenanceForCompany,
+} from '../equipment/maintenance';
 
 export interface FinanceResult {
   /** 居民投资实体本次实际收到的股息总额（按城市）。 */
@@ -167,7 +171,15 @@ export function settleCompanyFinance(
     stats.wageArrears = arrears;
     totalArrears += arrears;
 
-    // v1.3 §3：利润按“权责发生制”口径——营收 − 已售存货成本（COGS）− 期间费用（工资）。
+    // v1.6 §四：设备月度维护费（独立期间费用，收款方为模拟范围外设备维护服务商）。
+    // - 台数与单价取月初快照（D1）：当月买入下月起计费，当月卖出/挂单/返还/破产仍计当月；
+    // - 现金不足先按既有借款规则合法融资，仍不足记欠付（company.maintenanceArrears）；
+    // - 应计全额（已付 + 欠付）进税前利润，现金支付进经营现金流；不资本化、不重复扣款。
+    const maintenance = settleCompanyMaintenanceForCompany(world, config, company, log);
+    const maintenanceDue = round2(maintenance.due);
+    const maintenanceCashOut = round2(maintenance.paidToCurrent + maintenance.arrearsRepaid);
+
+    // v1.3 §3：利润按“权责发生制”口径——营收 − 已售存货成本（COGS）− 期间费用（工资、设备维护费）。
     // 采购支出先进入存货资产（Company.inventoryCost），只有被销售的存货才结转 COGS；
     // 未售成品留在期末存货，不再像旧口径那样把本月采购直接费用化（避免采购/消耗重复计成本）。
     // 旧存档/旧夹具未记录 cogs 时回退到 inputCost，保持既有测试与旧档可读。
@@ -176,7 +188,7 @@ export function settleCompanyFinance(
     const periodCogs = stats.cogs ?? stats.inputCost;
     const periodRefundGain = round2(Math.max(0, stats.refundGain ?? 0));
     const preTaxProfit = round2(
-      stats.revenue - periodCogs - paidWages + periodRefundGain,
+      stats.revenue - periodCogs - paidWages - maintenanceDue + periodRefundGain,
     );
     // 使用企业所在城市的有效企业税率：政策调整只影响该城市企业。
     const corporateTaxRate = clamp(city.corporateTaxRate, 0, 1);
@@ -212,9 +224,21 @@ export function settleCompanyFinance(
     // 旧口径只留 0.5 个月工资，导致盈利企业分红后现金低于下月采购/工资所需，
     // 食品链因此在 t12–t13 出现“有利润却买不起原料 → 停产 → 倒闭”的死锁。
     const reserve = companyDividendWorkingCapitalReserve(world, config, company);
-    const dividendPaid = round2(
-      Math.min(company.cash, dividendOwed, Math.max(0, company.cash - reserve)),
-    );
+    // v1.6 §四：存在未付设备维护费时不得分红——服务商是企业的真实债权人，
+    // 债权未清前向股东分配等于用未付账单分红（规则可配，默认开启）。
+    const maintenanceArrears = maintenanceArrearsOf(company);
+    const dividendsBlockedByArrears =
+      (config.equipment.maintenanceArrearsBlocksDividends ?? true) && maintenanceArrears > 0.005;
+    const dividendPaid = dividendsBlockedByArrears
+      ? 0
+      : round2(Math.min(company.cash, dividendOwed, Math.max(0, company.cash - reserve)));
+    if (dividendsBlockedByArrears && dividendOwed > 0 && company.cash > 0) {
+      log.push({
+        tick: world.time.tick,
+        kind: 'warning',
+        message: `${company.name} 存在未付设备维护费 ${maintenanceArrears.toFixed(0)}，本月不分红（计划分红 ${dividendOwed.toFixed(0)}）；服务商债权优先于股东分配。`,
+      });
+    }
 
     // v0.8 股息税：玩家与居民投资实体按实际分红代扣 10%（企业与政府股东首版不征）。
     // 在 distributeDividend 前记录投资实体的当月累计，按增量得到各实体实际所得；
@@ -330,12 +354,14 @@ export function settleCompanyFinance(
     company.recentProfits = [...company.recentProfits, stats.profit].slice(-bonusWindow);
 
     // v1.3 §3：经营现金流与会计利润分开口径（纯现金收支，不含存货与应收应付的权责发生调整）：
-    // 销售回款 − 采购现金支出 − 实发工资（含奖金）− 利息 − 企业所得税。
+    // 销售回款 − 采购现金支出 − 实发工资（含奖金）− 设备维护费 − 利息 − 企业所得税。
     // 采购支出在这里仍以 inputCost（现金制）出现，不进入利润；利润只扣 COGS。
+    // v1.6 §四：维护费现金流出 = 本月维护费已付 + 偿还以前月份欠款（后者只冲负债，不重复进利润）。
     stats.operatingCashFlow = round2(
       stats.revenue -
         stats.inputCost -
         stats.wagesPaid -
+        maintenanceCashOut -
         stats.interestPaid -
         stats.corporateTax,
     );

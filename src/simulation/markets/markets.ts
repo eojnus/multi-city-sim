@@ -1,6 +1,7 @@
 import type {
   City,
   Company,
+  CompanyMonthlyStats,
   GoodId,
   MarketState,
   WorldState,
@@ -380,6 +381,64 @@ export function applyConsumerDemand(
   return result;
 }
 
+/** 中位数；空数组返回 null。 */
+function medianOf(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 0) {
+    const left = sorted[middle - 1] ?? 0;
+    const right = sorted[middle] ?? 0;
+    return (left + right) / 2;
+  }
+  return sorted[middle] ?? null;
+}
+
+/**
+ * v1.6 §二：城市某商品的锚价（长期参考价）。
+ *
+ * 锚价 = clamp(上月单位生产成本中位数 × costAnchorFactor, basePrice, basePrice × costAnchorMaxFactor)。
+ * 单位生产成本 = (COGS + 工资 + 设备维护费) ÷ 上月成交单位数，取本城该商品生产者中位数；
+ * 没有真实生产数据时锚价就是基础价值。这样真实成本长期上升可以推高锚价，
+ * 价格不会被迫长期低于成本；同时锚价上限防止异常成本把价格推飞。
+ */
+export function priceAnchor(
+  world: WorldState,
+  cityId: string,
+  goodId: GoodId,
+  basePrice: number,
+  config: DemoConfig,
+): number {
+  const unitCosts: number[] = [];
+  for (const company of world.companies) {
+    if (company.cityId !== cityId || company.recipeOutput !== goodId) continue;
+    const prev = company.previousMonth;
+    if (!prev || prev.sold <= 0) continue;
+    // 维护费字段由 v1.6 §四 维护费模块写入；旧夹具没有该字段时按 0 处理。
+    const maintenancePaid = (prev as CompanyMonthlyStats & { maintenancePaid?: number })
+      .maintenancePaid;
+    const cost = (prev.cogs ?? prev.inputCost ?? 0) + prev.wagesPaid + (maintenancePaid ?? 0);
+    if (!(cost > 0)) continue;
+    unitCosts.push(cost / prev.sold);
+  }
+  const medianCost = medianOf(unitCosts);
+  if (medianCost === null) return basePrice;
+  return clamp(
+    medianCost * config.market.costAnchorFactor,
+    basePrice,
+    basePrice * config.market.costAnchorMaxFactor,
+  );
+}
+
+/** 本城本月该商品的可售卖家数（竞争程度）。 */
+function localSellerCount(world: WorldState, cityId: string, goodId: GoodId): number {
+  let count = 0;
+  for (const company of world.companies) {
+    if (company.cityId === cityId && offeredStock(company, goodId) > 1e-9) count += 1;
+  }
+  return count;
+}
+
 export function finalizeMarkets(
   world: WorldState,
   ledgers: WorldLedgers,
@@ -397,20 +456,42 @@ export function finalizeMarkets(
       const previous = city.market[goodId];
       const oldPrice = previous?.price ?? good.basePrice;
       const closingStock = round2(sumCityStock(world, city.id, goodId));
+      const market = config.market;
 
-      let change = 0;
-      if (ledger.demand > 0.01) {
-        const ratio = (ledger.demand - ledger.sold) / Math.max(ledger.demand, 1);
-        change += clamp(ratio * config.market.priceAdjustSpeed, -config.market.maxMonthlyChange, config.market.maxMonthlyChange);
+      // 缺口只算“真的缺货”：unmetDemand 已由跨城进口冲销（本地成交 + 进口都没补上的部分），
+      // 居民买不起的 unmetFunding 不在 demand 里，不会推高价格。
+      const shortageRatio =
+        ledger.demand > 1e-6 ? clamp(Math.max(0, ledger.unmetDemand) / ledger.demand, 0, 1) : 0;
+      // 过剩用“成交覆盖量”（本地成交 + 跨城进口）衡量，而不是只看本地成交。
+      const coverageQty = Math.max(1, ledger.sold + ledger.intercityImported);
+      const surplusRatio = clamp(
+        Math.max(0, closingStock - coverageQty * market.stockSurplusThreshold) / coverageQty,
+        0,
+        2,
+      );
+      const anchor = priceAnchor(world, city.id, goodId, good.basePrice, config);
+      const priceForChange = oldPrice > 1e-9 ? oldPrice : good.basePrice;
+      const premium = clamp(priceForChange / Math.max(0.01, anchor) - 1, 0, 1);
+      const sellerCount = localSellerCount(world, city.id, goodId);
+
+      let change = shortageRatio * market.shortageRiseSpeed;
+      change -= Math.min(surplusRatio * market.surplusFallSpeed, market.maxMonthlyChange);
+      if (sellerCount > 1 && premium > 0) {
+        change -=
+          clamp((sellerCount - 1) / 6, 0, 1) * premium * market.competitionFallSpeed;
       }
-      if (closingStock > Math.max(1, ledger.sold) * config.market.stockSurplusThreshold) {
-        change -= config.market.stockDiscount;
+      const deviation = anchor / Math.max(0.01, priceForChange) - 1;
+      // 高于锚价时向下回归；低于锚价时只有存在真实需求或成本压力才向上回归。
+      if (deviation < 0 || ledger.demand > 0 || shortageRatio > 0) {
+        change += clamp(deviation, -1, 1) * market.reversionSpeed;
       }
+      change = clamp(change, -market.maxMonthlyChange, market.maxMonthlyChange);
+
       const newPrice = round2(
         clamp(
-          oldPrice * (1 + change),
-          good.basePrice * config.market.minPriceFactor,
-          good.basePrice * config.market.maxPriceFactor,
+          priceForChange * (1 + change),
+          good.basePrice * market.minPriceFactor,
+          good.basePrice * market.maxPriceFactor,
         ),
       );
 

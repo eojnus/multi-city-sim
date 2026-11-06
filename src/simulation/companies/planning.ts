@@ -3,8 +3,13 @@ import type { DemoConfig } from '../../data/config';
 import { round2 } from '../core/math';
 import { companyStyleLabel, planCompanyDecision } from './ai/strategy';
 import { expandCompanyCapacity } from './lifecycle/lifecycle';
-import { equipmentKindForSector, equipmentUnitPrice } from '../equipment/equipment';
-import { recomputeProductionPlan, assessExpansion, cityShortageFor } from './production-plan';
+import { equipmentKindForSector, equipmentUnitPrice, listUsedEquipment } from '../equipment/equipment';
+import {
+  recomputeProductionPlan,
+  assessExpansion,
+  assessEquipmentSurplus,
+  cityShortageFor,
+} from './production-plan';
 import { currentStyle } from '../management/manager-pool';
 import { planPlayerOperatedCompany } from '../management/operations';
 import { legalWorkingCapitalRoom } from '../management/financing';
@@ -92,6 +97,33 @@ export function planCompanies(
       }
     } else if (decision.investment > 0) {
       decision.plan.investment = 0;
+    }
+
+    // ---- v1.6 §三：设备不是瓶颈且长期闲置时，合理出售多余设备（真实挂单，买家成交才有资金） ----
+    // 只在“设备闲置 + 现金/库存压力 + 本城无真实缺货”时触发；实物出资锁定期内的设备
+    // 由锁定期规则自动排除。已有挂单时不重复挂，避免同一批设备反复挂牌。
+    const surplus = assessEquipmentSurplus(world, company, config);
+    const alreadyListed = world.equipmentMarket.offers.some(
+      (offer) => offer.companyId === company.id,
+    );
+    if (surplus.eligible && surplus.unitsToSell > 0 && !alreadyListed) {
+      const sale = listUsedEquipment(
+        world,
+        company,
+        equipmentKindForSector(company.sector, config),
+        surplus.unitsToSell,
+        config,
+        world.time.tick,
+      );
+      if (sale.ok) {
+        decision.plan.reasons.push(surplus.reasons[0] ?? '出售多余设备');
+        company.ai.lastDecision = decision.plan.reasons.join('；');
+        log.push({
+          tick: world.time.tick,
+          kind: 'production',
+          message: `${company.name} ${surplus.reasons[0] ?? '出售多余设备'}（委托 ${sale.offerId ?? ''}）。`,
+        });
+      }
     }
 
     const jobsChanged =

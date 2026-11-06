@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const SAVE_SLOT_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
-const MAX_SAVE_BYTES = 8 * 1024 * 1024;
+// v1.6：与渲染层 saveBridge.MAX_SAVE_LENGTH 保持一致（15 个月实测 12.09MB，旧 8MB 上限会误拒）。
+const MAX_SAVE_BYTES = 64 * 1024 * 1024;
 
 export function registerSaveHandlers(savesDirectory: () => string): void {
   const slotFile = (slot: string): string => {
@@ -48,7 +49,7 @@ export function registerSaveHandlers(savesDirectory: () => string): void {
       }
       const stat = fs.statSync(full);
       if (stat.size > MAX_SAVE_BYTES) {
-        return { ok: false, slot, error: '存档过大（超过 8MB 限制）', code: 'too-large' };
+        return { ok: false, slot, error: '存档过大（超过 64MB 限制）', code: 'too-large' };
       }
       const text = fs.readFileSync(full, 'utf8');
       if (!text.trim()) {

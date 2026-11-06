@@ -3,7 +3,8 @@
 // v0.2 新增证券/治理/居民投资/协议/通知数据；旧 v1 存档由 core/save.ts 迁移。
 
 export const SAVE_FORMAT_VERSION = 9;
-export const GAME_VERSION = '1.5.0';
+/** v1.6：本轮为“规则修复 + 经济规则调整”，新增字段全部可选、缺省安全，存档格式不升版。 */
+export const GAME_VERSION = '1.6.0';
 
 export type GoodId =
   | 'grain'
@@ -87,6 +88,15 @@ export interface CompanyAiState {
   lossMonths: number;
   /** 经营月龄（用于新企业保护期）。 */
   ageMonths: number;
+  /**
+   * v1.6 §五 D6：连续“无产出且无销售”的月份计数（僵尸企业退出判定）。
+   *
+   * 由 checkBankruptcies 每月维护：上一完整月 produced≈0 且 sold+exported≈0 时 +1，
+   * 有任何经营活动（生产/销售/出口）即清零；保护期内清零。达到 idleExitMonths 且
+   * 现金+授信不足 1 个月固定成本、无恢复计划时清算。可选：旧存档缺省视为 0，
+   * 不升 SAVE_FORMAT_VERSION。
+   */
+  idleMonths?: number;
   lastPlan: CompanyAiPlan | null;
   lastDecision: string;
   lastDecisionTick: number;
@@ -146,6 +156,26 @@ export interface CompanyMonthlyStats {
    * 可选：旧存档/旧测试夹具未填时视为 0。
    */
   refundGain?: number;
+  /**
+   * v1.6 §四：本月应计设备维护费。
+   *
+   * 口径（D1）：= Σ 本月计费台数 × 所在城市该类新设备当月市场参考单价 × 维护费率；
+   * 计费台数取**月初持有时点快照**（Company.maintenanceBase）——当月买入下月起计费，
+   * 当月卖出/挂单/返还/破产仍计当月。该金额是独立期间费用，全额（含未付部分）
+   * 计入本月税前利润；旧存档缺省按 0 处理。
+   */
+  maintenanceDue?: number;
+  /**
+   * v1.6 §四：本月以现金支付的本月维护费（不含偿还以前月份欠款）。
+   * 收款方为模拟范围外“城市外部设备维护服务商”，不进入任何企业收入或政府税收。
+   */
+  maintenancePaid?: number;
+  /** v1.6 §四：本月新增维护费欠付（= 应计 − 本月现金已付部分）。 */
+  maintenanceArrearsAdded?: number;
+  /** v1.6 §四：本月以现金偿还的以前月份维护费欠款（只冲负债，不重复计入费用）。 */
+  maintenanceArrearsRepaid?: number;
+  /** v1.6 §四：月末未付维护费余额（应付模拟范围外服务商；旧存档缺省 0）。 */
+  maintenanceArrears?: number;
 }
 
 export interface Company {
@@ -210,6 +240,25 @@ export interface Company {
    * 锁定期内不得出售/转让；企业提前退出时未到期部分返还出资方。
    */
   initialEquipment?: InitialEquipmentGrant;
+  /**
+   * v1.6 §四：设备维护费月初持有时点快照（D1）。
+   *
+   * 每个 tick 开始时（advanceTime 之后、任何设备买卖/挂单/破产之前）写入当时各类设备台数；
+   * 月末财务按此快照计费：当月买入（含月中挂单后成交）下月起计费，当月卖出/挂单/返还/破产
+   * 仍按月初台数计当月。旧存档缺省：首次 tick 开始即补齐，读取后不重复创建设备；
+   * 在无 tick 的直调路径（测试/工具）缺省回退为当前 equipment 台数（旧档开始计费）。
+   */
+  maintenanceBase?: EquipmentAssets;
+  /**
+   * v1.6 §四：设备维护费月初计价快照：所在城市各类新设备当月市场参考单价。
+   * 与 maintenanceBase 同一时点采集，保证“台数 × 单价”取价时点一致（D1）。
+   */
+  maintenancePrices?: EquipmentAssets;
+  /**
+   * v1.6 §四：未付设备维护费余额（应付模拟范围外设备维护服务商）。
+   * 旧存档缺省视为 0；欠付会影响分红、融资与清算（见 equipment/maintenance.ts）。
+   */
+  maintenanceArrears?: number;
 }
 
 /** v0.9：设备类别。农业设备服务农业/纤维，工业设备服务加工制造，能源设备服务能源生产。 */
@@ -262,6 +311,15 @@ export interface CompanyProductionPlan {
   plannedJobs: number;
   /** 本月是否触发紧急下调（现金不足/严重积压）。 */
   emergency: boolean;
+  /**
+   * v1.6 §三：本企业可触达需求估计（本城缺货份额 + 资金缺口折算 + 降价机会 + 可达跨城，
+   * 均已按企业份额分摊，未吸收）。可选：旧存档/旧测试夹具缺省视为 0。
+   */
+  reachableDemand?: number;
+  /** v1.6 §三：潜在需求（资金缺口 + 降价 + 跨城，未吸收），与 reachableDemand 同期写入。 */
+  latentDemand?: number;
+  /** v1.6 §四.4：本月设备维护费估计（月度固定成本的一部分，不是 COGS）。 */
+  maintenanceCost?: number;
   reasons: string[];
 }
 
@@ -304,6 +362,60 @@ export interface EquipmentMarketState {
    * tick 开始时清零（tick 之间的玩家操作在 startStock 快照前已生效，不需要重复扣减）。
    */
   capitalizedThisTick?: Partial<Record<GoodId, number>>;
+  /**
+   * v1.6 §四：本月设备维护费结算流水（月初建立、月末归档；收款方为模拟范围外服务商）。
+   * 旧存档缺省：首次进入新 tick 时建立，历史缺失不影响计费。
+   */
+  maintenanceMonth?: EquipmentMaintenanceMonth;
+  /**
+   * v1.6 §四：设备维护费历史月度流水（最近 maxHistory 条，供报告/审计）。
+   * 这是模拟范围外的独立费用流：资金流出模拟范围，不计入设备厂收入、政府税收或任何主体现金。
+   */
+  maintenanceHistory?: EquipmentMaintenanceMonth[];
+}
+
+/**
+ * v1.6 §四：设备维护费月度结算流水（模拟范围外服务商收款，独立于企业/政府账本）。
+ *
+ * 计费口径（D1）：每类设备维护费 = 月初持有台数 × 所在城市该类新设备当月市场参考单价 × 费率，
+ * 逐类求和；所有设备（含闲置、停产、二手、初始实物出资）都计费。
+ */
+export interface EquipmentMaintenanceMonth {
+  tick: number;
+  /** 本月计费台数（按类别汇总）。 */
+  unitsByKind: EquipmentAssets;
+  /** 本月应计费用（按类别汇总）= 台数 × 月初参考单价 × 费率。 */
+  feeByKind: EquipmentAssets;
+  /** 本月应计合计（= 本月费用现金已付 + 本月新增欠付）。 */
+  totalDue: number;
+  /** 本月现金支付合计（含偿还以前月份欠费）。 */
+  totalPaid: number;
+  /** 本月为支付维护费而新增的银行借款（真实放款，计入企业债务）。 */
+  totalBorrowed: number;
+  /** 本月新增欠付合计。 */
+  totalArrearsAdded: number;
+  /** 本月偿还以前月份欠款合计（只冲负债，不重复计入费用）。 */
+  totalArrearsRepaid: number;
+  /** 月末欠付余额合计（仅在营企业；清算企业欠费见 writtenOff）。 */
+  totalArrearsOutstanding: number;
+  /** 清算时确实无法收回而注销的欠费（服务商坏账；不在模拟范围内制造任何资金）。 */
+  totalWrittenOff: number;
+  /** 按城市汇总（供面板/报告核对服务收款流向）。 */
+  byCity: Record<string, EquipmentMaintenanceCityFlow>;
+  /** 本月已结算的企业 id（保证同一企业同一月只扣一次）。 */
+  settledCompanyIds: string[];
+  note: string;
+}
+
+/** 单城单月的设备维护费服务流水。 */
+export interface EquipmentMaintenanceCityFlow {
+  due: number;
+  paid: number;
+  borrowed: number;
+  arrearsAdded: number;
+  arrearsRepaid: number;
+  arrearsOutstanding: number;
+  writtenOff: number;
 }
 
 /** 设备成交对市场账本的增量（sold 同时计入 supply，保证 sold ≤ supply）。 */
@@ -1068,6 +1180,32 @@ export interface PolicyHistoryEntry extends ActivePolicy {
 /** v1.5 §四：政策资金的真实来源（借款必须真实到账，不凭空造钱）。 */
 export type PolicyFundingSource = 'treasury' | 'bankLoan' | 'none';
 
+/**
+ * v1.6 §一.1：单城单月、单项 AI 危机政策的预算分项（金额单位：信用点，保留 2 位小数）。
+ *
+ * 口径：本月“月政策预算”是该城当月全部 AI 危机政策的**总额度**（quota = 当月体检 budget），
+ * 不是每项政策各自一份。总额度按各政策参考需求权重用最大余数法分配；分项 referenceBudget
+ * 之和 = 本月总额度分配（≤ quota，同一笔预算不得重复使用）。claim 是未受额度封顶的真实
+ * 月度需求估算，仅用于审计“需求 vs 分配 vs 实支 vs 未支付”。
+ */
+export interface PolicyBudgetAllocation {
+  /** 政策实例 id（ActivePolicy.id）。 */
+  policyInstanceId?: string;
+  policyId: PolicyId;
+  /** 本月分到的参考预算额度（权重分配结果；同城同月各项之和 = 本月总额度分配）。 */
+  referenceBudget: number;
+  /** 本月真实月度现金需求估算（未受额度封顶；公共岗位为在岗工资口径）。 */
+  claim: number;
+  /** 本月真实已预留资金（≤ 分项额度，且只来自财政余额/真实到账借款）。 */
+  reserved: number;
+  /** 本月实际支出（政策流水实支 + 公共岗位按 fiscal.publicWages 实付归属的部分）。 */
+  spent: number;
+  /** 本月未支付（不计受益/居民收入；≤ 分项额度）。 */
+  unpaid: number;
+  /** 仅公共岗位：本月按真实支付记录归属本政策的公共工资（可能超出分项额度）。 */
+  publicWagesAttributed: number;
+}
+
 /** v1.5 §四：单城单月政策资金顺序追踪（决策参考 → 税收 → 公共工资/福利 → 借款到账 → 预留 → 实支）。 */
 export interface PolicyFundingMonth {
   tick: number;
@@ -1096,6 +1234,58 @@ export interface PolicyFundingMonth {
   unpaid: number;
   fundingSource: PolicyFundingSource;
   note: string;
+  /**
+   * v1.6 §一.1：本月“月政策预算”总额度（quota = 当月体检 budget；不是已到账资金）。
+   * 可选字段：旧存档/旧测试夹具缺省视为未记录。
+   */
+  quota?: number;
+  /**
+   * v1.6 §一.1：本月按政策分项分配（可选）。各项 referenceBudget 之和 = 本月总额度分配，
+   * 且 ≤ quota；claim/reserved/spent/unpaid 均按分项封顶（公共岗位工资归属见 publicWage* 字段）。
+   */
+  policyBudgets?: PolicyBudgetAllocation[];
+  /** v1.6 §一.2：本月按真实支付记录归属政策的必要公共工资实发（fiscal.publicWages 口径）。 */
+  publicWagesAttributed?: number;
+  /**
+   * v1.6 §一.2：公共工资实发中超出公共岗位分项额度的部分（边界加项）。
+   * 这是已经真实支付、按实付记录归属的工资，不是为凑边界改写出来的金额。
+   */
+  publicWagesOverQuota?: number;
+}
+
+/**
+ * v1.6 §一.2：单城单月公共岗位统计（可选，旧存档缺省为空）。
+ *
+ * 口径：
+ * - jobsAdded 是“本月新增岗位数”（岗位，不是人次；政策启动当月一次性计入）；
+ * - headcount 是“本月月末实际在岗人数”（headcount，本月快照，不可跨月相加当新增）；
+ * - jobsRemoved 是本月因到期/取消/低效停止而撤销的岗位数；
+ * - wagesPaid 是本月按 fiscal.publicWages 真实支付记录归属公共岗位政策的工资（信用点）。
+ * 累计字段中 jobsAddedCumulative 是去重岗位累计，personMonthsCumulative 是“在岗人次”
+ * （Σ 各月 headcount），两者口径不同，报告不得把人次叫新增人数。
+ */
+export interface PublicJobsMonth {
+  tick: number;
+  cityId: string;
+  /** 本月新增岗位数（岗位，不是人次）。 */
+  jobsAdded: number;
+  /** 本月月末实际在岗人数（headcount）。 */
+  headcount: number;
+  /** 本月撤销岗位数（政策结束/取消/低效停止）。 */
+  jobsRemoved: number;
+  /** 本月实际支付且归属公共岗位政策的工资（信用点，fiscal.publicWages 实付记录）。 */
+  wagesPaid: number;
+  /** 截至本月累计新增岗位（ΣjobsAdded，去重岗位数，不是人次）。 */
+  jobsAddedCumulative: number;
+  /** 截至本月累计在岗人次（Σheadcount；是“人次”，不是新增人数）。 */
+  personMonthsCumulative: number;
+  /** 截至本月累计撤销岗位数。 */
+  jobsRemovedCumulative: number;
+  /** 截至本月累计实际支付公共工资（信用点）。 */
+  wagesPaidCumulative: number;
+  /** 截至本月尚未撤销的岗位净额（= 累计新增 − 累计撤销）。 */
+  jobsOutstanding: number;
+  note: string;
 }
 
 export interface PolicyState {
@@ -1116,6 +1306,11 @@ export interface PolicyState {
    * 用于区分参考预算/已预留/实际支出，并让报表核对税收入账 → 必要支出 → 借款到账 → 预留 → 实支。
    */
   fundingMonths?: PolicyFundingMonth[];
+  /**
+   * v1.6 §一.2：公共岗位月度统计（可选，旧存档缺省为空；只保留最近若干月）。
+   * 区分本月新增岗位数 / 实际在岗人数 / 撤销岗位 / 实付工资，并分别给出累计岗位与累计人次。
+   */
+  publicJobsMonths?: PublicJobsMonth[];
 }
 
 /** v1.4 §五：AI 政府经济体检的失业分级。 */

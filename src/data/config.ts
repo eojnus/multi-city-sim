@@ -113,10 +113,35 @@ export const DEMO_CONFIG = {
   },
   market: {
     initialPriceFactor: 0.95,
-    priceAdjustSpeed: 0.08,
-    maxMonthlyChange: 0.08,
+    /**
+     * v1.6 §二：商品价格规则（全部可配置）。
+     *
+     * 每月价格变动的四个来源：
+     * 1) 短缺：涨幅 = 缺口率（未成交有效需求 ÷ 有效需求）× shortageRiseSpeed；
+     *    缺口率用“已被跨城进口冲销过”的未成交有效需求计算，进口满足的需求不算缺口。
+     * 2) 过剩：跌幅 = 过剩率（期末库存超出“成交覆盖量 × stockSurplusThreshold”的部分 ÷ 成交覆盖量）× surplusFallSpeed；
+     * 3) 竞争：同城卖家数 > 1 且价格高于锚价时，按卖家数与溢价幅度压价（competitionFallSpeed）；
+     * 4) 回归：向锚价（基础价值，或真实单位生产成本推高的锚）× reversionSpeed 回归；
+     *    仅在“价格高于锚”或“价格低于锚且有真实需求/成本压力”时回归，不制造无需求上涨。
+     *
+     * 单月变动夹在 ±maxMonthlyChange；价格夹在 basePrice × [minPriceFactor, maxPriceFactor]。
+     */
+    /** 短缺涨幅系数。 */
+    shortageRiseSpeed: 0.3,
+    /** 过剩跌幅系数。 */
+    surplusFallSpeed: 0.12,
+    /** 竞争压价系数。 */
+    competitionFallSpeed: 0.08,
+    /** 向锚价回归的月度比例。 */
+    reversionSpeed: 0.03,
+    /** 单月价格变动上限（涨跌同限）。 */
+    maxMonthlyChange: 0.15,
+    /** 期末库存超过“本地成交+跨城进口覆盖量 × 该阈值”视为过剩。 */
     stockSurplusThreshold: 1.6,
-    stockDiscount: 0.03,
+    /** 成本锚系数：锚价 = max(基础价, 上月单位生产成本中位数 × 系数)。 */
+    costAnchorFactor: 1,
+    /** 成本锚上限（相对基础价）：防止异常成本把锚价推飞。 */
+    costAnchorMaxFactor: 1.6,
     minPriceFactor: 0.55,
     maxPriceFactor: 2.2,
   },
@@ -190,6 +215,33 @@ export const DEMO_CONFIG = {
     maxExpansionShare: 0.08,
     /** 新企业保护期（月）：期内不因亏损直接倒闭。 */
     newCompanyGraceMonths: 6,
+    /**
+     * v1.6 §三：企业真实报价竞争参数（P3 / pool-dev）。
+     *
+     * - 内部 priceFactor 保留 6 位小数，成交价仍按分舍入（修复“每月变动不足 1 分被
+     *   round2 吞掉、价格从未真正变动”）；
+     * - priceBiasMin/Max（上方）是本模块的绝对价格系数上下限：报价夹在
+     *   [0.85, 1.15] × 本城市场价，不允许负价/失控价；
+     * - 每月变动最多 maxMonthlyMove（相对当前报价），且至少 minVisiblePriceStep 元。
+     */
+    pricing: {
+      /** 无短缺/积压时向市场价（系数 1.0）回归的每月比例，避免风格偏移无限累积。 */
+      reversionSpeed: 0.1,
+      /** 有可支付缺货且库存低于目标时，每月加价幅度。 */
+      shortageMarkup: 0.03,
+      /** 成品积压超过 stuckInventoryMonths 时，每月降价幅度。 */
+      surplusDiscount: 0.02,
+      /** 销量低于销售参考 85% 时的小幅降价（除积压外的需求下滑信号）。 */
+      salesDropDiscount: 0.01,
+      /** 同类对手报价更低时，让到对手报价之下该比例。 */
+      undercut: 0.01,
+      /** 单月价格最大变动（相对当前报价）。 */
+      maxMonthlyMove: 0.05,
+      /** 成本底线：报价不低于单位变动成本 × (1 + 该比例)。 */
+      minUnitMargin: 0.03,
+      /** 最小可见变动（信用点）：小于 1 分钱的调价会被成交价舍入吞掉，直接补到 1 分。 */
+      minVisiblePriceStep: 0.01,
+    },
   },
   /** v0.3：企业成立与倒闭的演示限制（口径、固定/动态与数值均待用户决定）。 */
   lifecycle: {
@@ -222,6 +274,18 @@ export const DEMO_CONFIG = {
       minAgeMonths: 6,
       /** 企业纾困政策生效时，倒闭判定延后观察的月份。 */
       reliefGraceMonths: 2,
+      /**
+       * v1.6 §五 D6【已确认】：连续多少个月“无产出且无销售”后判定僵尸企业。
+       *
+       * 计数由 checkBankruptcies 每月维护（上一完整月 produced≈0 且 sold+exported≈0 时 +1，
+       * 有任一经营活动即清零；保护期内清零）。达到该月数后，若现金 + 可用授信 <
+       * idleFixedCostCoverMonths 个月固定成本（工资 + 设备维护费 + 偿债），且无实际恢复计划
+       * （本城/跨城可支付需求 + 正毛利 + 生产资产）与纾困观察期，则走 liquidateCompany 清算。
+       * 短于该月数的暂时停业不清算。
+       */
+      idleExitMonths: 6,
+      /** v1.6 §五：僵尸判定时现金+授信需覆盖的月固定成本数（默认 1 个月）。 */
+      idleFixedCostCoverMonths: 1,
     },
     maxHistory: 60,
   },
@@ -486,6 +550,23 @@ export const DEMO_CONFIG = {
       expansionReserveWageMonths: 2,
       /** 近期月偿债估计：剩余债务按该月数均摊，再加上月利息支出。 */
       expansionDebtMonths: 24,
+      /**
+       * v1.6 §三【首版暂定】：需求估计的三个附加来源（都不当确定订单，按份额与
+       * unmetDemandAbsorption 吸收）：
+       * - 资金缺口（market.unmetFunding，想买但买不起）中可被收入增长/信贷恢复转化的比例；
+       * - 其中可通过合理降价转化的比例（再乘“报价相对成本底线”的降价空间，降到成本线
+       *   以下不会产生机会）；
+       * - 可达跨城市场：其他城市可支付缺口 × 本企业全国产能份额 × 距离运价可达性 × 权重。
+       */
+      fundingDemandShare: 0.05,
+      priceCutDemandShare: 0.05,
+      intercityDemandWeight: 0.5,
+      /**
+       * v1.6 §三：需求驱动增产阈值。上月设备利用率低于该值（设备尚有余量）、本城有
+       * 真实可支付缺货、企业有盈利且现金不紧张时，允许突破 ±maxUpAdjust 平滑，直接按
+       * min(需求, 设备/劳动/原料上限) 增产（优先用现有设备，再采购原料/招聘）。
+       */
+      demandRampUtilization: 0.8,
     },
   },
   /**
@@ -553,6 +634,24 @@ export const DEMO_CONFIG = {
     governmentInitialStockPerCity: { farm: 24, industry: 60, energy: 16 },
     /** 单企业单月购买设备数量上限（防止一次性吃光库存）。 */
     maxBuyUnitsPerMonth: 60,
+    /**
+     * v1.6 §四：设备月度维护费率【已确认】。
+     *
+     * 每台每月维护费 = 所在城市该类“新设备”当月市场参考单价 × 该费率（默认 1%），
+     * 逐类求和。计费时点（D1）：当月月初持有台数 × 月初参考单价——当月买入下月起计费，
+     * 当月卖出/挂单/返还/破产仍计当月；闲置、停产、二手与初始实物出资设备同样计费。
+     * 维护费是独立期间费用：进企业税前利润与现金流；收款方为模拟范围外设备维护服务商，
+     * 不进设备厂收入、不记政府税收。
+     */
+    maintenanceMonthlyRate: 0.01,
+    /** v1.6 §四：存在未付维护费时不得分红（服务商债权优先于股东分配）。 */
+    maintenanceArrearsBlocksDividends: true,
+    /** v1.6 §四：已存在未付维护费时不再为维护费新增借款（避免以贷养欠，欠费即信用风险）。 */
+    maintenanceArrearsBlocksFinancing: true,
+    /** v1.6 §四：维护费月度历史流水保留条数（供报告/审计）。 */
+    maintenanceHistoryMonths: 60,
+    /** v1.6 §四：清算时确实无法收回的维护费欠款记服务商坏账（只留痕，不制造模拟内资金）。 */
+    maintenanceWriteOffOnLiquidation: true,
   },
   /** v0.9【首版暂定】工资、奖金与裁员参数。 */
   compensation: {

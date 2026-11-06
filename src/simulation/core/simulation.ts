@@ -22,6 +22,7 @@ import { executeTradeRoutes } from '../trade/trade';
 import { runExternalDemand } from '../trade/external';
 import { runConsumerMarkets } from '../markets/consumer';
 import { settleCompanyFinance } from '../finance/finance';
+import { beginEquipmentMaintenanceMonth } from '../equipment/maintenance';
 import { settleGovernment, recordMigrationReports } from '../government/fiscal';
 import { transportTaxFactors } from '../government/taxes';
 import { settleGovernmentDebt } from '../government/debt';
@@ -228,6 +229,9 @@ export class Simulation {
       }
       resetCompanyMonth(this.state);
       advanceTime(this.state);
+      // v1.6 §四 D1：设备维护费月初持有时点快照（必须在任何设备买卖/挂单/破产之前采集），
+      // 同时归档上一月维护费流水；月末财务按该快照计费，当月买入下月起计费。
+      beginEquipmentMaintenanceMonth(this.state, this.config);
       this.state.lastTick = {
         productionRecords: [],
         tradeFlows: [],

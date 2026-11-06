@@ -91,12 +91,17 @@ const STATS_KEYS = [
   'capacityChange',
   'dividendIncome',
 ] as const;
-/** v1.3 §3 / v1.4 §6.6：可选统计字段（旧档缺失；出现时必须为有限数值）。 */
+/** v1.3 §3 / v1.4 §6.6 / v1.6 §四：可选统计字段（旧档缺失；出现时必须为有限数值）。 */
 const OPTIONAL_STATS_KEYS = [
   'cogs',
   'inventoryWriteOff',
   'operatingCashFlow',
   'refundGain',
+  'maintenanceDue',
+  'maintenancePaid',
+  'maintenanceArrearsAdded',
+  'maintenanceArrearsRepaid',
+  'maintenanceArrears',
 ] as const;
 
 export function createSaveFile(world: WorldState, savedAt = new Date().toISOString()): SaveFile {

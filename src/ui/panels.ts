@@ -23,6 +23,10 @@ import type {
 import { investorFundingReport } from '../simulation/investors/investors';
 import { latestCheckup, unemploymentTierLabel } from '../simulation/policies/ai-labor';
 import { lockedInitialEquipmentUnits } from '../simulation/equipment/equipment';
+import {
+  maintenanceArrearsOf,
+  maintenanceBreakdown,
+} from '../simulation/equipment/maintenance';
 import { renderPopulationPie, POPULATION_PIE_COLORS } from './charts/pie';
 import {
   aggregateTradeFlows,
@@ -2824,6 +2828,7 @@ export function renderCompanyDetail(
               ${(lastMonth.bonusPaid ?? 0) > 0 ? `<tr><td>奖金</td><td>${money(lastMonth.bonusPaid ?? 0)}</td></tr>` : ''}
               ${(lastMonth.equipmentPurchased ?? 0) > 0 ? `<tr><td>设备支出</td><td>${money(lastMonth.equipmentPurchased ?? 0)}</td></tr>` : ''}
               ${(lastMonth.equipmentSold ?? 0) > 0 ? `<tr><td>设备出售</td><td>${money(lastMonth.equipmentSold ?? 0)}</td></tr>` : ''}
+              ${(lastMonth.maintenanceDue ?? 0) > 0 ? `<tr${(lastMonth.maintenanceArrears ?? 0) > 0.005 ? ' class="is-warn"' : ''}><td title="设备月度维护费：台数 × 月初新机参考价 × 费率；收款方为模拟范围外服务商">设备维护费</td><td>${money(lastMonth.maintenanceDue ?? 0)}${(lastMonth.maintenanceArrears ?? 0) > 0.005 ? `（欠付 ${money(lastMonth.maintenanceArrears ?? 0)}）` : ''}</td></tr>` : ''}
               ${(lastMonth.emergencyLayoffs ?? 0) > 0 ? `<tr class="is-warn"><td>紧急裁员</td><td>${num(lastMonth.emergencyLayoffs ?? 0)} 人</td></tr>` : ''}
               <tr><td>利息</td><td>${money(lastMonth.interestPaid)}</td></tr>
               <tr><td>公司税</td><td>${money(lastMonth.corporateTax)}</td></tr>
@@ -3940,6 +3945,57 @@ export function renderCompanyEquipmentSection(store: GameStore, company: Company
     })
     .join('');
   const held = view.equipmentRows.reduce((total, row) => total + row.units, 0);
+  // v1.6 §四：设备月度维护费（独立期间费用，收款方为模拟范围外设备维护服务商）。
+  // 计费口径 = 月初持有台数 × 月初该城该类新设备参考单价 × 费率（D1）；面板只读展示。
+  const maintenanceRate = DEMO_CONFIG.equipment.maintenanceMonthlyRate ?? 0.01;
+  const maintenanceLines = maintenanceBreakdown(store.world, company, DEMO_CONFIG);
+  const maintenanceDue = maintenanceLines.reduce((total, line) => total + line.fee, 0);
+  const maintenanceUnits = maintenanceLines.reduce((total, line) => total + line.units, 0);
+  const maintenanceArrears = maintenanceArrearsOf(company);
+  const lastMaintenance = company.lastMonth;
+  const lastMaintenanceDue = lastMaintenance.maintenanceDue ?? 0;
+  const lastMaintenancePaid = lastMaintenance.maintenancePaid ?? 0;
+  const lastMaintenanceArrearsAdded = lastMaintenance.maintenanceArrearsAdded ?? 0;
+  const maintenanceStatus = maintenanceArrears > 0.005
+    ? `欠付 ${money(maintenanceArrears)}`
+    : lastMaintenanceDue > 0.005
+      ? '已付清'
+      : '本月无计费';
+  const maintenanceStatusClass = maintenanceArrears > 0.005
+    ? 'is-warn'
+    : lastMaintenanceDue > 0.005
+      ? 'is-ok'
+      : '';
+  const maintenanceRows = maintenanceLines
+    .filter((line) => line.units > 0)
+    .map(
+      (line) => `
+        <tr data-testid="equipment-maintenance-row-${line.kind}">
+          <th scope="row">${esc(line.name)}</th>
+          <td>${num(line.units)} 台</td>
+          <td>${money(line.unitPrice)}</td>
+          <td>${pct(maintenanceRate, 0)}</td>
+          <td>${money(line.fee)}</td>
+        </tr>`,
+    )
+    .join('');
+  const maintenanceTable =
+    maintenanceUnits > 0
+      ? `<div class="table-wrap">
+          <table class="fin-table" aria-label="${esc(company.name)} 设备月度维护费" title="台数 × 月初参考单价 × ${pct(maintenanceRate, 0)}">
+            <thead>
+              <tr>
+                <th scope="col">设备</th>
+                <th scope="col">计费台数</th>
+                <th scope="col">计价单价（新机参考价）</th>
+                <th scope="col">费率</th>
+                <th scope="col">月维护费</th>
+              </tr>
+            </thead>
+            <tbody>${maintenanceRows}</tbody>
+          </table>
+        </div>`
+      : '<p class="fin-hint" data-testid="equipment-maintenance-empty">当前没有设备台数，本月维护费为 0。</p>';
   const offers = market?.offers ?? [];
   const offerRows =
     offers.length === 0
@@ -4118,6 +4174,20 @@ export function renderCompanyEquipmentSection(store: GameStore, company: Company
             <tbody>${equipmentRows}</tbody>
           </table>
         </div>
+      </div>
+      <div class="equip-block" data-testid="equipment-maintenance">
+        <div class="sub-head">
+          <span>设备月度维护费</span>
+          <em>台数 × 月初新机参考价 × ${pct(maintenanceRate, 0)}</em>
+        </div>
+        <div class="equip-kpis">
+          <span><i>本月计费台数</i><b>${num(maintenanceUnits)} 台</b><small>月初持有时点；闲置/停产同样计费</small></span>
+          <span><i>本月应计</i><b data-testid="equipment-maintenance-total">${money(maintenanceDue)}</b><small>独立期间费用，计入税前利润</small></span>
+          <span data-testid="equipment-maintenance-status" class="${maintenanceStatusClass}"><i>支付状态</i><b>${maintenanceStatus}</b><small>收款方：模拟范围外设备维护服务商</small></span>
+          <span><i>上月实付 / 新增欠付</i><b>${money(lastMaintenancePaid)} / ${money(lastMaintenanceArrearsAdded)}</b><small>欠费影响分红、融资与清算</small></span>
+        </div>
+        ${maintenanceTable}
+        <p class="fin-hint">维护费是独立期间费用，资金支付给模拟范围外“城市外部设备维护服务商”，不进入设备厂收入或政府税收。计费时点（D1）：当月买入下月起计费；当月卖出/挂单/返还/破产仍按月初台数计当月。现金不足时先按既有规则融资，仍不足记欠付，欠付未清不得分红。</p>
       </div>
       <div class="equip-block">
         <div class="sub-head"><span>本月工资与用工</span><em>${esc(sectorLabel(view.sector))}</em></div>

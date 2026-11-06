@@ -10,6 +10,8 @@ import { PRODUCTIVITY } from '../../../data/demo-data';
 import { clamp, round2 } from '../../core/math';
 import { monthlyWageBill } from '../company';
 import { recomputeProductionPlan, cityShortageFor, outputPerEmployee } from '../production-plan';
+import { companyMonthlyMaintenance } from '../cost';
+import { planCompanyPrice } from '../pricing';
 import { effectiveWageRate, hiringSubsidyPerHire, retentionSubsidyPerEmployee } from '../../policies/query';
 import { workforceSkillMultiplier } from '../../labor/workforce';
 
@@ -126,12 +128,21 @@ export function planCompanyDecision(
     );
   }
 
+  // v1.6 §四.4：设备维护费是月度固定支出，进“现金能撑几个月”“保留资金”与投资判断，
+  // 否则 AI 会高估可支配现金、在不该扩产时扩产。
+  const maintenanceBill = companyMonthlyMaintenance(world, company, config);
   const projectedJobs = Math.max(company.employees, targetJobs, 1);
   const effectiveBill = effectiveWage * projectedJobs;
-  const cashMonths = effectiveBill > 0 ? company.cash / effectiveBill : 99;
+  const monthlyFixedBill = round2(effectiveBill + maintenanceBill);
+  const cashMonths = monthlyFixedBill > 0 ? company.cash / monthlyFixedBill : 99;
+  if (maintenanceBill > 0) {
+    reasons.push(
+      `设备维护费 ${maintenanceBill.toFixed(0)}/月（含闲置设备），月度固定支出约 ${monthlyFixedBill.toFixed(0)}`,
+    );
+  }
   if (cashMonths < config.companyAi.cashJobThresholdHigh) {
     targetJobs = Math.floor(targetJobs * 0.9);
-    reasons.push(`现金仅够 ${cashMonths.toFixed(1)} 个月工资，收紧招聘`);
+    reasons.push(`现金仅够 ${cashMonths.toFixed(1)} 个月工资+维护费，收紧招聘`);
   }
   if (cashMonths < config.companyAi.cashJobThresholdLow) {
     targetJobs = Math.floor(targetJobs * 0.7);
@@ -160,36 +171,25 @@ export function planCompanyDecision(
   //      玩家经营企业由玩家授权决定，不受该自动判定约束。 ----
   let investment = 0;
   if (company.previousMonth.profit > 0 && cashMonths > params.investmentMonths) {
-    const spare = round2(company.cash - effectiveBill * params.reserveMonths);
+    const spare = round2(
+      company.cash - monthlyFixedBill * params.reserveMonths,
+    );
     investment = round2(Math.max(0, Math.min(spare * params.investmentShare, company.cash * config.companyAi.maxInvestmentShareOfCash)));
     if (investment > 0) {
-      reasons.push(`现金充足（约 ${cashMonths.toFixed(1)} 个月工资），计划投资扩产`);
+      reasons.push(`现金充足（约 ${cashMonths.toFixed(1)} 个月工资+维护费），计划投资扩产`);
     }
   }
   if (investment <= 0 && company.previousMonth.profit <= 0) {
     reasons.push('上月未盈利，暂缓扩产');
   }
 
-  // ---- 定价倾向：风格造成的缓慢偏移，仍在市场允许范围内 ----
-  // v1.0：成品库存超过 stuckInventoryMonths 个月销量时，计划已减产，这里再小幅降价；
-  // 只是价格倾向，不按账面强制卖出、也不虚构销售。
-  const overstocked =
-    productionPlan.salesReference > 0.01 &&
-    stock > config.production.plan.stuckInventoryMonths * productionPlan.salesReference;
-  let priceFactor = round2(company.priceFactor + params.priceBias * 0.25);
-  if (overstocked && unmet <= 0.01) {
-    priceFactor = round2(priceFactor - 0.01);
-    reasons.push(
-      `成品库存超过 ${config.production.plan.stuckInventoryMonths} 个月销量：计划减产并小幅降价，不虚构销售`,
-    );
-  }
-  priceFactor = round2(
-    clamp(
-      priceFactor,
-      config.companyAi.priceBiasMin * company.priceFactor,
-      config.companyAi.priceBiasMax,
-    ),
-  );
+  // ---- v1.6 §三：真实报价竞争 ----
+  // 由 cost.ts 的单位成本（原料+工资+维护费）、本城供需/库存、销量变化与对手报价共同
+  // 决定 priceFactor；内部高精度、成交按分舍入，且夹在成本底线与绝对上下限之间。
+  // 低报价的同类企业会因市场按单价升序成交而自然拿到更多订单（见 markets.executePurchase）。
+  const pricing = planCompanyPrice(world, company, config);
+  const priceFactor = pricing.priceFactor;
+  reasons.push(...pricing.reasons);
 
   const plan: CompanyAiPlan = {
     tick: world.time.tick,

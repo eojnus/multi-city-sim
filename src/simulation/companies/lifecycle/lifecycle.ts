@@ -18,7 +18,7 @@ import type {
 import type { DemoConfig } from '../../../data/config';
 import { GOODS, PRODUCTIVITY } from '../../../data/demo-data';
 import { round2, allocateProportionally } from '../../core/math';
-import { createEmptyInventory, monthlyWageBill, setCompanyEmployees } from '../company';
+import { createEmptyInventory, setCompanyEmployees } from '../company';
 import { emptyInventoryCost, writeOffInventory } from '../../finance/inventory-cost';
 import {
   addShares,
@@ -33,7 +33,8 @@ import { companyHolders } from '../../securities/securities';
 import { settleCompanyLiquidation, openLoan, refreshBankingTotals } from '../../banking/banking';
 import { syncCityPopulationFromAllocations } from '../../population/population';
 import { syncHouseholdPeople } from '../../population/household-groups';
-import { outputPerEmployee } from '../production-plan';
+import { outputPerEmployee, payableShortageFromMarket } from '../production-plan';
+import { companyMonthlyFixedCost, companyUnitCost } from '../cost';
 import { workforceSkillMultiplier } from '../../labor/workforce';
 import { cityMarketPrices } from '../../markets/markets';
 import { recordFiscal, receiveTreasury, spendTreasury } from '../../government/treasury';
@@ -59,6 +60,7 @@ import {
   foundingAttempts,
   foundingAttemptSnapshot,
   foundingCandidateForOutput,
+  foundingSaturated,
   pickFoundingCandidate,
   pickFoundingOpportunity,
   plannedEquipmentUnits,
@@ -1751,7 +1753,91 @@ export function liquidateCompany(
   return { ok: true, note: `${company.name} 已清算。`, amount: shareholderPayout };
 }
 
-/** 月度：按失败路径（连续亏损 + 现金不足）判定倒闭；新企业有保护期。 */
+/** 判定“无经营活动”的数值容差（单位/信用点）。 */
+const IDLE_EPSILON = 0.01;
+
+/**
+ * v1.6 §五 D6：上一完整月是否有经营活动。
+ *
+ * 口径（Lead 确认）：produced > 0 或 sold > 0 或 exported > 0 任一满足即视为有经营
+ * 活动（含“只生产不销售、在囤库存的恢复期企业”）。
+ *
+ * 注意必须读 previousMonth：checkBankruptcies 在 tick 第 5 步执行，而 tick 开头
+ * resetCompanyMonth 已把 lastMonth 清零并拷到 previousMonth（core/simulation.ts）。
+ * 读 lastMonth 会让每家企业都被误判为停业。
+ */
+function hasOperatingActivity(company: Company): boolean {
+  const prev = company.previousMonth;
+  if (!prev) return true; // 旧档/夹具缺字段：不据此推进清算计数。
+  const produced = Math.max(0, prev.produced ?? 0);
+  const sold = Math.max(0, prev.sold ?? 0);
+  const exported = Math.max(0, prev.exported ?? 0);
+  return produced > IDLE_EPSILON || sold > IDLE_EPSILON || exported > IDLE_EPSILON;
+}
+
+/**
+ * v1.6 §五 D6：是否存在“实际恢复计划”。
+ *
+ * 判定为有恢复计划需同时满足：
+ * - 存在真实可支付需求（本城缺口，或任一其他城市的可支付缺口——跨城可达市场）；
+ * - 当前市场价高于单位变动成本（原料 + 工资 + 维护费，含正毛利空间）；
+ * - 仍有生产资产（设备台数 > 0 或产能 > 0）与在岗员工（能实际开工）。
+ * 另外企业纾困政策有剩余预算时也算观察期。满足任一条即不清算。
+ */
+function hasRecoveryPlan(
+  world: WorldState,
+  company: Company,
+  config: DemoConfig,
+): { ok: boolean; note: string } {
+  const city = world.cities.find((entry) => entry.id === company.cityId);
+  if (!city) return { ok: false, note: '所在城市不存在' };
+  const relief = activePolicy(world, company.cityId, 'companyRelief');
+  if (relief && remainingBudget(relief) > 0) {
+    return { ok: true, note: '纾困政策观察期（剩余预算 > 0）' };
+  }
+  const output = company.recipeOutput;
+  let demand = payableShortageFromMarket(city.market[output], output);
+  for (const other of world.cities) {
+    if (other.id === city.id) continue;
+    demand += payableShortageFromMarket(other.market[output], output);
+  }
+  if (demand <= IDLE_EPSILON) {
+    return { ok: false, note: '本城与可达跨城市场均无可支付需求' };
+  }
+  const price = Math.max(0.01, city.market[output]?.price ?? 0.01);
+  const unitCost = companyUnitCost(world, company, config).total;
+  if (!(price > unitCost + IDLE_EPSILON)) {
+    return {
+      ok: false,
+      note: `市场价 ${round2(price).toFixed(2)} 不高于单位成本 ${round2(unitCost).toFixed(2)}，无正毛利`,
+    };
+  }
+  const equipmentUnits =
+    Math.max(0, company.equipment?.farm ?? 0) +
+    Math.max(0, company.equipment?.industry ?? 0) +
+    Math.max(0, company.equipment?.energy ?? 0);
+  const hasAssets = equipmentUnits > 0.01 || (company.capacity ?? 0) > 0.01;
+  if (!hasAssets) return { ok: false, note: '没有设备或产能，无法恢复生产' };
+  if (company.employees <= 0) return { ok: false, note: '没有在岗员工，无实际开工能力' };
+  return {
+    ok: true,
+    note: `存在可支付需求 ${round2(demand).toFixed(2)}、市场价高于单位成本 ${round2(unitCost).toFixed(2)}，设备与员工可开工`,
+  };
+}
+
+/**
+ * 月度：按失败路径（连续亏损 + 现金不足）与 v1.6 僵尸企业规则判定倒闭；新企业有保护期。
+ *
+ * v1.6 §五 D6（Lead 确认）：
+ * - 修复旧漏洞：原先 `if (wage <= 0) continue;` 让零员工/零工资企业直接跳过后续判定，
+ *   永远进不了清算。现在固定成本 = 工资 + 设备维护费 + 偿债；任一项为 0 都不跳过。
+ * - 僵尸企业：连续 idleExitMonths（默认 6）个月“无产出且无销售”，且现金 + 可用授信
+ *   不足以覆盖 idleFixedCostCoverMonths 个月固定成本，且无实际恢复计划、无纾困观察期
+ *   → 走 liquidateCompany（设备/初始设备锁定期返还/库存/债务/股东/员工与名额释放
+ *   全部复用既有清算流程）。短于该月数的暂时停业不清算；新企业保护期内计数清零。
+ * - 原有“连续亏损 + 现金不足 + 无可用授信”路径保留，但现金阈值改用固定成本，
+ *   零工资企业不再因为乘法结果为 0 而逃过判定。
+ */
 export function checkBankruptcies(
   world: WorldState,
   config: DemoConfig,
@@ -1759,31 +1845,72 @@ export function checkBankruptcies(
 ): string[] {
   const liquidated: string[] = [];
   const ordered = [...world.companies].sort((a, b) => a.id.localeCompare(b.id));
+  const grace = Math.max(
+    config.lifecycle.bankruptcy.minAgeMonths,
+    config.companyAi.newCompanyGraceMonths,
+  );
+  const idleExitMonths = Math.max(1, Math.floor(config.lifecycle.bankruptcy.idleExitMonths));
+  const coverMonths = Math.max(0, config.lifecycle.bankruptcy.idleFixedCostCoverMonths);
+
   for (const company of ordered) {
     if (!company.ai) continue;
-    const grace = Math.max(
-      config.lifecycle.bankruptcy.minAgeMonths,
-      config.companyAi.newCompanyGraceMonths,
-    );
-    if (company.ai.ageMonths < grace) continue;
-    if (company.ai.lossMonths < config.lifecycle.bankruptcy.lossMonths) continue;
-    const wage = monthlyWageBill(company, config);
-    if (wage <= 0) continue;
-    if (company.cash >= wage * config.lifecycle.bankruptcy.cashWageMonths) continue;
+    const ai = company.ai;
+    // v1.6：保护期内不累计停业月数（避免新企业带着历史计数一过保护期就被清算）。
+    if (ai.ageMonths < grace) {
+      ai.idleMonths = 0;
+      continue;
+    }
+    const active = hasOperatingActivity(company);
+    ai.idleMonths = active ? 0 : Math.max(0, (ai.idleMonths ?? 0) + 1);
+    const idleMonths = ai.idleMonths;
+
+    const fixed = companyMonthlyFixedCost(world, company, config);
+    const credit = Math.max(0, availableCredit(world, { kind: 'company', id: company.id }, config));
+    const liquid = round2(Math.max(0, company.cash) + credit);
+    // 固定成本为 0 时（无员工/无设备/无债务的空壳），有现金或授信才算“覆盖”；
+    // 完全没有资金能力时 coverage=0，会进入僵尸判定，而不是被 Infinity 永久豁免。
+    const coverage = fixed.total > 0.01 ? liquid / fixed.total : liquid > IDLE_EPSILON ? Infinity : 0;
+    const relief = activePolicy(world, company.cityId, 'companyRelief');
+    const inRelief = !!relief && remainingBudget(relief) > 0;
+
+    // ---- v1.6 §五 D6：僵尸企业（长期无经营能力） ----
+    if (!active && idleMonths >= idleExitMonths) {
+      const recovery = hasRecoveryPlan(world, company, config);
+      if (!inRelief && coverage < coverMonths - 1e-9 && !recovery.ok) {
+        const reason =
+          `连续 ${idleMonths} 个月无产出且无销售，现金 + 可用授信 ${liquid.toFixed(0)} ` +
+          `不足以覆盖 ${coverMonths} 个月固定成本（工资 ${fixed.wage.toFixed(0)} + 维护费 ${fixed.maintenance.toFixed(0)} + 偿债 ${fixed.debtService.toFixed(0)} = ${fixed.total.toFixed(0)}），` +
+          `且无可行恢复计划（${recovery.note}）`;
+        const result = liquidateCompany(world, company.id, config, reason, log);
+        if (result.ok) liquidated.push(company.id);
+        continue;
+      }
+      log.push({
+        tick: world.time.tick,
+        kind: 'production',
+        message:
+          `${company.name} 已连续 ${idleMonths} 个月无产出且无销售，但` +
+          `${inRelief ? '处于纾困政策观察期' : coverage >= coverMonths - 1e-9 ? `现金+授信可覆盖 ${coverMonths} 个月固定成本` : `存在恢复计划（${recovery.note}）`}，暂不清算。`,
+      });    }
+
+    // ---- 原有失败路径：连续亏损 + 现金不足 + 无可用授信 ----
+    if (ai.lossMonths < config.lifecycle.bankruptcy.lossMonths) continue;
+    if (fixed.total > 0.01) {
+      if (company.cash >= fixed.total * config.lifecycle.bankruptcy.cashWageMonths) continue;
+    } else if (company.cash > IDLE_EPSILON) {
+      // 零固定成本空壳：只要还有现金就不按亏损路径清算（交给僵尸规则处理）。
+      continue;
+    }
     // 真正的退出条件是“现金耗尽且已无可用信贷”，而不是会计利润为负：
     // 现有演示经济中企业长期薄利，仅凭亏损判定会造成不现实的连锁倒闭。
     // v0.4：可用信贷来自独立银行的授信评估（无快照时即时计算）。
-    if (availableCredit(world, { kind: 'company', id: company.id }, config) > 1) continue;
-    if (activePolicy(world, company.cityId, 'companyRelief')) {
-      // 纾困政策存在时，给企业一个观察期；若纾困预算已用尽则照常判定。
-      const policy = activePolicy(world, company.cityId, 'companyRelief')!;
-      if (remainingBudget(policy) > 0) continue;
-    }
+    if (credit > 1) continue;
+    if (inRelief) continue;
     const result = liquidateCompany(
       world,
       company.id,
       config,
-      `连续 ${company.ai.lossMonths} 个月亏损、现金不足一个月工资且债务压力过高`,
+      `连续 ${ai.lossMonths} 个月亏损、现金不足一个月固定成本（工资+维护费+偿债）且无可用授信`,
       log,
     );
     if (result.ok) liquidated.push(company.id);
@@ -1886,8 +2013,10 @@ export function maybeFoundCompanies(
       }
 
       // 不缓存：本轮评估结果只用于本次创办；下一次循环会重新读取最新资金/设备/劳动/竞争/缺口。
+      // v1.6 §三：同行业羊群/饱和的候选直接排除（近期已密集新办 + 供给覆盖需求），
+      // 避免 AI 在同一个饱和行业连续创办、互相摊薄订单。
       const opportunities = assessFoundingOpportunities(world, config, city.id).filter(
-        (assessment) => assessment.feasibleTier !== null,
+        (assessment) => assessment.feasibleTier !== null && !foundingSaturated(assessment).saturated,
       );
       if (opportunities.length === 0) {
         recordFoundingStop(

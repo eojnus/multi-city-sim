@@ -22,6 +22,7 @@ import { foundingAttempts, foundingAttemptsTruncated } from '../src/simulation/c
 import { investorFundingReport } from '../src/simulation/investors/investors';
 import { policyName } from '../src/simulation/policies/definitions';
 import { policyFundingMonthlyReport } from '../src/simulation/policies/policies';
+import { priceAnchor } from '../src/simulation/markets/markets';
 
 function argNumber(flag: string, fallback: number): number {
   const raw = process.argv.find((arg) => arg.startsWith(`${flag}=`));
@@ -187,12 +188,17 @@ function aiPolicyStats(world: WorldState, cityId: string) {
   let latest = checkups[0];
   for (const checkup of checkups) if (!latest || checkup.tick > latest.tick) latest = checkup;
   const active = world.policies.active.filter((policy) => policy.cityId === cityId);
+  // v1.6 §一.2：本月结束/撤销的政策仍要计入“本月执行/撤销岗位”，否则真实岗位会漏记。
+  const endedThisTick = world.policies.history.filter(
+    (policy) => policy.cityId === cityId && policy.endedTick === world.time.tick,
+  );
+  const tracked = [...active, ...endedThisTick];
   let spentThisTick = 0;
   let beneficiaries = 0;
   let jobsEffect = 0;
   let runsThisTick = 0;
   const reasons = new Set<string>();
-  for (const policy of active) {
+  for (const policy of tracked) {
     reasons.add(policy.reason ?? '');
     for (const run of policy.tracking?.runs ?? []) {
       if (run.tick !== world.time.tick) continue;
@@ -481,6 +487,88 @@ function marketStats(city: City, goodId: GoodId) {
 
 function describeGood(name: string, stats: ReturnType<typeof marketStats>): string {
   return `${name}：需求 ${num(stats.demand, 1)} / 成交 ${num(stats.sold, 1)}（缺货 ${num(stats.unmetDemand, 1)}，跨城进口 ${num(stats.intercityImported, 1)}，期末库存 ${num(stats.closingStock, 1)}，价 ${stats.price.toFixed(1)}）`;
+}
+
+/**
+ * v1.6 §二：价格与供需明细（服务任务书 §七.3 与交付报告的计算示例）。
+ * 区分居民基本需要/有效需求（账本口径 consumerDemand）、企业原料需求（producerDemand/计划 producerRequired）、
+ * 本地成交、跨城进口/出口、可售供给与期末库存；并给出基础价、成本锚与当月涨跌幅。
+ */
+function priceMarketLine(world: WorldState, city: City, goodId: GoodId, label: string): string {
+  const market = city.market[goodId];
+  const base = GOODS.find((entry) => entry.id === goodId)?.basePrice ?? 1;
+  const anchor = priceAnchor(world, city.id, goodId, base, DEMO_CONFIG);
+  const price = market?.price ?? 0;
+  const change = market?.lastPriceChangePct ?? 0;
+  const sold = market?.sold ?? 0;
+  const imported = market?.intercityImported ?? 0;
+  return `${label} 价 ${price.toFixed(2)}（基础 ${base} / 成本锚 ${anchor.toFixed(2)}，月变 ${change >= 0 ? '+' : ''}${change.toFixed(2)}%）｜需求 居民 ${num(market?.consumerDemand ?? 0, 1)} / 企业 ${num(market?.producerDemand ?? 0, 1)}（企业计划 ${num(market?.producerRequired ?? 0, 1)}）｜本地成交 ${num(sold, 1)} 进口 ${num(imported, 1)} 出口 ${num(market?.externalExport ?? 0, 1)}｜缺货 ${num(market?.unmetDemand ?? 0, 1)} 缺钱 ${num(market?.unmetFunding ?? 0, 1)}｜可售供给 ${num(market?.supply ?? 0, 1)} 期末库存 ${num(market?.closingStock ?? 0, 1)}`;
+}
+
+/** v1.6 §四：设备月度维护费（按城市；收款方为模拟范围外设备维护服务商）。 */
+function equipmentMaintenanceStats(world: WorldState, cityId: string) {
+  const companies = world.companies.filter((company) => company.cityId === cityId);
+  const units = { farm: 0, industry: 0, energy: 0 };
+  for (const company of companies) {
+    const base = company.maintenanceBase ?? company.equipment;
+    units.farm += base?.farm ?? 0;
+    units.industry += base?.industry ?? 0;
+    units.energy += base?.energy ?? 0;
+  }
+  const month = world.equipmentMarket.maintenanceMonth;
+  const flow = month?.byCity?.[cityId];
+  const arrears = companies.reduce((sum, company) => sum + (company.maintenanceArrears ?? 0), 0);
+  return {
+    units,
+    rate: DEMO_CONFIG.equipment.maintenanceMonthlyRate,
+    due: flow?.due ?? 0,
+    paid: flow?.paid ?? 0,
+    borrowed: flow?.borrowed ?? 0,
+    arrearsAdded: flow?.arrearsAdded ?? 0,
+    arrearsRepaid: flow?.arrearsRepaid ?? 0,
+    arrearsOutstanding: flow?.arrearsOutstanding ?? arrears,
+    writtenOff: flow?.writtenOff ?? 0,
+  };
+}
+
+/** v1.6 §一.1/§一.2：政策总额度分项与公共岗位统计（按城市当月）。 */
+function policyBudgetStats(world: WorldState, cityId: string, tick: number) {
+  const trace =
+    (world.policies.fundingMonths ?? []).find(
+      (entry) => entry.cityId === cityId && entry.tick === tick,
+    ) ?? null;
+  const jobs =
+    (world.policies.publicJobsMonths ?? []).find(
+      (entry) => entry.cityId === cityId && entry.tick === tick,
+    ) ?? null;
+  const allocations = trace?.policyBudgets ?? [];
+  return {
+    quota: trace?.quota ?? null,
+    allocations,
+    allocated: allocations.reduce((sum, entry) => sum + entry.referenceBudget, 0),
+    claimed: allocations.reduce((sum, entry) => sum + entry.claim, 0),
+    reserved: allocations.reduce((sum, entry) => sum + entry.reserved, 0),
+    spent: allocations.reduce((sum, entry) => sum + entry.spent, 0),
+    unpaid: allocations.reduce((sum, entry) => sum + entry.unpaid, 0),
+    publicWagesAttributed: trace?.publicWagesAttributed ?? 0,
+    publicWagesOverQuota: trace?.publicWagesOverQuota ?? 0,
+    jobs,
+  };
+}
+
+/** v1.6 §五：零员工 / 连续停业 / 本月退出企业统计。 */
+function zombieStats(world: WorldState, cityId: string) {
+  const companies = world.companies.filter((company) => company.cityId === cityId);
+  const zeroEmployees = companies.filter((company) => company.employees <= 0).length;
+  const idleCompanies = companies.filter((company) => (company.ai?.idleMonths ?? 0) > 0);
+  const maxIdleMonths = idleCompanies.reduce(
+    (max, company) => Math.max(max, company.ai?.idleMonths ?? 0),
+    0,
+  );
+  const exitedThisTick = world.lifecycle.liquidations.filter(
+    (record) => record.cityId === cityId && record.tick === world.time.tick,
+  );
+  return { zeroEmployees, idleCount: idleCompanies.length, maxIdleMonths, exitedThisTick };
 }
 
 function companyStats(world: WorldState, cityId: string) {
@@ -818,6 +906,16 @@ function printCheckpoint(world: WorldState) {
     console.log(
       `跨城贸易 本月进口 ${num(trade.importQty, 1)} 件/¥${num(trade.importValue, 1)}（${trade.importGoods.join('；') || '无'}）｜出口 ${num(trade.exportQty, 1)} 件/¥${num(trade.exportValue, 1)}（${trade.exportGoods.join('；') || '无'}）｜成交 ${trade.flowCount} 笔｜城内配送效率 ${trade.deliveryEfficiency === null ? 'n/a' : pct(trade.deliveryEfficiency)}｜跨城运力惩罚 ${trade.corridorPenalty > 0 ? pct(trade.corridorPenalty) : '0.0%'}`,
     );
+    // v1.6 §二：价格与供需明细（居民有效需求 / 企业原料需求 / 本地成交 / 进口出口 / 缺口 / 库存）。
+    for (const [goodId, label] of [
+      ['food', '食品'],
+      ['clothing', '衣物'],
+      ['household', '家居'],
+      ['grain', '谷物'],
+      ['energy', '能源'],
+    ] as const) {
+      console.log(priceMarketLine(world, city, goodId, label));
+    }
     const gov = governmentFiscalDetail(world, city.id);
     console.log(
       `财政明细（窗口 ${gov.entries}/${gov.limit} 条${gov.truncated ? '，已触达账本上限、更早流水被裁剪' : ''}）税收 ${money(gov.tax)}（个税 ${money(gov.incomeTax)}/企业税 ${money(gov.corporateTax)}/消费税 ${money(gov.consumptionTax)}/股息税 ${money(gov.dividendTax)}；交通加成 ${money(gov.transportBonus)}、损耗 ${money(gov.transportLoss)} 单独列示，属游戏化财政调整、无对应纳税人）｜公共工资 ${money(gov.publicWages)}｜福利 ${money(gov.benefits)}｜政策 ${money(gov.policySpending)}｜交通 ${money(gov.transport)}｜政府贷款 ${money(gov.loanProceeds)}/还本息 ${money(gov.loanRepayment)}｜发债 ${money(gov.bondProceeds)}/付本息 ${money(gov.bondService)}｜银行垫付 ${money(gov.bankAdvance)}｜勾销 ${money(gov.writtenOff)}｜其他收入 ${money(gov.otherIncome)}｜选举费 ${money(gov.electionFee)}`,
@@ -837,6 +935,26 @@ function printCheckpoint(world: WorldState) {
         ? `AI 政策资金 参考预算 ${money(policyFunding.referenceBudget)}｜真实预留 ${money(policyFunding.reserved)}｜实际支出 ${money(policyFunding.spent)}｜未支付 ${money(policyFunding.unpaid)}｜来源 ${policyFunding.fundingSource}｜为政策真实借款 ${money(policyFunding.borrowingProceeds)}（债务/GDP ${pct(policyFunding.debtRatioBefore)}→${pct(policyFunding.debtRatioAfterBorrowing)}）｜前置 税收 ${money(policyFunding.taxReceived)}/公共工资 ${money(policyFunding.publicWages)}/福利 ${money(policyFunding.benefitsPaid)}｜顺序 ${policyFunding.stages.map((stage) => stage.stage).join('→')}`
         : 'AI 政策资金 本月无资金追踪记录（玩家市长城市/非 AI 危机政策/旧档）',
     );
+    // v1.6 §一.1：本月总额度（体检 budget）与分项分配；公共岗位人数/人次分开统计（§一.2）。
+    const budgetStats = policyBudgetStats(world, city.id, world.time.tick);
+    if (budgetStats.quota !== null || budgetStats.allocations.length > 0) {
+      console.log(
+        `AI 政策额度 本月总额度 ${money(budgetStats.quota ?? 0)}｜分项参考预算合计 ${money(budgetStats.allocated)}（剩余 ${money((budgetStats.quota ?? 0) - budgetStats.allocated)}）｜需求估算 ${money(budgetStats.claimed)}｜预留 ${money(budgetStats.reserved)}｜实支 ${money(budgetStats.spent)}｜未支付 ${money(budgetStats.unpaid)}｜公共工资归属 ${money(budgetStats.publicWagesAttributed)}（超配额 ${money(budgetStats.publicWagesOverQuota)}）｜分项 ${
+          budgetStats.allocations
+            .map(
+              (entry) =>
+                `${policyName(entry.policyId)} 额度 ${money(entry.referenceBudget)}/需求 ${money(entry.claim)}/预留 ${money(entry.reserved)}/实支 ${money(entry.spent)}/未付 ${money(entry.unpaid)}`,
+            )
+            .join('；') || '无'
+        }`,
+      );
+    }
+    if (budgetStats.jobs) {
+      const jobs = budgetStats.jobs;
+      console.log(
+        `公共岗位 本月新增岗位 ${num(jobs.jobsAdded)}｜月末在岗 ${num(jobs.headcount)}｜撤销岗位 ${num(jobs.jobsRemoved)}｜实发工资 ${money(jobs.wagesPaid)}｜累计新增岗位 ${num(jobs.jobsAddedCumulative)}｜累计在岗人次 ${num(jobs.personMonthsCumulative)}（人次≠新增人数）｜累计撤销 ${num(jobs.jobsRemovedCumulative)}｜净在岗 ${num(jobs.jobsOutstanding)}`,
+      );
+    }
     const equity = investorEquityStats(world, city.id);
     console.log(
       `居民投资权益 有效份额 ${num(equity.totalShares)}（累计投入 ${num(equity.contributed)} + 开局 ${num(equity.opening)}）｜持有人 ${equity.holders}/${equity.groups} 群体｜实体现金 ${money(equity.entityCash)}｜债券估值 ${money(equity.bondsValue)}｜净资产 ${money(equity.netWorth)}｜每份净值 ${num(equity.navPerShare, 4)}｜零人仍持份 ${equity.zeroPeopleWithShares}（${num(equity.zeroPeopleShares)} 份）`,
@@ -857,6 +975,18 @@ function printCheckpoint(world: WorldState) {
     );
     console.log(
       `企业设备 farm ${num(company.equipmentKinds.farm)} / industry ${num(company.equipmentKinds.industry)} / energy ${num(company.equipmentKinds.energy)} 台｜本月购置 ${money(company.equipmentPurchased)} / 出售 ${money(company.equipmentSold)}`,
+    );
+    const maintenance = equipmentMaintenanceStats(world, city.id);
+    console.log(
+      `设备维护费 应计 ${money(maintenance.due)}（费率 ${pct(maintenance.rate, 0)}/月 × 月初台数 farm ${num(maintenance.units.farm)} / industry ${num(maintenance.units.industry)} / energy ${num(maintenance.units.energy)}）｜现金已付 ${money(maintenance.paid)}（其中真实借款 ${money(maintenance.borrowed)}）｜本月新增欠付 ${money(maintenance.arrearsAdded)} / 偿还旧欠 ${money(maintenance.arrearsRepaid)}｜月末欠付 ${money(maintenance.arrearsOutstanding)}｜清算注销坏账 ${money(maintenance.writtenOff)}｜收款方 模拟范围外设备维护服务商`,
+    );
+    const zombies = zombieStats(world, city.id);
+    console.log(
+      `企业退出 零员工 ${zombies.zeroEmployees} 家｜连续无经营计数>0 ${zombies.idleCount} 家（最长 ${zombies.maxIdleMonths} 月）｜本月清算 ${zombies.exitedThisTick.length} 家${
+        zombies.exitedThisTick.length > 0
+          ? `（原因：${zombies.exitedThisTick.map((record) => record.reason).join('；')}）`
+          : ''
+      }`,
     );
     const initialEquipment = initialEquipmentStats(world, city.id);
     console.log(

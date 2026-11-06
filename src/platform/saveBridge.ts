@@ -1,7 +1,9 @@
 import type { DesktopSimApi, SaveSlotInfo } from './desktop';
 
 const STORAGE_PREFIX = 'lanwan-save:';
-const MAX_SAVE_LENGTH = 8 * 1024 * 1024;
+// v1.6：世界状态（近上限 480 家企业 + 银行/证券/债券/维护费流水）在 15 个月即可达 12MB
+// （实测 12.09MB），旧的 8MB 上限会让正常游戏无法保存；提高到 64MB 并保留明确错误提示。
+const MAX_SAVE_LENGTH = 64 * 1024 * 1024;
 
 export type SaveReadCode = 'not-found' | 'read-error' | 'too-large' | 'invalid-slot';
 
@@ -87,7 +89,7 @@ export function createSaveBridge(): SaveBridge {
       const text = localStorage.getItem(STORAGE_PREFIX + slot);
       if (text === null) return { ok: false, error: '存档不存在', code: 'not-found' };
       if (text.length > MAX_SAVE_LENGTH) {
-        return { ok: false, error: '存档过大（超过 8MB 限制）', code: 'too-large' };
+        return { ok: false, error: '存档过大（超过 64MB 限制）', code: 'too-large' };
       }
       return { ok: true, text };
     },
