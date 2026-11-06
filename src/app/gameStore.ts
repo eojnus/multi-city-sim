@@ -586,6 +586,8 @@ export class GameStore {
   lastMigrationFrom: number | null = null;
   autosaveDisabled = false;
   autosaveDisabledReason: string | null = null;
+  /** 自动存档暂停是否由“写入失败”引起（区别于读取到损坏存档；手动保存成功后解除）。 */
+  autosaveWriteFailure = false;
   layouts: Record<string, CityLayout> = {};
   // v0.8 股票市场窗口状态（纯 UI 视图状态，不参与模拟）。
   stockMarketOpen = false;
@@ -806,25 +808,44 @@ export class GameStore {
     // 损坏的自动存档会保留原文件，直到玩家显式载入有效存档或开始新世界。
     if (this.autosaveDisabled) return;
     const text = serializeSave(this.world);
-    const result = await this.bridge.write('autosave', text);
+    let result: { ok: boolean; error?: string };
+    try {
+      result = await this.bridge.write('autosave', text);
+    } catch (error) {
+      // 桥接层抛异常同样按“写入失败”处理：暂停自动写入，绝不覆盖原自动存档。
+      result = { ok: false, error: (error as Error).message };
+    }
     if (result.ok) {
       this.lastSavedAt = new Date().toISOString();
       this.lastAutoSaveError = null;
-    } else {
-      this.lastAutoSaveError = result.error ?? '自动存档失败';
+      return;
     }
+    this.pauseAutosaveAfterWriteFailure(result.error ?? '自动存档失败');
   }
 
   async saveSlot(slot: string): Promise<boolean> {
     const text = serializeSave(this.world);
-    const result = await this.bridge.write(slot, text);
+    let result: { ok: boolean; error?: string };
+    try {
+      result = await this.bridge.write(slot, text);
+    } catch (error) {
+      result = { ok: false, error: (error as Error).message };
+    }
     if (result.ok) {
       this.lastSavedAt = new Date().toISOString();
+      // 手动保存成功说明存档通道已恢复：解除“写入失败”导致的自动存档暂停。
+      // 读取到损坏自动存档导致的暂停仍需显式读取其他存档/开始新世界（保留原文件）。
+      if (this.autosaveWriteFailure) {
+        this.autosaveDisabled = false;
+        this.autosaveDisabledReason = null;
+        this.lastAutoSaveError = null;
+        this.autosaveWriteFailure = false;
+      }
       this.toast(`已保存到 ${slot}。`, 'success');
       this.emit();
       return true;
     }
-    this.toast(`保存失败：${result.error ?? '未知错误'}`, 'error');
+    this.toast(`保存失败：${result.error ?? '未知错误'}；原存档未被修改。`, 'error');
     this.emit();
     return false;
   }
@@ -870,6 +891,7 @@ export class GameStore {
     this.autosaveDisabled = false;
     this.autosaveDisabledReason = null;
     this.lastAutoSaveError = null;
+    this.autosaveWriteFailure = false;
     this.rebuildLayouts();
     const date = parsed.save?.savedAt ? new Date(parsed.save.savedAt).toLocaleString('zh-CN') : '未知时间';
     this.lastSavedAt = parsed.save?.savedAt ?? null;
@@ -941,6 +963,7 @@ export class GameStore {
     this.autosaveDisabled = false;
     this.autosaveDisabledReason = null;
     this.lastAutoSaveError = null;
+    this.autosaveWriteFailure = false;
     if (this.lastMigrationFrom !== null) {
       this.toast(
         `自动存档来自旧版格式 ${this.lastMigrationFrom}，已迁移到 v2；原有资金、持股、企业、人口和随机状态保留。`,
@@ -954,12 +977,27 @@ export class GameStore {
   private disableAutosave(reason: string): void {
     // 不删除、不重命名、不覆盖损坏文件；给玩家保留用其他工具恢复的机会。
     this.autosaveDisabled = true;
+    this.autosaveWriteFailure = false;
     this.autosaveDisabledReason = reason;
     this.lastAutoSaveError = `自动存档已暂停：${reason}`;
     this.lastError = `自动存档损坏：${reason}`;
     this.toast(
       `自动存档损坏：${reason}；已暂停自动写入并保留原文件，当前为新世界。可读取其他存档或手动保存。`,
       'warning',
+    );
+    this.emit();
+  }
+
+  /** 自动存档写入失败：暂停自动写入并保留原文件（写入路径在落盘前已校验，不会覆盖原档）。 */
+  private pauseAutosaveAfterWriteFailure(reason: string): void {
+    this.autosaveDisabled = true;
+    this.autosaveWriteFailure = true;
+    this.autosaveDisabledReason = reason;
+    this.lastAutoSaveError = reason;
+    this.lastError = `自动存档失败：${reason}`;
+    this.toast(
+      `自动存档失败：${reason}；已暂停自动写入，原有自动存档未被覆盖。手动保存成功后可恢复自动存档。`,
+      'error',
     );
     this.emit();
   }
@@ -976,6 +1014,7 @@ export class GameStore {
     this.autosaveDisabled = false;
     this.autosaveDisabledReason = null;
     this.lastAutoSaveError = null;
+    this.autosaveWriteFailure = false;
     this.rebuildLayouts();
     this.toast('已开始新的世界；旧的手动存档仍保留。', 'info');
     void this.autosave();
@@ -1102,11 +1141,20 @@ export class GameStore {
   get systemNotices(): { id: string; tone: 'info' | 'warning' | 'error'; text: string }[] {
     const notices: { id: string; tone: 'info' | 'warning' | 'error'; text: string }[] = [];
     if (this.autosaveDisabled) {
-      notices.push({
-        id: 'autosave-paused',
-        tone: 'error',
-        text: `自动存档已暂停：${this.autosaveDisabledReason ?? '检测到无法读取的自动存档'}。原文件已保留；读取其他存档或开始新世界后才会恢复自动保存。`,
-      });
+      if (this.autosaveWriteFailure) {
+        // 写入失败（超限/结构无效/IO）：原自动存档在落盘前已校验，未被覆盖；手动保存成功即恢复。
+        notices.push({
+          id: 'autosave-paused',
+          tone: 'error',
+          text: `自动存档失败：${this.autosaveDisabledReason ?? '未知错误'}。已暂停自动写入，原有自动存档未被覆盖；修复后手动保存成功即可恢复自动保存。`,
+        });
+      } else {
+        notices.push({
+          id: 'autosave-paused',
+          tone: 'error',
+          text: `自动存档已暂停：${this.autosaveDisabledReason ?? '检测到无法读取的自动存档'}。原文件已保留；读取其他存档或开始新世界后才会恢复自动保存。`,
+        });
+      }
     } else if (this.lastAutoSaveError) {
       notices.push({
         id: 'autosave-error',

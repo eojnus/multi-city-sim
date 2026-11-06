@@ -2229,6 +2229,19 @@ function validateLifecycle(value: unknown, cityIds: Set<string>): string | null 
       );
       if (error) return error;
     }
+    // v1.7 §二 F2：清算对账字段（可选；旧档缺省安全，出现时必须是有限数值）。
+    for (const key of [
+      'equipmentProceeds',
+      'equipmentMaintenanceDue',
+      'equipmentMaintenancePaid',
+      'equipmentMaintenanceArrearsRepaid',
+      'equipmentMaintenanceWrittenOff',
+    ]) {
+      if (record[key] === undefined) continue;
+      if (!isFiniteNumber(record[key])) {
+        return `lifecycle.liquidations[${index}].${key} 无效`;
+      }
+    }
   }
   return null;
 }

@@ -4,7 +4,7 @@
 
 export const SAVE_FORMAT_VERSION = 9;
 /** v1.6：本轮为“规则修复 + 经济规则调整”，新增字段全部可选、缺省安全，存档格式不升版。 */
-export const GAME_VERSION = '1.6.0';
+export const GAME_VERSION = '1.6.1';
 
 export type GoodId =
   | 'grain'
@@ -1602,6 +1602,19 @@ export interface LiquidationRecord {
   note: string;
   /** v1.4 §4：锁定期内提前退出时，按实物返还给创办者的初始设备（不进入清算现金）。 */
   initialEquipmentReturned?: { kind: EquipmentKind; units: number; valuation: number };
+  /**
+   * v1.7 §二 F2：设备处置收入（真实买家付款，已计入清算现金；移交政府库存部分无现金）。
+   * 清算对账：处置收入 + 清算前现金 = 维护费实付 + 银行债务偿还 + 股东分配（+ 取整余额）。
+   */
+  equipmentProceeds?: number;
+  /** v1.7 §二 F2：清算时补记的当月设备维护费应计（本月已由财务结算过时为 0，不重复计费）。 */
+  equipmentMaintenanceDue?: number;
+  /** v1.7 §二 F2：清算资金实际支付给维护服务商的金额（当月费用 + 旧欠）。 */
+  equipmentMaintenancePaid?: number;
+  /** v1.7 §二 F2：其中偿还以前月份欠款的部分（只冲负债，不重复计入费用）。 */
+  equipmentMaintenanceArrearsRepaid?: number;
+  /** v1.7 §二 F2：确实收不到、记为模拟范围外服务商坏账的维护费（不制造模拟内资金）。 */
+  equipmentMaintenanceWrittenOff?: number;
 }
 
 export interface CompanyLifecycleState {

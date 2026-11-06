@@ -4,9 +4,13 @@
  * 口径（用户任务书 + D1/D2）：
  * - 每月每类设备维护费 = 企业持有该类设备台数 × 所在城市该类“新设备”当月市场参考单价 × 费率（默认 1%），
  *   逐类求和；所有设备（在工作、闲置、停产、二手、初始实物出资）都计费。
- * - 计费时点（D1）= **当月月初持有时点快照**（`Company.maintenanceBase`）与**月初参考价**
- *   （`Company.maintenancePrices`）。快照由 `beginEquipmentMaintenanceMonth` 在每个 tick 开头
- *   （advanceTime 之后、任何设备买卖/挂单/破产之前）写入：
+ * - v1.7 §一 F1：“持有台数”= 企业当前 equipment + 该企业**未成交二手挂单** units（逐类）。
+ *   挂单只是委托出售、设备仍属卖方并由卖方维护，不能靠“高价挂单不成交”逃费；
+ *   成交后卖方当月已按月初快照计费、买方从下月起计费（D1 持有时点不变）。
+ *   该口径只影响计费台数，不改 equipment / capacity / 产能重算（挂单设备不重复计产能）。
+ * - 计费时点（D1）= **当月月初持有时点快照**（`Company.maintenanceBase`，口径含未成交挂单）
+ *   与**月初参考价**（`Company.maintenancePrices`）。快照由 `beginEquipmentMaintenanceMonth`
+ *   在每个 tick 开头（advanceTime 之后、任何设备买卖/挂单/破产之前）写入：
  *     · 当月买入（含月中挂单后成交）的设备下月起计费；
  *     · 当月卖出/挂单/返还/破产的设备仍按月初台数计当月费用（防止月末交易绕费）；
  *     · 旧存档没有快照：下一次 tick 开头自动补齐，不重复创建设备，旧档正常开始计费；
@@ -104,6 +108,31 @@ export function companyHasMaintenanceArrears(company: Company): boolean {
   return maintenanceArrearsOf(company) > 0.005;
 }
 
+/**
+ * v1.7 §一 F1：企业名下应计维护费的设备台数 = 当前 equipment + 该企业未成交二手挂单 units（逐类）。
+ *
+ * 挂单只是“委托出售、尚未成交”，设备仍归卖方并由卖方维护；`listUsedEquipment` 会把台数从
+ * `company.equipment` 移到 `equipmentMarket.offers`，若只数 equipment，企业就能用“高价挂单
+ * 不成交”逃避维护费（用户验收复现：第 2 个月维护费变 0）。因此计费台数必须把未成交挂单算回。
+ *
+ * 责任切换（仍按 D1 月初持有时点）：挂单/成交发生在月内时，当月快照仍是月初台数——
+ * 卖方当月已计费，买方从下月快照起计费；撤单把台数还回 equipment，也不重复计。
+ * 本函数只影响**计费台数**，不改变 equipment / capacity / 产能重算口径（挂单设备不重复计产能）。
+ */
+export function maintenanceBilledUnits(world: WorldState, company: Company): EquipmentAssets {
+  const units: EquipmentAssets = {
+    farm: roundUnits(company.equipment.farm),
+    industry: roundUnits(company.equipment.industry),
+    energy: roundUnits(company.equipment.energy),
+  };
+  for (const offer of world.equipmentMarket.offers ?? []) {
+    if (offer.companyId !== company.id) continue;
+    if (!KINDS.includes(offer.kind)) continue;
+    units[offer.kind] = roundUnits(units[offer.kind] + Math.max(0, Math.floor(offer.units)));
+  }
+  return units;
+}
+
 function roundUnits(value: number): number {
   return Math.max(0, Math.floor(Number.isFinite(value) ? value : 0));
 }
@@ -151,6 +180,18 @@ function archivePreviousMonth(world: WorldState, config: DemoConfig): void {
   if (history.length > limit) history.splice(0, history.length - limit);
 }
 
+/** 把“月初未付维护费合计”作为月末欠付余额（存量）的初值，之后只累加增量。 */
+function seedArrearsStock(world: WorldState, month: EquipmentMaintenanceMonth): void {
+  for (const company of world.companies) {
+    const carried = maintenanceArrearsOf(company);
+    if (carried <= 0.005) continue;
+    month.totalArrearsOutstanding = round2(month.totalArrearsOutstanding + carried);
+    cityFlow(company.cityId, month).arrearsOutstanding = round2(
+      cityFlow(company.cityId, month).arrearsOutstanding + carried,
+    );
+  }
+}
+
 /** 取（必要时建立）本月维护费流水；tick 变化时先归档上月。 */
 function ensureMaintenanceMonth(world: WorldState, config: DemoConfig): EquipmentMaintenanceMonth {
   const market = world.equipmentMarket;
@@ -158,6 +199,9 @@ function ensureMaintenanceMonth(world: WorldState, config: DemoConfig): Equipmen
   if (!market.maintenanceMonth || market.maintenanceMonth.tick !== tick) {
     archivePreviousMonth(world, config);
     market.maintenanceMonth = emptyMonth(tick);
+    // 无 tick 快照的直调路径（旧档/测试/工具）也要让“月末欠付存量”从月初欠费起算，
+    // 否则清算注销时会把未计入存量的旧欠重复扣成负数。
+    seedArrearsStock(world, market.maintenanceMonth);
   }
   return market.maintenanceMonth;
 }
@@ -184,20 +228,15 @@ export function beginEquipmentMaintenanceMonth(world: WorldState, config: DemoCo
   // 之后各企业结算/补付/清算坏账只累加增量（arrearsDelta）。否则跨月存量会在
   // 清算注销时被重复扣减，出现负的月末欠付（v1.6 72 月报告实测 -2,839）。
   if (freshMonth && month) {
-    for (const company of world.companies) {
-      const carried = maintenanceArrearsOf(company);
-      if (carried <= 0.005) continue;
-      month.totalArrearsOutstanding = round2(month.totalArrearsOutstanding + carried);
-      cityFlow(company.cityId, month).arrearsOutstanding = round2(
-        cityFlow(company.cityId, month).arrearsOutstanding + carried,
-      );
-    }
+    seedArrearsStock(world, month);
   }
   for (const company of world.companies) {
+    // v1.7 §一 F1：月初持有台数 = equipment + 未成交二手挂单（挂单设备仍属卖方）。
+    const billed = maintenanceBilledUnits(world, company);
     company.maintenanceBase = {
-      farm: roundUnits(company.equipment.farm),
-      industry: roundUnits(company.equipment.industry),
-      energy: roundUnits(company.equipment.energy),
+      farm: billed.farm,
+      industry: billed.industry,
+      energy: billed.energy,
     };
     company.maintenancePrices = {
       farm: equipmentUnitPrice(world, company.cityId, 'farm', config),
@@ -234,12 +273,16 @@ export function monthlyMaintenanceDue(
   }
   const lines: MaintenanceLine[] = [];
   const unitsByKind = emptyEquipmentAssets();
+  // v1.7 §一 F1：无快照的直调回退也必须与 AI 估算同口径（equipment + 未成交挂单）。
+  const fallbackUnits = basis === 'currentFallback' ? maintenanceBilledUnits(world, company) : null;
   let due = 0;
   for (const kind of KINDS) {
     const units =
       basis === 'newThisMonth'
         ? 0
-        : roundUnits(basis === 'monthStartSnapshot' ? base![kind] : company.equipment[kind]);
+        : roundUnits(
+            basis === 'monthStartSnapshot' ? base![kind] : (fallbackUnits?.[kind] ?? 0),
+          );
     const unitPrice =
       basis === 'monthStartSnapshot'
         ? round2(Math.max(1, prices?.[kind] ?? equipmentUnitPrice(world, company.cityId, kind, config)))
@@ -273,8 +316,9 @@ export function currentMonthMaintenance(
 }
 
 /**
- * 只读（AI 用，签名稳定）：按**当前**设备台数与**当前**城市参考单价估算的月维护费。
+ * 只读（AI 用，签名稳定）：按**当前**计费台数与**当前**城市参考单价估算的月维护费。
  *
+ * v1.7 §一 F1：计费台数 = equipment + 未成交二手挂单（挂单设备仍属卖方），与结算口径一致。
  * 用于公司经营计划的固定成本/现金储备估算：闲置设备也计入，所以用当前持有台数而不是
  * 产出利用率。不修改世界状态；旧档/无快照同样可用。
  */
@@ -284,9 +328,10 @@ export function estimatedMonthlyMaintenance(
   config: DemoConfig,
 ): number {
   const rate = equipmentMaintenanceRate(config);
+  const billed = maintenanceBilledUnits(world, company);
   let cost = 0;
   for (const kind of KINDS) {
-    const units = roundUnits(company.equipment[kind]);
+    const units = billed[kind];
     if (units <= 0) continue;
     const price = equipmentUnitPrice(world, company.cityId, kind, config);
     cost = round2(cost + units * price * rate);
@@ -326,12 +371,24 @@ function addCityFlow(
   flow.writtenOff = round2(flow.writtenOff + (delta.writtenOff ?? 0));
 }
 
+/** 单企业结算可选参数（v1.7 §二 F2：清算路径先算应计、且只用真实清算资金）。 */
+export interface CompanyMaintenanceSettlementOptions {
+  /**
+   * 预先计算的当月应计（清算路径在**设备处置前**先算好，保证按处置前台数计费；
+   * 处置会把设备卖给买方/移交政府库存，处置后再数台数会漏计）。
+   */
+  dueInfo?: CompanyMaintenanceDue;
+  /** 清算路径不得为维护费新增借款：只用企业真实可用现金（含处置收入），不足记坏账。 */
+  skipFinancing?: boolean;
+}
+
 /**
  * 当月维护费结算（单企业）：融资 → 支付 → 欠付入账 → 写月度流水。
  *
  * 幂等：同一 tick 内同一企业只结算一次（`settledCompanyIds`），保证“只扣一次”。
  * 由 finance.settleCompanyFinance 在工资之后、所得税/还本付息/股息之前逐企业调用；
- * 清算路径由 disposeCompanyEquipment 在分配清算现金之前调用。
+ * 清算路径由 lifecycle.liquidateCompany 在设备处置收入到账后、银行债务/股东分配之前调用
+ * （见 settleCompanyMaintenanceOnLiquidation，F2 偿付顺序）。
  */
 export function settleCompanyMaintenanceForCompany(
   world: WorldState,
@@ -339,6 +396,7 @@ export function settleCompanyMaintenanceForCompany(
   company: Company,
   log: LogEntry[],
   tick = world.time.tick,
+  options: CompanyMaintenanceSettlementOptions = {},
 ): CompanyMaintenanceSettlement {
   const month = ensureMaintenanceMonth(world, config);
   const already = month.settledCompanyIds.includes(company.id);
@@ -357,15 +415,16 @@ export function settleCompanyMaintenanceForCompany(
       lines: [],
     };
   }
-  const dueInfo = monthlyMaintenanceDue(world, company, config);
+  const dueInfo = options.dueInfo ?? monthlyMaintenanceDue(world, company, config);
   const due = dueInfo.due;
   const arrearsBefore = maintenanceArrearsOf(company);
   const stats = company.lastMonth;
 
   // 1) 现金不足时按既有规则合法融资（银行授信 + 玩家经营授权）；有欠付时不再以贷养欠。
+  //    清算路径 skipFinancing=true：企业正在退出，不得新增债务，只按真实清算资金支付。
   let borrowed = 0;
   const shortfall = round2(Math.max(0, due - company.cash));
-  if (shortfall > 0.005) {
+  if (shortfall > 0.005 && !options.skipFinancing) {
     const blockedByArrears =
       (config.equipment.maintenanceArrearsBlocksFinancing ?? true) && arrearsBefore > 0.005;
     if (blockedByArrears) {
@@ -483,37 +542,99 @@ export function settleCompanyMaintenance(
 }
 
 /**
- * 清算路径：在分配清算现金之前补收当月维护费（D1：按月初台数计当月）。
+ * v1.7 §二 F2：清算前（设备处置之前）计算当月应计，供处置收入到账后再真正偿付。
  *
- * 企业清算时现金先被真实扣减，剩余现金才用于偿债/股东分配；确实收不到的欠款
- * 记服务商坏账（只留痕，不在模拟范围内制造任何资金）。返回 null 表示本月已结算过。
+ * 必须先调用：`disposeCompanyEquipment` 会把设备卖给真实买家或移交政府库存，
+ * 处置后再数台数会漏计；同时这里先确保本月流水存在，使“本月新设企业不计费”的
+ * 口径与正常财务结算一致。
+ */
+export function planCompanyMaintenanceOnLiquidation(
+  world: WorldState,
+  config: DemoConfig,
+  company: Company,
+): CompanyMaintenanceDue {
+  ensureMaintenanceMonth(world, config);
+  return monthlyMaintenanceDue(world, company, config);
+}
+
+/**
+ * v1.7 §二 F2：清算路径的维护费结算（设备处置收入到账后、银行债务/股东分配之前调用）。
+ *
+ * 用户验收问题：旧实现把本函数放在 `disposeCompanyEquipment` 开头，企业现金为 0 时先把
+ * “当月费用 + 旧欠”记成坏账；随后设备处置卖出 180,000，因已无维护费负债，这笔钱全进了
+ * 股东口袋。正确顺序是：
+ *   1. 先用**真实清算资金**（含设备处置收入）偿付维护服务商：先当月费用、再旧欠；
+ *   2. 只有确实收不到的部分才记服务商坏账（只留痕，不制造模拟内资金）；
+ *   3. 之后剩余的清算现金才用于银行债务与股东分配（由 liquidateCompany 继续执行）。
+ *
+ * 两段式：`dueInfo` 由调用方在**设备处置前**算好（处置会把设备卖给买方或移交政府库存，
+ * 处置后按台数会漏计）；本函数负责登记应计、现金偿付与坏账。
+ * 幂等：若本月已由 finance 结算过（`settledCompanyIds`），不会重复计当月费用，只继续
+ * 用清算现金偿还旧欠并注销收不到的部分。
  */
 export function settleCompanyMaintenanceOnLiquidation(
   world: WorldState,
   config: DemoConfig,
   company: Company,
   log: LogEntry[],
-): CompanyMaintenanceSettlement | null {
-  const result = settleCompanyMaintenanceForCompany(world, config, company, log);
-  const target = result.settled ? null : result;
-  // 已结算但仍有欠付（月末结算后、tick 之间清算）：欠款随企业消失，记服务商坏账。
-  const arrears = maintenanceArrearsOf(company);
-  if (arrears > 0.005 && (config.equipment.maintenanceWriteOffOnLiquidation ?? true)) {
-    const month = ensureMaintenanceMonth(world, config);
-    month.totalWrittenOff = round2(month.totalWrittenOff + arrears);
-    month.totalArrearsOutstanding = round2(month.totalArrearsOutstanding - arrears);
-    addCityFlow(month, company.cityId, { writtenOff: arrears, arrearsDelta: -arrears });
-    company.maintenanceArrears = 0;
-    company.lastMonth.maintenanceArrears = 0;
+  options: CompanyMaintenanceSettlementOptions = {},
+): CompanyMaintenanceSettlement {
+  // 阶段 1：登记/结算当月应计（未结算时）。清算不新增借款，只用真实可用现金。
+  const settlement = settleCompanyMaintenanceForCompany(
+    world,
+    config,
+    company,
+    log,
+    world.time.tick,
+    { dueInfo: options.dueInfo, skipFinancing: true },
+  );
+  const month = ensureMaintenanceMonth(world, config);
+
+  // 阶段 2：用处置后的真实现金偿还剩余欠付；收不到的部分记坏账。
+  const remaining = maintenanceArrearsOf(company);
+  if (remaining <= 0.005) return settlement;
+  const arrearsBefore = remaining;
+  const paidFromCash = round2(Math.min(Math.max(0, company.cash), remaining));
+  company.cash = round2(company.cash - paidFromCash);
+  const writtenOff = round2(remaining - paidFromCash);
+  company.maintenanceArrears = 0;
+  const stats = company.lastMonth;
+  stats.maintenanceArrearsRepaid = round2((stats.maintenanceArrearsRepaid ?? 0) + paidFromCash);
+  stats.maintenanceArrears = 0;
+
+  month.totalPaid = round2(month.totalPaid + paidFromCash);
+  month.totalArrearsRepaid = round2(month.totalArrearsRepaid + paidFromCash);
+  // 欠付余额是“存量”：偿还 + 坏账都减少负债，金额只随增量变化（避免跨月重复扣减）。
+  month.totalArrearsOutstanding = round2(month.totalArrearsOutstanding - arrearsBefore);
+  if (writtenOff > 0.005 && (config.equipment.maintenanceWriteOffOnLiquidation ?? true)) {
+    month.totalWrittenOff = round2(month.totalWrittenOff + writtenOff);
+  }
+  addCityFlow(month, company.cityId, {
+    paid: paidFromCash,
+    arrearsRepaid: paidFromCash,
+    writtenOff,
+    arrearsDelta: -arrearsBefore,
+  });
+  if (paidFromCash > 0.005) {
     log.push({
       tick: world.time.tick,
       kind: 'warning',
-      message: `${company.name} 清算：未付设备维护费 ${arrears.toFixed(0)} 无法收回，记模拟范围外服务商坏账（不制造模拟内资金，不影响股东分配）。`,
+      message: `${company.name} 清算：用设备处置/清算资金偿付设备维护费欠款 ${paidFromCash.toFixed(0)}（服务商债权优先于银行债务与股东分配）。`,
     });
-    if (result.settled) result.writtenOff = arrears;
-    return result.settled ? result : null;
   }
-  return target;
+  if (writtenOff > 0.005) {
+    log.push({
+      tick: world.time.tick,
+      kind: 'warning',
+      message: `${company.name} 清算：未付设备维护费 ${writtenOff.toFixed(0)} 在清算资金中仍无法收回，记模拟范围外服务商坏账（不制造模拟内资金，不减少股东分配）。`,
+    });
+  }
+  return {
+    ...settlement,
+    arrearsRepaid: round2(settlement.arrearsRepaid + paidFromCash),
+    arrearsOutstanding: 0,
+    writtenOff: round2(settlement.writtenOff + writtenOff),
+  };
 }
 
 /**

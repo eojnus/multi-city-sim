@@ -1,9 +1,32 @@
 import type { DesktopSimApi, SaveSlotInfo } from './desktop';
 
 const STORAGE_PREFIX = 'lanwan-save:';
-// v1.6：世界状态（近上限 480 家企业 + 银行/证券/债券/维护费流水）在 15 个月即可达 12MB
-// （实测 12.09MB），旧的 8MB 上限会让正常游戏无法保存；提高到 64MB 并保留明确错误提示。
-const MAX_SAVE_LENGTH = 64 * 1024 * 1024;
+/**
+ * v1.6 §三：世界状态（近上限 480 家企业 + 银行/证券/债券/维护费流水）在 15 个月即达 12MB，
+ * 旧 8MB 上限会让正常游戏无法保存；上限提高到 64MiB（字节，UTF-8），并保留明确错误提示。
+ * 必须与 electron/saveIpc.MAX_SAVE_BYTES 一致（tests/save-boundary-v17.test.ts 校验）。
+ */
+export const MAX_SAVE_BYTES = 64 * 1024 * 1024;
+/** 与 electron/saveIpc.SAVE_TOO_LARGE_ERROR 完全一致的用户可见文案。 */
+export const SAVE_TOO_LARGE_ERROR = '存档过大（超过 64MB / 64MiB 限制）';
+
+/** 文本的 UTF-8 字节数（与主进程 Buffer.byteLength 口径一致；浏览器/Node 24 都有 TextEncoder）。 */
+export function saveTextByteLength(text: string): number {
+  return new TextEncoder().encode(text).byteLength;
+}
+
+/**
+ * 渲染层写入/读取前的上限预检。
+ *
+ * 必须按 UTF-8 字节判断：中文 1 个字 = 3 字节，只用 `text.length` 会放过主进程随后拒绝的
+ * 存档（出现“预检通过但保存失败”的不一致）。快路径利用 length ≤ 字节数 ≤ 3×length：
+ * 超上限的 length 直接拒绝，明显安全的小存档不做编码分配，只有边界灰区才精确编码。
+ */
+export function isSaveTextTooLarge(text: string, maxBytes = MAX_SAVE_BYTES): boolean {
+  if (text.length > maxBytes) return true;
+  if (text.length * 3 <= maxBytes) return false;
+  return saveTextByteLength(text) > maxBytes;
+}
 
 export type SaveReadCode = 'not-found' | 'read-error' | 'too-large' | 'invalid-slot';
 
@@ -41,7 +64,7 @@ export function createSaveBridge(): SaveBridge {
         };
       },
       async write(slot, text) {
-        if (text.length > MAX_SAVE_LENGTH) return { ok: false, error: '存档过大' };
+        if (isSaveTextTooLarge(text)) return { ok: false, error: SAVE_TOO_LARGE_ERROR };
         const result = await desktop.saves.write(slot, text);
         return { ok: result.ok, error: result.error };
       },
@@ -88,13 +111,13 @@ export function createSaveBridge(): SaveBridge {
     async read(slot) {
       const text = localStorage.getItem(STORAGE_PREFIX + slot);
       if (text === null) return { ok: false, error: '存档不存在', code: 'not-found' };
-      if (text.length > MAX_SAVE_LENGTH) {
-        return { ok: false, error: '存档过大（超过 64MB 限制）', code: 'too-large' };
+      if (isSaveTextTooLarge(text)) {
+        return { ok: false, error: SAVE_TOO_LARGE_ERROR, code: 'too-large' };
       }
       return { ok: true, text };
     },
     async write(slot, text) {
-      if (text.length > MAX_SAVE_LENGTH) return { ok: false, error: '存档过大' };
+      if (isSaveTextTooLarge(text)) return { ok: false, error: SAVE_TOO_LARGE_ERROR };
       try {
         localStorage.setItem(STORAGE_PREFIX + slot, text);
         return { ok: true };

@@ -15,7 +15,6 @@ import {
   recordIntercityEquipmentPurchase,
 } from '../markets/intercity';
 import { issueInventory } from '../finance/inventory-cost';
-import { settleCompanyMaintenanceOnLiquidation } from './maintenance';
 
 /**
  * v0.9：设备资产与设备市场。
@@ -755,10 +754,6 @@ export function disposeCompanyEquipment(
   /** v1.4：锁定期内按实物返还给创办者的初始设备（不产生现金，不进入政府库存）。 */
   initialReturned: { kind: EquipmentKind; units: number; valuation: number }[];
 } {
-  // v1.6 §四：清算企业仍按“月初持有台数”补收当月设备维护费（D1：当月破产仍计当月）。
-  // 现金在此先真实扣减，之后剩余的清算现金才用于偿债/股东分配；确实收不到的欠款
-  // 记模拟范围外服务商坏账（不制造模拟内资金、不影响设备处置口径）。
-  settleCompanyMaintenanceOnLiquidation(world, config, company, log);
   let proceeds = 0;
   let unitsSold = 0;
   let unitsConsigned = 0;

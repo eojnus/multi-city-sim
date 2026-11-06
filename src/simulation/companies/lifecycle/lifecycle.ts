@@ -52,6 +52,10 @@ import {
   returnLockedInitialEquipment,
 } from '../../equipment/equipment';
 import {
+  planCompanyMaintenanceOnLiquidation,
+  settleCompanyMaintenanceOnLiquidation,
+} from '../../equipment/maintenance';
+import {
   FOUNDING_MIN_SCORE,
   INITIAL_EQUIPMENT_LOCK_MONTHS,
   assessFounding,
@@ -1414,6 +1418,10 @@ export function liquidateCompany(
   if (!city) return { ok: false, error: '企业城市不存在' };
 
   const interestedStake = playerStakeOf(world, company.id);
+  // v1.7 §二 F2：维护费（当月 + 旧欠）必须在设备处置收入到账后、银行债务/股东分配之前偿付；
+  // 但应计台数必须按**处置前**时点算（月初快照优先；无快照时回退处置前 equipment+未成交挂单），
+  // 否则设备已卖出/移交政府库存后再数台数会漏计当月费用。
+  const maintenanceDueInfo = planCompanyMaintenanceOnLiquidation(world, config, company);
   const prices = cityMarketPrices(city);
   // v1.3：清算按存货账面成本注销（旧档无账面成本时按当期市场价估值），
   // 注销额单独记 inventoryWriteOff，避免与正常销售的 COGS 重复。
@@ -1443,6 +1451,16 @@ export function liquidateCompany(
   if (equipmentSale.proceeds > 0) {
     company.cash = round2(company.cash + equipmentSale.proceeds);
   }
+  // v1.7 §二 F2：现在设备已按真实买家/政府库存处置、处置收入已入企业现金：
+  // 先用真实清算资金偿付维护服务商（当月费用 + 旧欠），确实收不到才记坏账；
+  // 之后剩余现金才进入银行债务结算与股东分配，服务商债权优先于银行债务与股东。
+  const maintenanceSettlement = settleCompanyMaintenanceOnLiquidation(
+    world,
+    config,
+    company,
+    log,
+    { dueInfo: maintenanceDueInfo },
+  );
   // v0.9：债券是企业的真实资产，清算时不得凭空消失——先按持股比例转给股东。
   redistributeLiquidatedBonds(world, company, log);
 
@@ -1714,8 +1732,17 @@ export function liquidateCompany(
     inventoryBookValue,
     agreementsAffected,
     initialEquipmentReturned: returnedInitial ?? undefined,
+    // v1.7 §二 F2：清算对账字段（处置收入 / 维护费应计、实付、旧欠偿还、坏账），
+    // 保证“当月维护费 + 旧欠 = 实付 + 坏账”，股东只分到偿付服务商与银行后的剩余。
+    equipmentProceeds: round2(equipmentSale.proceeds),
+    equipmentMaintenanceDue: round2(maintenanceSettlement.due),
+    equipmentMaintenancePaid: round2(
+      maintenanceSettlement.paidToCurrent + maintenanceSettlement.arrearsRepaid,
+    ),
+    equipmentMaintenanceArrearsRepaid: round2(maintenanceSettlement.arrearsRepaid),
+    equipmentMaintenanceWrittenOff: round2(maintenanceSettlement.writtenOff),
     note:
-      '清算顺序（暂定）：现金先偿还债务，剩余按股分配；库存按账面注销并留痕，未产生现金；未偿还债务记为减免。不是完整破产程序。' +
+      '清算顺序（暂定）：设备按真实买家处置（无人购买移交政府库存、不产生现金），处置收入先偿付设备维护服务商（当月费用+旧欠，确实收不到记坏账），再偿还银行债务，剩余按股分配；库存按账面注销并留痕；未偿还债务记为减免。不是完整破产程序。' +
       (proposedMotions.length > 0
         ? ` 该企业提出的 ${proposedMotions.length} 项未决议案因提案人不存在而移除。`
         : '') +
