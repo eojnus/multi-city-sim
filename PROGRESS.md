@@ -90,6 +90,6 @@ v1.7.0（存档系统任务书）：统一存档管理器 + 分模块快照 + �
   - `8504de5` test(v1.7)：persistence 10 文件 + 既有测试 v10 适配
   - `7282187` docs(v1.7)：交付报告/DESIGN/README/PLAN/PROGRESS/证据/脚本（**已推送的交付 HEAD**）
   - 推送 SHA 回填提交（HEAD，见 `git log -1`）
-- **推送成功（已核验）**：`31b6627..7282187 feature/stock-market-ui-tax -> feature/stock-market-ui-tax`；
-  本地 HEAD = `origin/feature/stock-market-ui-tax` = `72821875941dbab27b513375661be3a091c0ec1c`；
+- **推送成功（已核验）**：`31b6627..7282187` 快进推送，随后推送回填/文档对齐提交；
+  **最终本地 HEAD = `origin/feature/stock-market-ui-tax`** 以 `git log -1` 为准；
   `origin/main` 仍 `6c45000`（未合并、未改写历史）。PAT 仅作单次命令环境变量，未写入文件，验收后请撤销。

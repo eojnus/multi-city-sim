@@ -206,10 +206,10 @@ sync 函数重建；`city.lastMonth` 虽多写者，但存档归属唯一（worl
 - 本轮提交链（基线之上）：`147e54c` feat(persistence) → `32a0548` fix(persistence) →
   `2502e0e` docs(design) → `4d9af42` feat(v1.7) → `8504de5` test(v1.7) →
   `7282187` docs(v1.7)（**已推送的交付 HEAD**）→ 推送 SHA 回填提交（本地=远端，见 `git log -1`）
-- 推送：`31b6627..7282187  feature/stock-market-ui-tax -> feature/stock-market-ui-tax`（**快进推送**）；
-  推送后实测本地 HEAD = `origin/feature/stock-market-ui-tax` =
-  `72821875941dbab27b513375661be3a091c0ec1c`；`origin/main` 仍
-  `6c45000efc4c406d30e22c0a12bd066fc2df61f7`（未合并、未改写历史）。
+- 推送：`31b6627..7282187 feature/stock-market-ui-tax -> feature/stock-market-ui-tax`（**快进推送**），
+  随后推送 SHA 回填/文档对齐提交；**最终本地 HEAD = `origin/feature/stock-market-ui-tax`** 以
+  `git log -1` 为准（本轮最终 SHA 同时记录在交付答复中）；`origin/main` 仍
+  `6c45000efc4c406d30e22c0a12bd066fc2df61f7`（未合并、未改写历史、全程无 force）。
 - 工作区：推送前 `git status --short` 为空；全部改动已提交（回填提交除外）。
 - 说明：推送使用用户此前提供的 PAT，仅作单次命令环境变量，未写入仓库/文件/git config；
   请在验收后撤销该 token。
