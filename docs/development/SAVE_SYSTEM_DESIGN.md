@@ -233,7 +233,7 @@ data = `{ cities: [{id, realEstate}], projects: [] }`，restore 用 `context.cit
 | `fiscal.ledger` | 最近 36 月明细（当月必须完整） | 按 城市×年×kind 汇总 amount/count | 每 (city,kind,year) 汇总幂等；金额不涉及余额 | 财政流水列表显示近期；旧年份显示汇总 |
 | `bonds.payments` | 最近 36 月明细 | 按 issuance×holder×年×kind 汇总 principalPaid/interestPaid | 幂等键同 tick 兑付；Σ 聚合 = 旧明细合计 | 持债/兑付历史显示汇总 |
 | `securities.history` | 每类最近 120 月月线 | 更早按年 OHLCV（由真实月线计算；无成交月不生成 K 线） | 年度 OHLC 由该年月线首开/最高/最低/末收与成交量合计；重复汇总不重复 | K 线窗口显示月线；更早显示年度聚合 |
-| `governance.motions`（已决）、`politics.elections` | 最近 36 月明细 | 按年聚合（数量/结果摘要/得票） | 幂等键 year；只归档终态 | 当前与近年纪要显示明细；更早显示年度统计 |
+| `governance.motions`（已决）、`politics.elections` | 最近 12 月明细（任务书 §5.2.F“一年后聚合”） | 按年聚合（数量/结果摘要/得票） | 幂等键 year；只归档终态 | 当前与近年纪要显示明细；更早显示年度统计 |
 | `equipmentMarket.maintenanceHistory` | 最近 36 月明细 | 按 城×年 汇总 due/paid/arrears/writtenOff | 幂等键 (tick)；服务商债权余额仍在各自企业 | 维护费面板显示当前/近期；旧年份汇总 |
 | `world.history/log/notifications` | 现有上限（240/160/120） | 保持现有裁剪（不额外归档） | — | 现有 UI 不变 |
 | `lifecycle.foundings/liquidations` | **不归档**（见 §8.3） | — | — | 现有列表 |
@@ -298,8 +298,22 @@ data = `{ cities: [{id, realEstate}], projects: [] }`，restore 用 `context.cit
 
 ## 12. 实测性能与未解决问题
 
-（交付时回填：12/36/72/120 月各模块体积、原始/gzip 字节、快照/序列化/压缩/落盘/读取/解压/恢复耗时、
-进程内存峰值、不变量结果；以及未达标项与后续方案。）
+默认世界 seed 20261101、玩家无操作、默认 AI；v10 minified JSON + gzip level 6（详见
+`scripts/save-size-report.ts` 与交付报告 §7）：
+
+| tick | 原始字节 | gzip 字节 | serialize | parse | 不变量 |
+|---|---|---|---|---|---|
+| 12 | 6,154,159 | 485,132 | 1,464ms | 1,196ms | 0 |
+| 36 | 14,481,803 | 1,164,287 | 491ms | 522ms | 0 |
+| 72 | 19,284,439 | 1,396,179 | 1,519ms | 1,698ms | 0 |
+| 120 | 21,531,933 | 1,330,152 | 661ms | 492ms | 0 |
+
+- 历史治理前 72 月真实世界 v10 minified 约 18.39MB（旧 pretty v9 为 53.31MB）。
+- 大载荷：70MiB 原始 v10 文档 parse 271ms、RSS 增量 71MiB（解析后总 RSS 477MiB）；
+  130MiB 文本在渲染层预检被拒。128MiB 原始/解压上限在 2GB 容器中安全（实测远低于上限）。
+- 一致快照：同步“模块 export + minified 序列化”，手动/自动保存共用；未引入 Worker
+  （实测序列化 0.5–1.5s 为主线程开销，gzip 已异步；后续更大存档再评估）。
+- 进程内存：12 月约 276MiB RSS；70MiB 大载荷约 477MiB RSS。
 
 ### 已知未解决/待决策
 

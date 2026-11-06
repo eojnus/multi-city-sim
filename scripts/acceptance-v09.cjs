@@ -18,7 +18,7 @@ const { registerSaveHandlers } = require('../dist/electron/saveIpc.js');
 
 const root = path.resolve(__dirname, '..');
 const artifacts = path.join(root, 'artifacts', 'acceptance-v09');
-const evidence = path.join(root, 'docs', 'evidence_v1.6.1');
+const evidence = path.join(root, 'docs', 'evidence_v1.7');
 fs.mkdirSync(artifacts, { recursive: true });
 fs.mkdirSync(evidence, { recursive: true });
 const userData = path.join(artifacts, 'electron-user-data');
@@ -784,7 +784,93 @@ app.whenReady().then(async () => {
       && saveState.advanced !== saveState.before.date
       && diffKeys.length === 0;
     check('存读档保留设备/现金/人口/债券/设备储备/销售历史/生产计划/维护费快照/政策额度且完全一致', saveOk, JSON.stringify({ saved: saveState.saved, loaded: saveState.loaded, advanced: saveState.advanced, toasts: saveState.toasts, diffKeys }));
+    // v1.7：桌面存档落盘为 gzip 的 v10 模块化格式（minified、kind、11 个模块、无旧 world 字段）。
+    const saveFormat = await read(win, `(async () => {
+      const s = window.__lanwan.store;
+      const read = await s.bridge.read('manual-1');
+      if (!read.ok || !read.text) return { ok: false, error: read.error };
+      let document;
+      try { document = JSON.parse(read.text); } catch (error) { return { ok: false, error: 'JSON 解析失败：' + String(error) }; }
+      return {
+        ok: true,
+        bytes: read.text.length,
+        formatVersion: document.formatVersion,
+        kind: document.kind,
+        hasWorld: Object.prototype.hasOwnProperty.call(document, 'world'),
+        modules: Object.keys(document.modules || {}).sort(),
+      };
+    })()`);
+    check(
+      '桌面存档为 v1.7 模块化格式（formatVersion 10 / kind / 11 模块 / 无旧 world 字段）',
+      saveFormat.ok && saveFormat.formatVersion === 10 && saveFormat.kind === 'lanwan-modules' && saveFormat.hasWorld === false && saveFormat.modules.length === 11,
+      JSON.stringify(saveFormat),
+    );
     await capture(win, 'v09-07-save-load.png');
+
+    // ---- 9b. v1.7：损坏/不兼容存档提示、自动保存、v10 模块格式 ----
+    step('9b. v1.7 损坏/不兼容存档提示、自动保存');
+    fs.writeFileSync(path.join(savesDir, 'manual-corrupt.json'), '{ "formatVersion": 10, "kind": "lanwan-modules", broken');
+    const corruptLoad = await read(win, `(async () => {
+      const s = window.__lanwan.store;
+      const beforeTick = s.world.time.tick;
+      const ok = await s.loadSlot('manual-corrupt');
+      return { ok, beforeTick, afterTick: s.world.time.tick, toasts: (s.toasts || []).map((entry) => entry.message) };
+    })()`);
+    check(
+      '损坏存档读取失败、给出可读错误且不覆盖当前世界',
+      corruptLoad.ok === false && corruptLoad.afterTick === corruptLoad.beforeTick
+        && corruptLoad.toasts.some((message) => message.includes('读取失败')),
+      JSON.stringify(corruptLoad),
+    );
+
+    // 用刚保存的 v10 存档构造“未知必需模块”的不兼容存档。
+    const incompatible = await read(win, `(async () => {
+      const s = window.__lanwan.store;
+      const read = await s.bridge.read('manual-1');
+      if (!read.ok || !read.text) return { ok: false, error: read.error };
+      const document = JSON.parse(read.text);
+      document.modules.futureRequired = { version: 1, required: true, data: { future: true } };
+      return { ok: true, text: JSON.stringify(document), tick: s.world.time.tick };
+    })()`);
+    let incompatibleResult = { ok: false, error: '未构造' };
+    if (incompatible.ok) {
+      fs.writeFileSync(path.join(savesDir, 'manual-incompat.json'), incompatible.text);
+      incompatibleResult = await read(win, `(async () => {
+        const s = window.__lanwan.store;
+        const beforeTick = s.world.time.tick;
+        const ok = await s.loadSlot('manual-incompat');
+        return { ok, beforeTick, afterTick: s.world.time.tick, toasts: (s.toasts || []).map((entry) => entry.message) };
+      })()`);
+    }
+    check(
+      '包含未知必需模块的存档被拒绝加载且不覆盖当前世界',
+      incompatibleResult.ok === false && incompatibleResult.afterTick === incompatibleResult.beforeTick
+        && (incompatibleResult.toasts || []).some((message) => message.includes('不认识的必需模块') || message.includes('更新版本')),
+      JSON.stringify(incompatibleResult),
+    );
+
+    const autosaveCheck = await read(win, `(async () => {
+      const s = window.__lanwan.store;
+      await s.autosave();
+      const read = await s.bridge.read('autosave');
+      if (!read.ok || !read.text) return { ok: false, error: read.error, lastAutoSaveError: s.lastAutoSaveError };
+      const document = JSON.parse(read.text);
+      return {
+        ok: true,
+        lastAutoSaveError: s.lastAutoSaveError ?? null,
+        formatVersion: document.formatVersion,
+        kind: document.kind,
+        modules: Object.keys(document.modules || {}).length,
+        hasWorld: Object.prototype.hasOwnProperty.call(document, 'world'),
+      };
+    })()`);
+    check(
+      '自动保存成功且写出版本格式 v10 模块化存档（无旧 world 字段）',
+      autosaveCheck.ok === true && autosaveCheck.lastAutoSaveError === null
+        && autosaveCheck.formatVersion === 10 && autosaveCheck.modules === 11 && autosaveCheck.hasWorld === false,
+      JSON.stringify(autosaveCheck),
+    );
+    await capture(win, 'v17-01-save-safety.png');
 
     // ---- 10. 1100x700 最小窗口：无横向溢出、城市标签完整 ----
     step('10. 1100x700 最小窗口：无横向溢出、城市标签完整');

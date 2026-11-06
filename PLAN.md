@@ -205,3 +205,18 @@ SAVE_SYSTEM_DESIGN.md、Electron 实机验证；不改经济数值/玩法；推�
       save-failure-protection 测试（进行中）
 - [ ] Lead：modules/index.ts 注册 + core/save.ts 委派（v10 序列化、旧格式兼容、候选世界一次性替换）、
       tests/persistence 其余 7 文件、Electron、12/36/72/120 月、交付报告、提交推送。
+
+## 存档重构收尾（round 3，已实测）
+
+- [x] persistence 架构 + 11 模块 + core/save.ts v10 委派（旧 v1–v9 迁移链保留）。
+- [x] 历史治理 A–F + 月结安全时点 + 幂等/守恒；lifecycle 不归档（记录原因）。
+- [x] 平台层：gzip/三层大小/并发串行/备份/失败语义；saveBridge/gameStore 接入。
+- [x] tests/persistence 10 个测试文件（registry/ownership/module-migration/cross-references/
+      roundtrip/backward-compatibility/save-failure-protection/history-policy/long-run-save/
+      save-large-payload）+ 既有测试按 v10 口径适配；大载荷 70MiB 实测。
+- [x] 120 月实测：raw 21,531,933B / gzip 1,330,152B（1.27MiB）→ **≤10MiB 目标达标**；
+      t72→t120 仅 +2.25MB；invariants=0、可续推。
+- [x] Electron：31/31 检查、0 console 错误（含损坏/不兼容存档提示、自动保存、v10 格式、旧明文 72 月档闭环）。
+- [x] 全量回归：152 文件 13 块，1,278 项通过，断言失败 0（容器 RPC 噪声另记）。
+- [x] 文档：SAVE_SYSTEM_DESIGN.md / DELIVERY_REPORT_v1.7.0.md / README v1.7.0 / PROGRESS 回填。
+- [ ] 提交 + 推送功能分支（见 PROGRESS/报告 §12；等待 PAT 可用性）。

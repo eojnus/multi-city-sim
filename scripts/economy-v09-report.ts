@@ -111,7 +111,7 @@ function cityCumulative(world: WorldState, cityId: string): Cumulative {
 }
 
 /**
- * 财政流水的保留窗口：`recordFiscal` 只保留最近 `policies.ledgerLimit`（800）条，
+ * 财政流水的保留窗口：`recordFiscal` 保留最近 `policies.ledgerLimit`（v1.7 起 12000，仅 FIFO 上限；36 个月以上旧流水由 historyPolicy 月结归档），
  * 因此这里只能给出“窗口内累计”，不能冒充全期累计。账本一旦达到上限，更早月份不可得。
  */
 function investorEquityStats(world: WorldState, cityId: string) {
