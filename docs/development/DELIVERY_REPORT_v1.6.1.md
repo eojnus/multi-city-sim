@@ -183,7 +183,14 @@ t48→t72 增长 11.78MB（≈491KB/月），按当前趋势约 80–90 月撞�
 
 ## 8. 提交与推送
 
-（推送后回填：完整 commit SHA、远端分支 SHA、核验结果。）
+- 本轮提交链（基线 `b266962935f5ea83d1a2831fd98508aba83658ff` 之上）：
+  `1c1a9d2` feat(v1.6.1) → `d7aee46` test(v1.6.1) → `5e00909` docs(v1.6.1)（**已推送的交付 HEAD**）
+  → 推送 SHA 回填提交（本地=远端，见 `git log -1`）。
+- **推送成功（已核验）**：`b266962..5e00909  feature/stock-market-ui-tax -> feature/stock-market-ui-tax`；
+  推送后 `git fetch` 实测本地 HEAD = `origin/feature/stock-market-ui-tax` = `5e00909a72b7a93a8eeb5a4bcab12b4f0beb9ca6`；
+  `origin/main` 仍 `6c45000efc4c406d30e22c0a12bd066fc2df61f7`（未合并、未改写历史）。
+- 推送使用用户本轮提供的 PAT：只作为单次命令环境变量使用，未写入任何文件/仓库/git config；
+  已在交付时提醒用户验收后撤销该 token。
 
 ## 9. 已知问题
 

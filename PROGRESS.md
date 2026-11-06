@@ -100,5 +100,8 @@ v1.6.1（v1.6 验收第二轮任务书）：①未成交二手挂单设备仍计
 - 本轮提交链（在 `b266962935f5ea83d1a2831fd98508aba83658ff` 之上）：
   - `1c1a9d2` feat(v1.6.1)：挂单设备仍计维护费、清算维护费优先偿付、桌面存档 gzip 与 64MiB 文案
   - `d7aee46` test(v1.6.1)：3 个 v17 测试 + acceptance 按 v1.6.1 轨迹重锁 + 桌面验收扩展
-  - 交付文档提交（HEAD，见 `git log -1`；含本文件、README 1.6.1、交付报告、证据）
-- 推送状态：见下方回填（推送后把本地=远端 SHA 写在这里）。
+  - `5e00909` docs(v1.6.1)：交付报告、README 1.6.1、PLAN/PROGRESS、桌面证据（27/27，**已推送的交付 HEAD**）
+  - 推送 SHA 回填提交（HEAD，见 `git log -1`）
+- **推送成功（已核验）**：`b266962..5e00909  feature/stock-market-ui-tax -> feature/stock-market-ui-tax`；
+  本地 HEAD = `origin/feature/stock-market-ui-tax` = `5e00909a72b7a93a8eeb5a4bcab12b4f0beb9ca6`；
+  `origin/main` 仍 `6c45000`（未合并、未改写历史）。PAT 仅作单次命令环境变量，未写入文件，验收后请撤销。
