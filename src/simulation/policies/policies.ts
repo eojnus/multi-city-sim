@@ -30,6 +30,7 @@ import { borrowForGovernment, computeGovernmentDebtSummary } from '../government
 import { addWorkforceSkill, recordTraining } from '../labor/workforce';
 import { cityPolitics, cityWeaknesses, incumbencySummary, leaderOf, playerIsMayor } from '../politics/politics';
 import { syncCityPopulationFromAllocations } from '../population/population';
+import { allocateMoneyExact } from '../population/household-investment';
 import { startCorridorUpgrade, startIntracityUpgrade } from '../transport/network';
 
 /**
@@ -83,6 +84,43 @@ function cooldownLeft(
 }
 
 /** 从政策预算中支付并记入财政流水；返回实际支付额。 */
+/**
+ * v1.5 §4：把政策转移支付（失业救助 / 住房租金补贴）真实计入居民群体。
+ *
+ * 背景：settleGovernment 已在 step 15 把工资/福利/股息计入群体；政策支付发生在 step 16，
+ * 若只改城市汇总（city.householdIncomeLastMonth / lastMonth.benefitsPaid）而不落地到群体，
+ * Σgroup.income 会小于城市居民收入，households.test 的“收入入账闭合”失败，且居民实际购买力
+ * 与“受益人数”不一致。这里按人口权重（可选优先失业群体）用最大余数法分摊，保证合计严格等于
+ * 实际支付额（不造钱、不重复计）。
+ */
+function attributePolicyTransferToGroups(
+  world: WorldState,
+  city: City,
+  amount: number,
+  preferUnemployed: boolean,
+): void {
+  const target = round2(Math.max(0, amount));
+  if (target <= 0) return;
+  const groups = world.households.groups.filter(
+    (group) => group.cityId === city.id && group.people > 0,
+  );
+  if (groups.length === 0) return;
+  const weights = groups.map((group) =>
+    preferUnemployed && group.occupation !== 'unemployed' ? 0 : group.people,
+  );
+  const totalWeight = weights.reduce((sum, value) => sum + value, 0);
+  const basis = totalWeight > 0 ? weights : groups.map((group) => group.people);
+  const shares = allocateMoneyExact(target, basis);
+  groups.forEach((group, index) => {
+    const share = shares[index] ?? 0;
+    if (share <= 0) return;
+    group.cash = round2(group.cash + share);
+    group.lastMonth.income = round2((group.lastMonth.income ?? 0) + share);
+    group.lastMonth.benefits = round2((group.lastMonth.benefits ?? 0) + share);
+    group.lastMonth.netCashChange = round2((group.lastMonth.netCashChange ?? 0) + share);
+  });
+}
+
 export function payFromPolicy(
   world: WorldState,
   policy: ActivePolicy,
@@ -1316,7 +1354,11 @@ export function settlePolicies(
           if (paid <= 0) break;
           city.householdIncomeLastMonth = round2(city.householdIncomeLastMonth + paid);
           city.lastMonth.benefitsPaid = round2(city.lastMonth.benefitsPaid + paid);
-          city.lastMonth.householdIncome = city.householdIncomeLastMonth;
+          // v1.5 §4：同步计入居民群体（失业救助优先按失业群体分摊），保证 Σgroup.income 闭合。
+          attributePolicyTransferToGroups(world, city, paid, true);
+          // lastMonth.householdIncome 沿用 settleGovernment 的“不含退款”口径，仅加政策实发；
+          // 不能直接赋值为 householdIncomeLastMonth（它含退款与投资转出，会与退款重复计算）。
+          city.lastMonth.householdIncome = round2(city.lastMonth.householdIncome + paid);
           policy.effects.paid = round2((policy.effects.paid ?? 0) + paid);
           const helped = Math.min(people, Math.floor(paid / Math.max(1, config.policies.unemploymentAid.extraPerUnemployed)));
           policy.effects.peopleHelped = helped;
@@ -1345,7 +1387,10 @@ export function settlePolicies(
           const buildPaid = payFromPolicy(world, policy, buildPart, '新住房建设', config);
           if (rentPaid > 0) {
             city.householdIncomeLastMonth = round2(city.householdIncomeLastMonth + rentPaid);
-            city.lastMonth.householdIncome = city.householdIncomeLastMonth;
+            // v1.5 §4：住房租金补贴同样真实计入居民群体收入；lastMonth.householdIncome 沿用
+            // “不含退款”口径，只加政策实发（不能赋值为含退款的 householdIncomeLastMonth）。
+            attributePolicyTransferToGroups(world, city, rentPaid, false);
+            city.lastMonth.householdIncome = round2(city.lastMonth.householdIncome + rentPaid);
             city.housing.rentSubsidyPaid = round2(city.housing.rentSubsidyPaid + rentPaid);
           }
           if (buildPaid > 0) {
