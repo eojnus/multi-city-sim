@@ -105,7 +105,9 @@ sync 函数重建；`city.lastMonth` 虽多写者，但存档归属唯一（worl
 | securities.history | 最近 120 月月线（`historyMonths` 36→120） | 更早按年 OHLCV（真实月线计算，无成交月不造假） | 72 月：48 根月线、年度行 0（未满 120 不过早聚合） |
 | governance.motions / politics.elections | 最近 12 月明细（任务书“一年后聚合”） | 年×公司×kind（含票数）/ 城×年 | 议案保留 145 / 归档 449（373 桶）；选举保留 3 / 归档 9 |
 | lifecycle.foundings/liquidations | **不归档** | — | 原因：founding.ts 用裁剪后数组做“终身”上限计数，裁剪会改变规则语义；需先落终身计数器 |
-| world.history/log/notifications | 现有上限（240/160/120） | — | — |
+| world.history/log/notifications | 现有上限（240/160/120，已 bounded） | — | — |
+| equipmentMarket.maintenanceHistory | 现有 60 月上限（已 bounded，按 tick 幂等流水/服务商对账） | 本轮不额外归档（未证明更旧明细无审计价值；增长有界） | 72 月 60 条 |
+| city.gdpHistory / company.salesHistory/recentProfits | 现有 60 月/小窗口（规则与 UI 需要） | 不归档（规则/展示窗口，已 bounded） | gdpHistory 60 条 |
 | 规则窗口（gdpWindow/taxes.historyByCity/policies.checkups/fundingMonths/publicJobsMonths/groups[].lastMonth） | 不归档 | — | 36 月验收轨迹 9/9 与归档前一致 |
 
 守恒/幂等：每个归档定义时间边界、批量幂等键与守恒等式（Σ聚合=归档前被移除明细合计）；重复执行不重复累计；
@@ -184,7 +186,8 @@ sync 函数重建；`city.lastMonth` 虽多写者，但存档归属唯一（worl
 ## 10. 未解决问题与明确限制
 
 1. UI/报表未全部适配“旧明细→年度汇总”展示（数据与接口就绪；设计 §7 有展示规则）；部分面板会只显示近 36/12 月明细。
-2. `lifecycle` 终身计数问题未解（本轮按任务书原则先保留、不裁剪）。
+2. `lifecycle` 终身计数问题未解（本轮按任务书原则先保留、不裁剪）；`equipmentMarket.maintenanceHistory`
+   保持既有 60 月上限（已 bounded，未额外归档，原因见 §6）；城市/企业趋势与事件日志沿用既有有界窗口。
 3. 经济问题照旧：高失业、食品覆盖不足、政府债务（详见 v1.6.1/v1.6 报告；本轮未改经济规则/数值）。
 4. 120 月存档渲染层 `JSON.stringify` 仍有数百毫秒级主线程开销；未引入 Worker（见 §7 实测）。
 5. 浏览器模式不扩大容量；未知可选模块只在读取过含该模块的存档后回写。

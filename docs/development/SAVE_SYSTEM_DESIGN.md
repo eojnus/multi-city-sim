@@ -234,8 +234,10 @@ data = `{ cities: [{id, realEstate}], projects: [] }`，restore 用 `context.cit
 | `bonds.payments` | 最近 36 月明细 | 按 issuance×holder×年×kind 汇总 principalPaid/interestPaid | 幂等键同 tick 兑付；Σ 聚合 = 旧明细合计 | 持债/兑付历史显示汇总 |
 | `securities.history` | 每类最近 120 月月线 | 更早按年 OHLCV（由真实月线计算；无成交月不生成 K 线） | 年度 OHLC 由该年月线首开/最高/最低/末收与成交量合计；重复汇总不重复 | K 线窗口显示月线；更早显示年度聚合 |
 | `governance.motions`（已决）、`politics.elections` | 最近 12 月明细（任务书 §5.2.F“一年后聚合”） | 按年聚合（数量/结果摘要/得票） | 幂等键 year；只归档终态 | 当前与近年纪要显示明细；更早显示年度统计 |
-| `equipmentMarket.maintenanceHistory` | 最近 36 月明细 | 按 城×年 汇总 due/paid/arrears/writtenOff | 幂等键 (tick)；服务商债权余额仍在各自企业 | 维护费面板显示当前/近期；旧年份汇总 |
-| `world.history/log/notifications` | 现有上限（240/160/120） | 保持现有裁剪（不额外归档） | — | 现有 UI 不变 |
+| `equipmentMarket.maintenanceHistory` | 现有 **60 月上限**（`config.equipment.maintenanceHistoryMonths=60`，已 bounded；按 tick 幂等流水，用于服务商对账/审计） | 本轮**不额外归档**（未证明“更旧明细无审计价值”；60 月窗口已使增长有界） | 窗口由既有 sink 保证；服务商债权余额仍在各企业 `maintenanceArrears` | 维护费面板显示当前/近期；更早月份不显示 |
+| `world.history/log/notifications` | 现有上限（240/160/120） | 保持现有裁剪（不额外归档；已 bounded） | — | 现有 UI 不变 |
+| 城市趋势 `city.gdpHistory` | 现有 60 月上限（`economy.gdpHistoryMonths`） | 保持现有裁剪（不额外聚合；60 月窗口是规则/UI 需要） | — | 现有 UI/报告窗口 |
+| 企业趋势 `company.salesHistory/recentProfits` | 现有小窗口（生产计划/奖金判定输入） | 不裁剪（规则输入，非展示历史） | — | 现有企业面板 |
 | `lifecycle.foundings/liquidations` | **不归档**（见 §8.3） | — | — | 现有列表 |
 | `city.gdpWindow`、`taxes.historyByCity`、`policies.checkups/fundingMonths/publicJobsMonths`、`groups[].lastMonth.income` 等 | 规则窗口，**不归档** | — | — | 现有 UI |
 
