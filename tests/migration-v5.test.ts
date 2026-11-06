@@ -10,7 +10,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Simulation } from '../src/simulation/core/simulation';
-import { migrateWorldV4ToV5, parseSave, serializeSave } from '../src/simulation/core/save';
+import { migrateWorldV4ToV5, parseSave, serializeLegacySave, serializeSave } from '../src/simulation/core/save';
 import { SAVE_FORMAT_VERSION } from '../src/simulation/contracts/types';
 import { checkInvariants } from '../src/simulation/core/invariants';
 import { round2 } from '../src/simulation/core/math';
@@ -243,12 +243,13 @@ describe('v4 → v5 失败路径安全', () => {
   });
 
   it('损坏/缺字段安全失败：缺少 world、缺少 households、结构不足都返回 ok:false 而不是抛异常', () => {
-    const missingWorld = parseSave(JSON.stringify({ formatVersion: SAVE_FORMAT_VERSION }));
+    // “缺少 world”的旧档：用旧单体格式版本号（v10 文本用 modules，不经过 world 校验路径）。
+    const missingWorld = parseSave(JSON.stringify({ formatVersion: SAVE_FORMAT_VERSION - 1 }));
     expect(missingWorld.ok).toBe(false);
     expect(missingWorld.error).toContain('world');
 
     // 当前版本存档删除 v0.4 新字段：不再走 v4 迁移，必须由结构校验拒绝。
-    const raw = JSON.parse(serializeSave(currentWorld(1), SAVED_AT)) as AnyWorld;
+    const raw = JSON.parse(serializeLegacySave(currentWorld(1), SAVED_AT)) as AnyWorld;
     delete raw.world.households;
     delete raw.world.management;
     delete raw.world.banking;

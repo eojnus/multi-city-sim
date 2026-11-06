@@ -10,7 +10,7 @@
 // - 设备市场开局库存为 0（政府设备库存只在新开局注入）。
 import { describe, expect, it } from 'vitest';
 import { Simulation } from '../src/simulation/core/simulation';
-import { parseSave, serializeSave } from '../src/simulation/core/save';
+import { parseSave, serializeLegacySave, serializeSave } from '../src/simulation/core/save';
 import { SAVE_FORMAT_VERSION } from '../src/simulation/contracts/types';
 import type { WorldState } from '../src/simulation/contracts/types';
 import { checkInvariants } from '../src/simulation/core/invariants';
@@ -58,7 +58,8 @@ interface RawSave {
 
 /** 把当前存档降级成结构上的 v8：删掉 v9 新增字段，格式号改 8。 */
 function toV8(world: WorldState): { text: string; raw: RawSave } {
-  const save = JSON.parse(serializeSave(world, '2026-11-01T00:00:00.000Z')) as unknown as RawSave;
+  // 降级构造旧 v8 档：必须从旧单体格式（含 world）开始；v10 模块化文本没有 world。
+  const save = JSON.parse(serializeLegacySave(world, '2026-11-01T00:00:00.000Z')) as unknown as RawSave;
   save.formatVersion = 8;
   delete save.world.equipmentMarket;
   for (const city of save.world.cities) {

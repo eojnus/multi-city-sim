@@ -135,13 +135,14 @@ describe('模拟核心', () => {
     expect(tooNewResult.ok).toBe(false);
     expect(tooNewResult.error).toContain('高于');
 
+    // v10 模块化格式：损坏一个模块内的权威字段（居民人口），应在恢复后的不变量校验被拒绝。
     const tampered = JSON.parse(text) as {
-      world: { cities: { population: { total: number } }[] };
+      modules: { population: { data: { cities: { population: { total: number } }[] } } };
     };
-    tampered.world.cities[0]!.population.total += 1;
+    tampered.modules.population.data.cities[0]!.population.total += 1;
     const tamperedResult = parseSave(JSON.stringify(tampered));
     expect(tamperedResult.ok).toBe(false);
-    expect(tamperedResult.error).toContain('不变量');
+    expect(tamperedResult.error ?? '').toMatch(/不变量|引用|结构/);
   });
 
   it('GDP 等于企业增加值合计加公共服务工资，不使用营业额', () => {

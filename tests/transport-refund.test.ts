@@ -11,7 +11,7 @@ import { executeAgreements } from '../src/simulation/agreements/agreements';
 import { settleTransportMonth } from '../src/simulation/transport/settlement';
 import type { HouseholdRefundsByCity } from '../src/simulation/transport/settlement';
 import { advanceTransportConstruction, startCorridorUpgrade } from '../src/simulation/transport/network';
-import { parseSave, serializeSave } from '../src/simulation/core/save';
+import { parseSave, serializeLegacySave, serializeSave } from '../src/simulation/core/save';
 import { checkInvariants } from '../src/simulation/core/invariants';
 import { settleGovernment } from '../src/simulation/government/fiscal';
 import { collectInvestableFunds } from '../src/simulation/investors/investors';
@@ -429,7 +429,8 @@ describe('修复三：跨城超载结算的买卖双方资金流', () => {
     settle(world);
     const buyerCashAfter = buyer.cash;
     syncMarketStock(world);
-    const clone = JSON.parse(serializeSave(world)) as Record<string, any>;
+    // 构造“旧版历史交易”夹具：必须是旧单体格式（v10 模块化文本没有 world.transport）。
+    const clone = JSON.parse(serializeLegacySave(world)) as Record<string, any>;
     for (const trade of clone.world.transport.lastMonth.trades) delete trade.buyerRefund;
     // 构造旧版记录：gross = proceeds + capacityLoss，没有退款字段。
     const result = parseSave(JSON.stringify(clone));

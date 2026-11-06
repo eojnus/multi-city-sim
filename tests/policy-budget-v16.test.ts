@@ -19,7 +19,7 @@ import { reconcileLabor } from '../src/simulation/labor/labor';
 import { settleGovernment } from '../src/simulation/government/fiscal';
 import type { FinanceResult } from '../src/simulation/finance/finance';
 import { checkInvariants } from '../src/simulation/core/invariants';
-import { parseSave, serializeSave } from '../src/simulation/core/save';
+import { parseSave, serializeLegacySave, serializeSave } from '../src/simulation/core/save';
 
 /**
  * v1.6 §一.1 / §一.2：AI 政策月预算总额口径 + 公共岗位统计。
@@ -672,9 +672,16 @@ describe('v1.6 预算口径修正后：坑① 总预算展开与存档 spent≤b
     const loaded = parsed.world!;
     expect(loaded.policies.fundingMonths ?? []).toEqual(traces);
     expect(loaded.policies.publicJobsMonths ?? []).toEqual(world.policies.publicJobsMonths ?? []);
-    expect(serializeSave(loaded, '2026-01-01T00:00:00.000Z')).toBe(text);
-    // 旧档删掉可选新字段仍可读（不升 SAVE_FORMAT_VERSION，old fixture 缺省合法）。
-    const stripped = JSON.parse(text) as { world: WorldState };
+    // 不要求“首轮读档后原文逐字节相同”：首次读取可能做一次性读取迁移（例如
+    // ensureInvestorOpeningShares 补 investorLedger，旧档同样），属于正常归一化；
+    // 改为断言权威字段语义相等 + 第二次往返字节稳定。
+    const second = serializeSave(loaded, '2026-01-01T00:00:00.000Z');
+    const reloaded = parseSave(second);
+    expect(reloaded.ok, reloaded.error).toBe(true);
+    expect(reloaded.world!.policies.fundingMonths ?? []).toEqual(traces);
+    expect(serializeSave(reloaded.world!, '2026-01-01T00:00:00.000Z')).toBe(second);
+    // 旧档删掉可选新字段仍可读（旧单体夹具；v10 模块化文本没有 world）。
+    const stripped = JSON.parse(serializeLegacySave(world, '2026-01-01T00:00:00.000Z')) as { world: WorldState };
     delete stripped.world.policies.fundingMonths;
     delete stripped.world.policies.publicJobsMonths;
     const oldParsed = parseSave(JSON.stringify(stripped));

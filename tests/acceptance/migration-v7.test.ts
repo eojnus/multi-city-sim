@@ -6,18 +6,38 @@ import { describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseSave, serializeSave } from '../../src/simulation/core/save';
+import { parseSave, serializeLegacySave, serializeSave } from '../../src/simulation/core/save';
 import { checkInvariants } from '../../src/simulation/core/invariants';
 import { SAVE_FORMAT_VERSION } from '../../src/simulation/contracts/types';
 import type { WorldState } from '../../src/simulation/contracts/types';
 import { DEMO_CONFIG } from '../../src/data/config';
 import {
   cityById,
-  legacySaveText,
+  downgrade,
   newWorld,
-  saveObject,
   totalMoney,
 } from './helpers';
+
+/**
+ * 本文件的“旧 v1–v6 档”夹具必须是旧单体格式（formatVersion + world）。
+ * 当前存档已是 v10 模块化格式（无 world），不能再用 saveObject(serializeSave) 降级；
+ * 因此本地用 core/save.ts 的 serializeLegacySave 生成 formatVersion 9 单体对象再按版本删字段。
+ * （共享 helpers.ts 的 saveObject/legacySaveText 仍是 v10 版本，属验收员维护范围，未改。）
+ */
+function legacySaveText(world: WorldState, version: number): string {
+  const clone = downgrade(
+    JSON.parse(serializeLegacySave(world, '2026-11-01T00:00:00.000Z')) as Record<string, any>,
+    version,
+  );
+  clone.formatVersion = version;
+  clone.gameVersion = `0.${Math.max(1, version)}.0`;
+  return JSON.stringify(clone, null, 2);
+}
+
+/** 旧单体存档对象（可篡改 world），只用于本文件的旧档/失败路径夹具。 */
+function saveObject(world: WorldState): Record<string, any> {
+  return JSON.parse(serializeLegacySave(world, '2026-11-01T00:00:00.000Z')) as Record<string, any>;
+}
 
 describe('H01 v6→v7 结构迁移', () => {
   it('旧 v6 档加载成功：migratedFrom=6、补齐债券/居民金融/政府/GDP 窗口，且不变量为空', () => {

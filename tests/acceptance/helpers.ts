@@ -1,7 +1,7 @@
 // 验收测试公共工具：世界构造、旧档降级、金额口径与查看者身份。
 // 只读 src/**，不改产品代码；本目录 tests/acceptance/** 属于验收员写作用域。
 import { Simulation } from '../../src/simulation/core/simulation';
-import { parseSave, serializeSave } from '../../src/simulation/core/save';
+import { createLegacySaveFile, parseSave } from '../../src/simulation/core/save';
 import type { WorldState, ViewerIdentity } from '../../src/simulation/contracts/types';
 import { createInitialWorld } from '../../src/simulation/core/initializer';
 import { DEMO_CONFIG } from '../../src/data/config';
@@ -38,8 +38,14 @@ export function totalMoney(world: WorldState): number {
 }
 
 /** 当前存档 JSON（深拷贝对象，便于降级改造）。 */
+/**
+ * 旧单体存档对象（formatVersion 9 + world）：供 downgrade 构造 v1–v8 旧档夹具。
+ * v10 当前格式已是模块化快照（无 world），不能用于旧档降级。
+ */
 export function saveObject(world: WorldState): Record<string, any> {
-  return JSON.parse(serializeSave(world, '2026-11-01T00:00:00.000Z')) as Record<string, any>;
+  return JSON.parse(
+    JSON.stringify(createLegacySaveFile(world, '2026-11-01T00:00:00.000Z')),
+  ) as Record<string, any>;
 }
 
 /**

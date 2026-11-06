@@ -18,7 +18,7 @@ import {
   listUsedEquipment,
 } from '../src/simulation/equipment/equipment';
 import { checkInvariants } from '../src/simulation/core/invariants';
-import { parseSave, serializeSave } from '../src/simulation/core/save';
+import { parseSave, serializeLegacySave, serializeSave } from '../src/simulation/core/save';
 
 const KINDS: EquipmentKind[] = ['farm', 'industry', 'energy'];
 
@@ -310,8 +310,8 @@ describe('v1.4 §4 新企业自带初始设备（模拟范围外实物出资）'
     const restoredRecord = parsed.world!.lifecycle.foundings.at(-1)!;
     expect(restoredRecord.initialEquipment).toEqual(company.initialEquipment);
 
-    // 旧档（无 initialEquipment 字段）不会被校验拒绝。
-    const legacy = JSON.parse(text) as { world: WorldState };
+    // 旧档（无 initialEquipment 字段）不会被校验拒绝：用旧单体格式夹具，不能从 v10 文本降级。
+    const legacy = JSON.parse(serializeLegacySave(world)) as { world: WorldState };
     delete (legacy.world.companies.find((entry) => entry.id === company.id) as { initialEquipment?: unknown }).initialEquipment;
     for (const record of legacy.world.lifecycle.foundings) delete (record as { initialEquipment?: unknown }).initialEquipment;
     const legacyParsed = parseSave(JSON.stringify(legacy));
@@ -409,7 +409,8 @@ describe('v1.4 §4 初始设备审计补缺（合并/不重复计入/旧档/交�
   it('旧档缺 initialEquipment 字段：可读、无锁定期残留，出售/清算不虚报实物返还', () => {
     const world = richWorld();
     const { company } = foundFoodInKindCompany(world);
-    const legacy = JSON.parse(serializeSave(world)) as {
+    // 旧档缺 initialEquipment：构造旧单体格式夹具（v10 文本没有 world）。
+    const legacy = JSON.parse(serializeLegacySave(world)) as {
       formatVersion: number;
       world: WorldState;
     };

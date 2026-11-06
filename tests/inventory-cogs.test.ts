@@ -34,7 +34,7 @@ import { executeIntercityPurchase } from '../src/simulation/markets/intercity';
 import { settleTransportMonth } from '../src/simulation/transport/settlement';
 import { runProduction } from '../src/simulation/production/production';
 import { settleCompanyFinance } from '../src/simulation/finance/finance';
-import { createSaveFile, parseSave } from '../src/simulation/core/save';
+import { createLegacySaveFile, createSaveFile, parseSave } from '../src/simulation/core/save';
 import { liquidateCompany } from '../src/simulation/companies/lifecycle/lifecycle';
 
 function newWorld(): WorldState {
@@ -171,7 +171,7 @@ describe('生产 → 成品 → 销售：成本链守恒', () => {
 describe('旧档兼容：缺少 inventoryCost / cogs 的 v9 存档', () => {
   it('读取时按市场价补齐账面成本、cogs 回退 inputCost，且重复读取幂等', () => {
     const world = newWorld();
-    const raw = JSON.parse(JSON.stringify(createSaveFile(world))) as {
+    const raw = JSON.parse(JSON.stringify(createLegacySaveFile(world))) as {
       formatVersion: number;
       world: { companies: Record<string, unknown>[] };
     };
@@ -439,9 +439,9 @@ describe('v1.4 §6.6：跨城运力退款收益（refundGain）', () => {
     }
     expect(sawRefundGain).toBeGreaterThan(0);
 
-    // 二次读档：格式版本不变，refundGain 保留。
-    const saved = createSaveFile(sim.state, '2026-11-05T00:00:00.000Z');
-    expect(saved.formatVersion).toBe(SAVE_FORMAT_VERSION);
+    // 二次读档（旧单体格式）：refundGain 保留；旧档缺 refundGain 时读取不报错。
+    const saved = createLegacySaveFile(sim.state, '2026-11-05T00:00:00.000Z');
+    expect(saved.formatVersion).toBe(SAVE_FORMAT_VERSION - 1);
     const parsed = parseSave(JSON.stringify(saved));
     expect(parsed.ok).toBe(true);
     if (!parsed.ok || !parsed.world) return;

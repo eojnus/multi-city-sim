@@ -19,7 +19,7 @@ import {
   stockHistoryFor,
 } from '../src/simulation/securities/history';
 import { shareClassId } from '../src/simulation/securities/securities';
-import { parseSave, serializeSave } from '../src/simulation/core/save';
+import { parseSave, serializeLegacySave } from '../src/simulation/core/save';
 import { round2 } from '../src/simulation/core/math';
 
 function createStore(simulation: Simulation): GameStore {
@@ -131,8 +131,9 @@ describe('企业退出后保留真实股票历史', () => {
 
   it('存档校验允许历史引用已退出的企业/类别，读档后历史仍在', () => {
     const world = Simulation.create().state;
+    // 构造引用“已退出企业/类别”的旧档夹具：必须是旧单体格式（含 world.securities.history）。
     const snapshot = JSON.parse(
-      serializeSave(world, '2026-01-01T00:00:00.000Z'),
+      serializeLegacySave(world, '2026-01-01T00:00:00.000Z'),
     ) as Record<string, any>;
     snapshot.world.securities.history.push({
       shareClassId: 'retired-co-voting',

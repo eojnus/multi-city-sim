@@ -5,7 +5,7 @@
 // 资金不足 = 0；不修改价格、成交、库存与资金，也不重建历史。
 import { describe, expect, it } from 'vitest';
 import { Simulation } from '../src/simulation/core/simulation';
-import { parseSave, serializeSave } from '../src/simulation/core/save';
+import { parseSave, serializeLegacySave, serializeSave } from '../src/simulation/core/save';
 import { SAVE_FORMAT_VERSION } from '../src/simulation/contracts/types';
 import type { WorldState } from '../src/simulation/contracts/types';
 import { checkInvariants } from '../src/simulation/core/invariants';
@@ -18,7 +18,8 @@ function currentWorld(months = 1): WorldState {
 
 /** 把当前存档降级成 v5：格式号改 5，并删除 v6 新增的市场统计字段。 */
 function toV5(world: WorldState): string {
-  const save = JSON.parse(serializeSave(world, '2026-11-01T00:00:00.000Z')) as {
+  // 构造旧 v5 档：必须是旧单体格式（含 world）。
+  const save = JSON.parse(serializeLegacySave(world, '2026-11-01T00:00:00.000Z')) as {
     formatVersion: number;
     world: { cities: { market: Record<string, Record<string, unknown>> }[] };
   };
@@ -35,7 +36,7 @@ function toV5(world: WorldState): string {
 describe('v5 → v6 市场账本字段迁移', () => {
   it('旧 v5 存档加载成功：migratedFrom=5，缺失字段按 producerDemand / 0 补齐', () => {
     const world = currentWorld(2);
-    const original = JSON.parse(serializeSave(world)) as {
+    const original = JSON.parse(serializeLegacySave(world)) as {
       world: { cities: { id: string; market: Record<string, { producerDemand: number }> }[] };
     };
     const text = toV5(world);
@@ -77,7 +78,8 @@ describe('v5 → v6 市场账本字段迁移', () => {
 
   it('v4 存档仍可一路迁移到当前版本', () => {
     const world = currentWorld(1);
-    const save = JSON.parse(serializeSave(world)) as { formatVersion: number };
+    // 旧 v4 档夹具（当前 v10 文本没有 world，不能用于降级）。
+    const save = JSON.parse(serializeLegacySave(world)) as { formatVersion: number };
     save.formatVersion = 4;
     const result = parseSave(JSON.stringify(save));
     // v4 → v5 → v6 迁移链要求 v4 存档缺少 v5/v6 字段，这里用 v5 存档结构模拟 v4 会缺少 v4→v5 字段；

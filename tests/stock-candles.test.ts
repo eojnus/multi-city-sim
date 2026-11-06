@@ -292,20 +292,45 @@ describe('股票行情 K 线（v0.8）', () => {
     expect(entry.lastTrade).toEqual({ tick: 5, price: 11, shares: 20 });
   });
 
-  it('每类股份只保留最近 historyMonths（36）根 K 线', () => {
+  it('每类股份只保留最近 historyMonths 根 K 线（v1.7：默认 120，可配置）', () => {
+    // v1.7 §五：月度 K 线保留窗口从 36 提升到 120（更早由历史治理按年聚合 OHLCV，
+    // 见 tests/persistence/history-policy.test.ts）。裁剪规则不变：超出窗口丢最早、保留最新。
     const world = newWorld();
     const shareClass = classFor(world, FOOD, 'voting');
+    const legacyConfig = configWithSecurities({ historyMonths: 36 });
     for (let tick = 1; tick <= 40; tick += 1) {
-      recordStockTrade(world, makeTrade(world, shareClass, tick, 10 + tick, 1), DEMO_CONFIG);
+      recordStockTrade(world, makeTrade(world, shareClass, tick, 10 + tick, 1), legacyConfig);
     }
-    const candles = stockHistoryFor(world, shareClass.id)!.candles;
-    expect(candles).toHaveLength(DEMO_CONFIG.securities.historyMonths);
-    expect(candles[0]!.tick).toBe(5);
-    expect(candles[candles.length - 1]!.tick).toBe(40);
+    const legacyCandles = stockHistoryFor(world, shareClass.id)!.candles;
+    expect(legacyCandles).toHaveLength(36);
+    expect(legacyCandles[0]!.tick).toBe(5);
+    expect(legacyCandles[legacyCandles.length - 1]!.tick).toBe(40);
     // 升序且不重复。
-    for (let index = 1; index < candles.length; index += 1) {
-      expect(candles[index]!.tick).toBeGreaterThan(candles[index - 1]!.tick);
+    for (let index = 1; index < legacyCandles.length; index += 1) {
+      expect(legacyCandles[index]!.tick).toBeGreaterThan(legacyCandles[index - 1]!.tick);
     }
+
+    // 默认窗口 120：40 根全部保留（不提前裁剪），OHLCV 聚合语义不变。
+    const defaultWorld = newWorld();
+    const defaultClass = classFor(defaultWorld, FOOD, 'voting');
+    for (let tick = 1; tick <= 40; tick += 1) {
+      recordStockTrade(defaultWorld, makeTrade(defaultWorld, defaultClass, tick, 10 + tick, 1), DEMO_CONFIG);
+    }
+    const defaultCandles = stockHistoryFor(defaultWorld, defaultClass.id)!.candles;
+    expect(DEMO_CONFIG.securities.historyMonths).toBe(120);
+    expect(defaultCandles).toHaveLength(40);
+    expect(defaultCandles[0]!.tick).toBe(1);
+    expect(defaultCandles[39]!.tick).toBe(40);
+    expect(defaultCandles[39]).toMatchObject({ open: 50, high: 50, low: 50, close: 50, volume: 1, trades: 1 });
+
+    // 默认窗口 120：130 根时只保留最近 120 根（首根 tick = 11）。
+    for (let tick = 41; tick <= 130; tick += 1) {
+      recordStockTrade(defaultWorld, makeTrade(defaultWorld, defaultClass, tick, 10 + tick, 1), DEMO_CONFIG);
+    }
+    const trimmed = stockHistoryFor(defaultWorld, defaultClass.id)!.candles;
+    expect(trimmed).toHaveLength(120);
+    expect(trimmed[0]!.tick).toBe(11);
+    expect(trimmed[trimmed.length - 1]!.tick).toBe(130);
   });
 
   it('lastTrades 按 tradeHistoryLimit 截断，保留最新成交', () => {

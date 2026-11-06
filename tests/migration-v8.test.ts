@@ -7,7 +7,7 @@
 // - 不改变现金、股份、债务、价格、成交、库存与游戏进度。
 import { describe, expect, it } from 'vitest';
 import { Simulation } from '../src/simulation/core/simulation';
-import { parseSave, serializeSave } from '../src/simulation/core/save';
+import { parseSave, serializeLegacySave, serializeSave } from '../src/simulation/core/save';
 import { SAVE_FORMAT_VERSION } from '../src/simulation/contracts/types';
 import type { WorldState } from '../src/simulation/contracts/types';
 import { checkInvariants } from '../src/simulation/core/invariants';
@@ -35,7 +35,8 @@ interface RawSave {
 
 /** 把当前存档降级成结构上的 v7：删掉 v8 新增字段，格式号改 7。 */
 function toV7(world: WorldState): { text: string; raw: RawSave } {
-  const save = JSON.parse(serializeSave(world, '2026-11-01T00:00:00.000Z')) as unknown as RawSave;
+  // 构造旧 v7 档：必须用旧单体格式（含 world），v10 模块化文本没有 world 字段。
+  const save = JSON.parse(serializeLegacySave(world, '2026-11-01T00:00:00.000Z')) as unknown as RawSave;
   save.formatVersion = 7;
   delete save.world.taxes;
   delete save.world.securities.history;
@@ -161,7 +162,8 @@ describe('v7 → v8 股票行情与税收状态迁移', () => {
 
   it('v4 旧档仍能一路迁移到当前版本并补齐 v8 结构', () => {
     const world = currentWorld(1);
-    const save = JSON.parse(serializeSave(world)) as unknown as RawSave & {
+    // 旧 v4 档夹具同样必须是旧单体格式。
+    const save = JSON.parse(serializeLegacySave(world)) as unknown as RawSave & {
       world: { households?: unknown; management?: unknown; banking?: unknown };
     };
     save.formatVersion = 4;

@@ -1,11 +1,17 @@
+// v1.7 起当前存档是 v10 模块化格式；本文件测的是**旧单体存档**的校验/迁移/损坏防护语义
+// （篡改 world 字段必须是旧单体结构），因此固定使用 core/save.ts 的 serializeLegacySave 生成
+// formatVersion 9 明文夹具。当前 v10 格式的往返/未知模块/大小口径由
+// tests/persistence/{roundtrip,backward-compatibility,save-failure-protection}.test.ts 与
+// tests/save-boundary-v17.test.ts 覆盖，避免本文件同时承担两种格式语义。
 import { describe, expect, it } from 'vitest';
 import { Simulation } from '../src/simulation/core/simulation';
-import { parseSave, serializeSave } from '../src/simulation/core/save';
+import { parseSave, serializeLegacySave } from '../src/simulation/core/save';
 import { GameStore } from '../src/app/gameStore';
 import type { SaveBridge } from '../src/platform/saveBridge';
 
+/** 旧单体（formatVersion 9）明文存档文本：只用于旧档校验/迁移语义测试。 */
 function baseSaveText(): string {
-  return serializeSave(Simulation.create().state, '2026-11-01T00:00:00.000Z');
+  return serializeLegacySave(Simulation.create().state, '2026-11-01T00:00:00.000Z');
 }
 
 function mutateSave(mutator: (world: Record<string, any>) => void): string {
@@ -94,7 +100,7 @@ describe('损坏/不兼容存档防护', () => {
     const bridge = fakeBridge({
       read: async () => ({
         ok: false,
-        error: '存档过大（超过 8MB 限制）',
+        error: '存档过大（压缩文件超过 64MiB 上限）',
         code: 'too-large' as const,
       }),
       write: async () => {

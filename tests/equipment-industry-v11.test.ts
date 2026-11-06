@@ -8,6 +8,7 @@ import type { Company, GoodId, WorldState } from '../src/simulation/contracts/ty
 import { Simulation } from '../src/simulation/core/simulation';
 import { checkInvariants } from '../src/simulation/core/invariants';
 import { parseSave, serializeSave } from '../src/simulation/core/save';
+import { SAVE_FORMAT_VERSION } from '../src/simulation/contracts/types';
 import {
   buyNewEquipment,
   cancelUsedEquipmentOffer,
@@ -259,7 +260,7 @@ describe('§7 旧 v0.9 存档读取/推进/再存读档', () => {
     }
     const first = parseSave(serializeSave(sim.state));
     expect(first.ok, first.error).toBe(true);
-    expect(first.save?.formatVersion).toBe(9);
+    expect(first.save?.formatVersion).toBe(SAVE_FORMAT_VERSION);
     expect(first.world).toBeTruthy();
     expect(checkInvariants(first.world!)).toEqual([]);
 

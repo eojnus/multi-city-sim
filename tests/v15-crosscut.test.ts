@@ -27,7 +27,7 @@ import type {
 } from '../src/simulation/contracts/types';
 import { checkInvariants } from '../src/simulation/core/invariants';
 import { round2 } from '../src/simulation/core/math';
-import { parseSave, serializeSave } from '../src/simulation/core/save';
+import { parseSave, serializeLegacySave, serializeSave } from '../src/simulation/core/save';
 import { appointPlayerMayor, stepDownPlayerMayor } from '../src/simulation/politics/politics';
 import { latestCheckup } from '../src/simulation/policies/ai-labor';
 import { policyFundingMonthlyReport } from '../src/simulation/policies/policies';
@@ -1053,16 +1053,14 @@ describe('v1.5 §6 旧档往返：fundingMonths 可选且幂等', () => {
     expect(serializeSave(reparsed.world!, SAVE_AT)).toBe(saved);
 
     // v1.5 存档删除可选 fundingMonths 后仍可读、可再序列化（旧客户端/裁剪存档兼容）。
-    const v15 = JSON.parse(worldSaveText) as { world: any };
+    // 旧档夹具必须是旧单体格式（v10 模块化文本没有 world.policies）。
+    const v15 = JSON.parse(serializeLegacySave(advanced, SAVE_AT)) as { world: any };
     delete v15.world.policies.fundingMonths;
     const stripped = parseSave(JSON.stringify(v15));
     expect(stripped.ok, stripped.error).toBe(true);
     expect(stripped.world!.policies.fundingMonths).toBeUndefined();
     expect(checkInvariants(stripped.world!)).toEqual([]);
-    const strippedText = serializeSave(
-      stripped.world!,
-      (JSON.parse(worldSaveText) as { savedAt?: string }).savedAt ?? SAVE_AT,
-    );
+    const strippedText = serializeSave(stripped.world!, SAVE_AT);
     expect(parseSave(strippedText).ok).toBe(true);
   });
 });
