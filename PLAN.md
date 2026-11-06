@@ -66,11 +66,15 @@ Lead 独占（其他人只读，需要改动先 message Lead）：`src/simulatio
   4 信用点可迁移（源 1000→996/目标 0→4，合计守恒）；`invariants.ts` 仅注释更新、容差不变。
   证据：`tests/bond-migration-tail-v16.test.ts` 5/5 + `investor-dividend-distribution` 10/10 绿；
   24/72 月整链不变量为空。
-- [ ] S6 交叉验收测试（lead）：新增 §七.4 的 7 个构造场景集成测试 + 旧测试回归抽样。
-- [ ] S7 全量回归：`tsc --noEmit`（含 electron tsconfig）、`npm run build`、分块全量 130+ 测试文件全绿。
-- [ ] S8 数据：默认种子 20261101 72 月 + 3 个对照种子（36 月），报告第 1/6/12/24/36/72 月各城指标。
-- [ ] S9 Electron 实机核查（价格、维护费、居民消费、政策权限、股票、存读档），证据入仓。
-- [ ] S10 交付：`docs/development/DELIVERY_REPORT_v1.6.md`、README/PROGRESS 更新、commit、推送功能分支。
+- [x] S6 交叉验收测试（lead）：`tests/v16-crosscut.test.ts` 3/3 绿（维护费流水 12 月逐月对账、
+  存档往返含全部新字段、政策额度分项守恒）；§七.4 场景由 7 个 v1.6 测试文件覆盖（66 项）。
+- [x] S7 全量回归：`npx tsc --noEmit`=0、`tsc -p tsconfig.electron.json --noEmit`=0、
+  `npm run build` 成功；136 文件分 11 块执行 + 收尾补跑，约 1,126 项，结果与重跑说明见交付报告 10.1。
+- [x] S8 数据：默认种子 20261101 72 月（t1/6/12/24/36/72 各城指标）+ 3 个对照种子 20261102/
+  777001/424242 各 36 月；均 exit 0、不变量 0、无破产（36 月）。
+- [x] S9 Electron 实机核查：生产构建 + Xvfb `:99`，**24/24 通过、0 console 错误**，证据
+  `docs/evidence_v1.6/`（report.json + 9 PNG）。
+- [x] S10 交付：交付报告、README 1.6.0、PROGRESS、commit；**推送待用户提供新 PAT**（无凭据）。
 
 ## 关键设计决策（Lead 定，owner 按此实现）
 

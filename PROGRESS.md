@@ -130,7 +130,8 @@ v1.6（按用户 2026-11-06 任务书）：①修复 v1.5 验收遗留（AI 政�
   - `b2064d7` feat(v1.6)：规则与产品代码（价格/竞争/维护费/退出/政策额度/存档上限/报告脚本）
   - `aa0ea0a` test(v1.6)：7 个新测试 + acceptance 重锁 + 兼容回归修复 + 桌面验收脚本
   - `35cb76d` docs(v1.6)：交付报告、README 1.6.0、PLAN、桌面证据（24/24）
-  - 另有一次“SHA 回填”docs 提交（HEAD，见 `git log -1`）
+  - `ff2e830` docs(v1.6)：全量回归分块结果、提交链与推送状态回填
+  - 本文件的 SHA 回填提交（HEAD，见 `git log -1`）
 - 本地 HEAD = 上述回填提交；**截至本文件提交时未推送**（无 SSH key / 无 credential helper /
   旧 PAT 已撤销）。`origin/feature/stock-market-ui-tax` 仍 `f483f60`，`origin/main` 仍 `6c45000`。
 - 推送步骤见“Next 1”；推送后把远端 SHA 回填到本文件与交付报告 10.3。
