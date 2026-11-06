@@ -191,5 +191,5 @@
   - `1958a17` fix(v1.5)：政策转移支付真实计入居民群体、收入口径去退款重复、住房补贴去重复赋值、总预算按启动当月+剩余月数
   - `b6bda6e` test(acceptance)：按转移支付落地后轨迹重锁 acceptance、多种子超时与报告舍入断言校准、刷新 v1.5 桌面证据
   - 其后一次 docs 提交用于回填本报告与 README/版本（最终本地 HEAD 以 `git rev-parse HEAD` 为准）。
-- 推送：`git push origin feature/stock-market-ui-tax`；推送后回填本地/远端完整 SHA；不合并 main、不改写历史。
+- 推送结果（已完成）：`a20f1cb..887aa93  feature/stock-market-ui-tax -> feature/stock-market-ui-tax`（exit 0）。推送后核验：本地 HEAD = `origin/feature/stock-market-ui-tax` = **`887aa93e98f0d3066099bf6e071bc705d5c3022d`**；`origin/main` 仍 `6c45000efc4c406d30e22c0a12bd066fc2df61f7`（未合并、未改写历史）。本报告回填提交随后同分支推送，最终本地/远端 SHA 以 `git rev-parse HEAD` / `git rev-parse origin/feature/stock-market-ui-tax` 为准。
 - 安全提醒：本轮推送使用用户提供的 GitHub PAT（仅作一次性环境变量，未写入仓库/文件），**用后请立即撤销该 PAT**。
