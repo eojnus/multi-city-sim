@@ -188,3 +188,20 @@ SAVE_SYSTEM_DESIGN.md、Electron 实机验证；不改经济数值/玩法；推�
 - [ ] 历史治理 historyPolicy + 月度安全时点执行 + 守恒/幂等测试。
 - [ ] 平台层：file format/大小/并发/备份、saveBridge、gameStore 未知模块透传、save-size-report。
 - [ ] 旧档兼容（明文/gzip/迁移链）、Electron 实机、12/36/72/120 月性能、交付报告、提交推送。
+
+## 存档重构进度（round 2）
+
+- [x] 数据归属分析 A/B 两份（/tmp/save-ownership-a.md、-b.md，file:line 证据）+ 归属裁决：
+      world/population/company/marketTrade/equipment/banking/government/bonds/securities/management/politics
+      11 模块；Company 不拆分（原子聚合，equipment 模块只拥有 equipmentMarket）；policies 归 government；
+      city.lastMonth/gdp/gdpHistory 归 world，gdpWindow/gdpEstimate/bankruptcy 归 government。
+- [x] `docs/development/SAVE_SYSTEM_DESIGN.md`：归属表、接口、v10 格式、迁移矩阵、历史保留规则、
+      大小口径（128MiB 原始/64MiB 压缩）、未知模块处理、一致快照/并发/失败恢复、房地产接入示例、差异说明。
+- [x] persistence 骨架（已提交 147e54c/32a0548）+ 架构测试 11/11。
+- [ ] save-m1：world/population/company/marketTrade/equipment 模块 + tests（进行中）
+- [ ] save-m2：banking/government/bonds/securities/management/politics 模块 + tests（进行中）
+- [ ] save-h：historyPolicy（银行快照/已结清贷款/财政/债券/K线/治理选举）+ 月结安全时点 + tests（进行中）
+- [ ] save-dev（平台）：saveIpc gzip/128MiB/并发/备份、saveBridge、gameStore 保存锁、save-size-report、
+      save-failure-protection 测试（进行中）
+- [ ] Lead：modules/index.ts 注册 + core/save.ts 委派（v10 序列化、旧格式兼容、候选世界一次性替换）、
+      tests/persistence 其余 7 文件、Electron、12/36/72/120 月、交付报告、提交推送。
