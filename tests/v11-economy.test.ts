@@ -120,9 +120,20 @@ describe('v1.1 §9 横切：旧 v0.9 真实存档', () => {
         prior.remainder,
         6,
       );
-      expect(equipmentUnits(company), `${company.id} 设备台数不应减少`).toBeGreaterThanOrEqual(
-        prior.units,
-      );
+      // v1.6 §三.5：企业可以真实出售闲置/多余设备（允许设备台数减少），但必须有真实出售记录：
+      // 已成交（设备出售收入）或已挂真实二手委托（挂单时台数立即扣减，成交后才有收入）。
+      // 旧档兼容要防的是“重算抹掉设备”，不是禁止合法经营决策；未出售/未挂单时台数不得减少。
+      const unitsNow = equipmentUnits(company);
+      const soldRevenue =
+        Math.max(0, company.lastMonth.equipmentSold ?? 0) +
+        Math.max(0, company.previousMonth.equipmentSold ?? 0);
+      const listedUnits = (sim.state.equipmentMarket.offers ?? [])
+        .filter((offer) => offer.companyId === company.id)
+        .reduce((sum, offer) => sum + offer.units, 0);
+      expect(
+        unitsNow >= prior.units || soldRevenue > 0 || listedUnits > 0,
+        `${company.id} 设备台数减少必须有真实出售/挂单记录（before ${prior.units} → now ${unitsNow}，出售收入 ${soldRevenue}，挂单 ${listedUnits} 台）`,
+      ).toBe(true);
     }
     assertEquipmentCapacityConsistent(sim.state);
   });

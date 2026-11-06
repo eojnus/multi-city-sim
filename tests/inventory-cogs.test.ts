@@ -142,13 +142,28 @@ describe('生产 → 成品 → 销售：成本链守恒', () => {
 
     settleCompanyFinance(world, DEMO_CONFIG, []);
     const stats = seller.lastMonth;
-    // 会计恒等式：利润 = 营收 − COGS − 实发工资 − 利息 − 所得税。
+    // 会计恒等式：利润 = 营收 − COGS − 实发工资 − 设备维护费 − 利息 − 所得税。
     expect(
-      round2(stats.revenue - stats.cogs! - stats.wagesPaid - stats.interestPaid - stats.corporateTax),
+      round2(
+        stats.revenue -
+          stats.cogs! -
+          stats.wagesPaid -
+          (stats.maintenanceDue ?? 0) -
+          stats.interestPaid -
+          stats.corporateTax,
+      ),
     ).toBeCloseTo(stats.profit, 1);
-    // 现金流口径独立：采购现金支出（inputCost）与存货 COGS 不混用。
+    // 现金流口径独立：采购现金支出（inputCost）与存货 COGS 不混用；维护费按真实现金支付。
     expect(
-      round2(stats.revenue - stats.inputCost - stats.wagesPaid - stats.interestPaid - stats.corporateTax),
+      round2(
+        stats.revenue -
+          stats.inputCost -
+          stats.wagesPaid -
+          (stats.maintenancePaid ?? 0) -
+          (stats.maintenanceArrearsRepaid ?? 0) -
+          stats.interestPaid -
+          stats.corporateTax,
+      ),
     ).toBeCloseTo(stats.operatingCashFlow ?? 0, 1);
   });
 });
@@ -290,13 +305,14 @@ describe('v1.4 §6.6：跨城运力退款收益（refundGain）', () => {
 
     settleCompanyFinance(world, config, []);
     const stats = buyer.lastMonth;
-    // 利润闭合：revenue − COGS − 工资 − 税 − 利息 + 奖金 + refundGain = profit
+    // 利润闭合：revenue − COGS − 工资 − 设备维护费 − 税 − 利息 + 奖金 + refundGain = profit
     expect(
       Math.abs(
         round2(
           stats.revenue -
             (stats.cogs ?? 0) -
             stats.wagesPaid -
+            (stats.maintenanceDue ?? 0) -
             stats.corporateTax -
             stats.interestPaid +
             (stats.bonusPaid ?? 0) +
@@ -305,13 +321,15 @@ describe('v1.4 §6.6：跨城运力退款收益（refundGain）', () => {
         ),
       ),
     ).toBe(0);
-    // 现金流恒等式不变：采购现金支出仍只在现金流里出现。
+    // 现金流恒等式不变：采购现金支出仍只在现金流里出现；维护费按真实现金支付。
     expect(
       Math.abs(
         round2(
           stats.revenue -
             stats.inputCost -
             stats.wagesPaid -
+            (stats.maintenancePaid ?? 0) -
+            (stats.maintenanceArrearsRepaid ?? 0) -
             stats.interestPaid -
             stats.corporateTax -
             (stats.operatingCashFlow ?? 0),
@@ -325,6 +343,7 @@ describe('v1.4 §6.6：跨城运力退款收益（refundGain）', () => {
           (stats.revenue -
             (stats.cogs ?? 0) -
             stats.wagesPaid -
+            (stats.maintenanceDue ?? 0) -
             stats.corporateTax -
             stats.interestPaid),
       ),
@@ -359,6 +378,7 @@ describe('v1.4 §6.6：跨城运力退款收益（refundGain）', () => {
           stats.revenue -
             (stats.cogs ?? 0) -
             stats.wagesPaid -
+            (stats.maintenanceDue ?? 0) -
             stats.corporateTax -
             stats.interestPaid +
             (stats.bonusPaid ?? 0) +
@@ -400,6 +420,8 @@ describe('v1.4 §6.6：跨城运力退款收益（refundGain）', () => {
               stats.revenue -
                 (stats.cogs ?? 0) -
                 stats.wagesPaid -
+                // v1.6 §四：设备维护费是独立期间费用，全额（已付+欠付）进税前利润。
+                (stats.maintenanceDue ?? 0) -
                 stats.corporateTax -
                 stats.interestPaid +
                 (stats.bonusPaid ?? 0) +

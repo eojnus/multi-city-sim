@@ -1,11 +1,12 @@
 /**
- * v0.9 桌面验收走查（人口 ×5 / 需求 vs 成交 / 真实设备链 / 生产计划 / 存读档）。
+ * v0.9 桌面验收走查（人口 ×5 / 需求 vs 成交 / 真实设备链 / 生产计划 / 存读档）+ v1.6 走查。
  *
  * 全程走真实 Electron 界面：DOM 点击、表单输入、标签切换；必要时只读 store 对账。
  * 唯一的人工构造：把两家企业的经营者临时设为玩家（`governance.controls`），
  * 以便在界面上真实执行设备买卖——这是“玩家经营权限”的测试前置，不改变任何经济数值。
+ * v1.6 追加：真实推进 14 个月后核查价格规则、设备维护费结算/面板、政策总额度分项与公共岗位统计。
  *
- * 证据截图与 JSON 同时写入 artifacts/（gitignore）与 docs/evidence_v1.5/（入仓）。
+ * 证据截图与 JSON 同时写入 artifacts/（gitignore）与 docs/evidence_v1.6/（入仓）。
  *
  * 用法：Xvfb :99 & DISPLAY=:99 node_modules/electron/dist/electron --no-sandbox \
  *        --disable-dev-shm-usage --enable-unsafe-swiftshader scripts/acceptance-v09.cjs
@@ -17,7 +18,7 @@ const { registerSaveHandlers } = require('../dist/electron/saveIpc.js');
 
 const root = path.resolve(__dirname, '..');
 const artifacts = path.join(root, 'artifacts', 'acceptance-v09');
-const evidence = path.join(root, 'docs', 'evidence_v1.5');
+const evidence = path.join(root, 'docs', 'evidence_v1.6');
 fs.mkdirSync(artifacts, { recursive: true });
 fs.mkdirSync(evidence, { recursive: true });
 const userData = path.join(artifacts, 'electron-user-data');
@@ -512,6 +513,137 @@ app.whenReady().then(async () => {
     await read(win, `(() => { window.__lanwan.store.closeStockMarket(); window.__lanwan.store.emit(); return true; })()`);
     await sleep(400);
 
+    // ---- 8b. v1.6：真实推进 14 个月后核查价格规则/设备维护费/政策总额度 ----
+    step('8b. v1.6 价格规则 / 设备维护费 / 政策总额度与公共岗位（真实 14 个月 tick）');
+    await read(win, `(async () => {
+      const s = window.__lanwan.store;
+      for (let index = 0; index < 14; index += 1) {
+        s.tick();
+        await new Promise((resolve) => setTimeout(resolve, 60));
+      }
+      s.emit();
+      return s.world.time.tick;
+    })()`);
+    await sleep(1200);
+    const v16 = await read(win, `(() => {
+      const s = window.__lanwan.store;
+      const cfg = s.simulation.config;
+      const city = s.world.cities.find((entry) => entry.id === 'lanport');
+      const market = city.market;
+      const maxChange = cfg.market.maxMonthlyChange * 100 + 0.01;
+      const rows = Object.values(market).map((entry) => ({
+        good: entry.goodId,
+        price: entry.price,
+        change: entry.lastPriceChangePct ?? 0,
+      }));
+      const pricesFinite = rows.every((row) => Number.isFinite(row.price) && row.price > 0);
+      const changeBounded = rows.every((row) => Math.abs(row.change) <= maxChange);
+      const imported = rows.reduce((sum, row) => sum + (market[row.good].intercityImported ?? 0), 0);
+      const maintenance = s.world.equipmentMarket.maintenanceMonth;
+      const flow = maintenance?.byCity?.[city.id];
+      const company = s.world.companies.find((entry) => entry.id === 'lp-food')
+        || s.world.companies.find((entry) => entry.cityId === city.id);
+      const kinds = ['farm', 'industry', 'energy'];
+      const base = company.maintenanceBase || company.equipment;
+      const prices = company.maintenancePrices || {};
+      const rate = cfg.equipment.maintenanceMonthlyRate;
+      const expectedDue = kinds.reduce(
+        (sum, kind) => sum + (base?.[kind] ?? 0) * (prices?.[kind] ?? 0) * rate,
+        0,
+      );
+      const traces = (s.world.policies.fundingMonths ?? [])
+        .filter((entry) => entry.cityId === city.id)
+        .sort((left, right) => left.tick - right.tick);
+      const trace = traces.length > 0 ? traces[traces.length - 1] : null;
+      const allocations = trace?.policyBudgets ?? [];
+      const allocated = allocations.reduce((sum, entry) => sum + entry.referenceBudget, 0);
+      const overBudgetEntries = allocations.filter(
+        (entry) => entry.spent + entry.unpaid > entry.referenceBudget + 0.02,
+      ).length;
+      const jobs = (s.world.policies.publicJobsMonths ?? [])
+        .filter((entry) => entry.cityId === city.id)
+        .sort((left, right) => left.tick - right.tick)
+        .pop() || null;
+      return {
+        tick: s.world.time.tick,
+        pricesFinite,
+        changeBounded,
+        maxAbsChange: Math.round(Math.max(0, ...rows.map((row) => Math.abs(row.change))) * 100) / 100,
+        imported: Math.round(imported),
+        cityMaintenanceDue: flow?.due ?? 0,
+        cityMaintenancePaid: flow?.paid ?? 0,
+        cityMaintenanceArrears: flow?.arrearsOutstanding ?? 0,
+        companyId: company.id,
+        companyMaintenanceDue: company.lastMonth?.maintenanceDue ?? 0,
+        companyExpectedDue: Math.round(expectedDue * 100) / 100,
+        companyHasSnapshot: Boolean(company.maintenanceBase && company.maintenancePrices),
+        quota: trace?.quota ?? null,
+        allocated: Math.round(allocated * 100) / 100,
+        allocations: allocations.length,
+        overBudgetEntries,
+        jobs: jobs
+          ? { added: jobs.jobsAdded, headcount: jobs.headcount, removed: jobs.jobsRemoved, wages: jobs.wagesPaid }
+          : null,
+      };
+    })()`);
+    check(
+      '14 个月真实 tick：商品价格均为正、单月变动不超过配置上限',
+      v16.pricesFinite && v16.changeBounded,
+      JSON.stringify({ tick: v16.tick, maxAbsChange: v16.maxAbsChange, pricesFinite: v16.pricesFinite }),
+    );
+    check(
+      '设备维护费按月初快照真实结算：应计 = 台数 × 月初价 × 1%（误差 ≤0.05），城市已真实付款',
+      v16.cityMaintenanceDue > 0
+        && v16.companyHasSnapshot
+        && Math.abs(v16.companyMaintenanceDue - v16.companyExpectedDue) <= 0.05,
+      JSON.stringify({
+        company: v16.companyId,
+        due: v16.companyMaintenanceDue,
+        expected: v16.companyExpectedDue,
+        cityDue: v16.cityMaintenanceDue,
+        cityPaid: v16.cityMaintenancePaid,
+      }),
+    );
+    check(
+      '政策月预算为合计额度：Σ分项参考预算 ≤ 本月总额度，且无分项实支+未支付超出自身额度',
+      v16.quota !== null && v16.allocations > 0 && v16.allocated <= v16.quota + 0.01 && v16.overBudgetEntries === 0,
+      JSON.stringify({ quota: v16.quota, allocated: v16.allocated, allocations: v16.allocations, over: v16.overBudgetEntries }),
+    );
+    check(
+      '公共岗位统计可读：新增/在岗/撤销/实发工资均为非负数（人数与人次分开）',
+      v16.jobs === null
+        || (v16.jobs.added >= 0 && v16.jobs.headcount >= 0 && v16.jobs.removed >= 0 && v16.jobs.wages >= 0),
+      JSON.stringify(v16.jobs),
+    );
+    await capture(win, 'v16-01-market-prices.png');
+    // 先回到城市视图并打开一家仍在营（且持有设备）的企业，再切到「经营」标签；
+    // 14 个月真实 tick 后企业名单会变化，不能用固定 id 假设 lp-food 仍在营。
+    await enterCity(win, 'lanport');
+    await clickTab(win, 'companies');
+    await waitFor(win, `document.querySelector('[data-testid="company-row-lp-food"]')`, 8000);
+    await openCompany(win, 'lp-food');
+    await clickTab(win, 'operation');
+    await waitFor(win, `document.querySelector('[data-testid="company-equipment"]')`, 8000);
+    const maintenanceUi = await read(win, `(() => ({
+      hasPanel: Boolean(document.querySelector('[data-testid="company-equipment"]')),
+      hasSection: Boolean(document.querySelector('[data-testid="equipment-maintenance"]')),
+      total: (document.querySelector('[data-testid="equipment-maintenance-total"]')?.textContent ?? '').trim(),
+      status: (document.querySelector('[data-testid="equipment-maintenance-status"]')?.textContent ?? '').trim(),
+      rows: document.querySelectorAll('[data-testid^="equipment-maintenance-row-"]').length,
+    }))()`);
+    check(
+      '企业面板显示设备台数/计价/维护费/支付状态',
+      maintenanceUi.hasPanel
+        && maintenanceUi.hasSection
+        && maintenanceUi.rows > 0
+        && maintenanceUi.total.length > 0
+        && /已付清|欠付|本月无计费/.test(maintenanceUi.status),
+      JSON.stringify(maintenanceUi),
+    );
+    await capture(win, 'v16-02-company-maintenance.png');
+    await click(win, '[data-action="close-company"]');
+    await sleep(400);
+
     // ---- 9. 存读档：设备、现金、人口、债券、设备储备全部往返一致 ----
     step('9. 存读档：设备、现金、人口、债券、设备储备全部往返一致');
     const saveState = await read(win, `(async () => {
@@ -532,6 +664,16 @@ app.whenReady().then(async () => {
           bonds: s.world.bonds.holdings.length,
           salesHistory: JSON.stringify(company.salesHistory ?? []),
           plan: JSON.stringify(company.productionPlan ?? null),
+          // v1.6：设备维护费快照/欠付、僵尸计数、企业报价系数与政策额度分项也必须往返一致。
+          maintenanceArrears: company.maintenanceArrears ?? 0,
+          maintenanceBase: JSON.stringify(company.maintenanceBase ?? null),
+          maintenancePrices: JSON.stringify(company.maintenancePrices ?? null),
+          idleMonths: company.ai?.idleMonths ?? 0,
+          priceFactor: company.priceFactor,
+          policyQuota: (s.world.policies.fundingMonths ?? [])
+            .filter((entry) => entry.cityId === 'lanport')
+            .sort((left, right) => left.tick - right.tick)
+            .pop()?.quota ?? null,
         };
       };
       const before = snapshot();
@@ -547,7 +689,7 @@ app.whenReady().then(async () => {
     const saveOk = saveState.saved && saveState.loaded
       && saveState.advanced !== saveState.before.date
       && diffKeys.length === 0;
-    check('存读档保留设备/现金/人口/债券/设备储备/销售历史/生产计划且完全一致', saveOk, JSON.stringify({ saved: saveState.saved, loaded: saveState.loaded, advanced: saveState.advanced, toasts: saveState.toasts, diffKeys }));
+    check('存读档保留设备/现金/人口/债券/设备储备/销售历史/生产计划/维护费快照/政策额度且完全一致', saveOk, JSON.stringify({ saved: saveState.saved, loaded: saveState.loaded, advanced: saveState.advanced, toasts: saveState.toasts, diffKeys }));
     await capture(win, 'v09-07-save-load.png');
 
     // ---- 10. 1100x700 最小窗口：无横向溢出、城市标签完整 ----

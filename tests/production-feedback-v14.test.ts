@@ -304,11 +304,13 @@ describe('v1.4 §6.6 COGS / 库存成本口径：真实整月 tick 的成本链�
         expect(stats.cogs ?? 0).toBeGreaterThanOrEqual(0);
         expect(stats.inputCost).toBeGreaterThanOrEqual(0);
         // 会计利润：奖金是对税后利润的分配（计入 wagesPaid，但不进利润），故加回；
-        // 运力退款超过剩余账面成本的部分是采购退款收益（refundGain），同样加回。
+        // 运力退款超过剩余账面成本的部分是采购退款收益（refundGain），同样加回；
+        // v1.6 §四：设备维护费是独立期间费用，全额（已付+欠付）进税前利润。
         const profitIdentity = round2(
           stats.revenue -
             (stats.cogs ?? 0) -
             stats.wagesPaid -
+            (stats.maintenanceDue ?? 0) -
             stats.corporateTax -
             stats.interestPaid +
             (stats.bonusPaid ?? 0) +
@@ -321,6 +323,8 @@ describe('v1.4 §6.6 COGS / 库存成本口径：真实整月 tick 的成本链�
           stats.revenue -
             stats.inputCost -
             stats.wagesPaid -
+            (stats.maintenancePaid ?? 0) -
+            (stats.maintenanceArrearsRepaid ?? 0) -
             stats.interestPaid -
             stats.corporateTax -
             (stats.operatingCashFlow ?? 0),

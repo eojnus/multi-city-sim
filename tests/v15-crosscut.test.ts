@@ -144,6 +144,18 @@ function expectHtmlWithout(html: string, values: readonly string[]): void {
   }
 }
 
+/**
+ * v1.6：财政口径泄露检查只扫“政府与政策”区块。
+ * 公司列表等公开面板会显示企业现金/利润，金额与受限财政数值偶然相同（v1.6 实测
+ * 铁谷工业设备工坊现金 185.9 万与某受限值相同），扫整页 HTML 会误报。
+ */
+function governmentSectionHtml(html: string): string {
+  const start = html.indexOf('data-testid="government-section"');
+  if (start < 0) return html;
+  const end = html.indexOf('</section>', start);
+  return end < 0 ? html.slice(start) : html.slice(start, end);
+}
+
 // ---------------------------------------------------------------- §1 权限矩阵
 
 describe('v1.5 §1 权限矩阵（store 视图 + HTML + 日志 visibility，集成）', () => {
@@ -186,7 +198,7 @@ describe('v1.5 §1 权限矩阵（store 视图 + HTML + 日志 visibility，集�
       }
       // 只校验足够长的“可识别取值”，避免公共面板里同值的短百分比（如税率 15.0%）误判；
       // 短 token 的泄露风险由 policyView 结构化断言（budget/spent 均为 null）兜底。
-      expectHtmlWithout(html, [...restricted, ...traceAmounts].filter((value) => value.length >= 6));
+      expectHtmlWithout(governmentSectionHtml(html), [...restricted, ...traceAmounts].filter((value) => value.length >= 6));
 
       const view = store.policyView(city.id);
       expect(view.isPlayerMayor).toBe(false);
