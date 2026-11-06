@@ -42,14 +42,28 @@ import {
 import { createInitialManagement } from '../management/manager-pool';
 import { createInitialBanking, migrateLegacyCompanyDebt } from '../banking/banking';
 import { createEmptyTaxState } from '../government/taxes';
+import type { ModuleSaveFile, SaveErrorCode, SaveModuleHeader } from '../persistence/types';
+import { classifySaveDocument, parseSaveJson } from '../persistence/migrations';
+import { SaveCoordinator } from '../persistence/saveCoordinator';
+import { createDefaultSaveRegistry } from '../persistence/modules';
 
 export interface ParseResult {
   ok: boolean;
+  /** 读取/迁移后的世界（v10 模块格式为候选世界，全部校验通过后返回）。 */
   world?: WorldState;
+  /** 兼容字段：归一化为“当前世界”的旧 SaveFile 形状（formatVersion 为当前格式版本）。 */
   save?: SaveFile;
   error?: string;
-  /** 本次读取经过迁移的旧格式版本；正常 v2 存档为 undefined。 */
+  /** 失败分类（平台层/UI 用于区分损坏、过大、版本过高、未知模块等）。 */
+  code?: SaveErrorCode;
+  /** 本次读取经过迁移的旧单体格式版本；v10/全新格式为 undefined。 */
   migratedFrom?: number;
+  savedAt?: string;
+  gameVersion?: string;
+  /** 读取过程中的非致命提示（旧模块初始化、未知可选模块被保留等）。 */
+  warnings?: string[];
+  /** 未知可选模块（重新保存时原样写回，避免静默丢弃未来模块数据）。 */
+  preservedModules?: Record<string, SaveModuleHeader>;
 }
 
 const ROLE_KEYS = ['management', 'production', 'sales', 'research'] as const;
@@ -104,44 +118,148 @@ const OPTIONAL_STATS_KEYS = [
   'maintenanceArrears',
 ] as const;
 
-export function createSaveFile(world: WorldState, savedAt = new Date().toISOString()): SaveFile {
+let defaultSaveCoordinator: SaveCoordinator | null = null;
+
+/**
+ * 默认存档协调器（单例）：复用内置模块注册表 + 现有结构校验/不变量校验/读取后修复。
+ *
+ * 延迟创建，避免模块加载阶段初始化注册表；失败会在首次保存/读取时暴露。
+ */
+function saveCoordinator(): SaveCoordinator {
+  if (!defaultSaveCoordinator) {
+    defaultSaveCoordinator = new SaveCoordinator({
+      registry: createDefaultSaveRegistry(),
+      hooks: {
+        validateWorldStructure,
+        afterWorldRestored: (world) => {
+          // 既有读取后修复（幂等）：股份汇总镜像、居民投资实体开局份额；再校验随机种子合法性。
+          syncCompanyTotalSharesSafe(world);
+          ensureInvestorOpeningShares(world);
+          if (world.seed !== world.seed >>> 0) throw new Error('随机种子状态无效');
+        },
+        checkInvariants,
+      },
+    });
+  }
+  return defaultSaveCoordinator;
+}
+
+export interface SerializeSaveOptions {
+  savedAt?: string;
+  /** 读取旧档时保留的未知可选模块；重新保存时原样写回。 */
+  preservedModules?: Record<string, SaveModuleHeader>;
+}
+
+/**
+ * 生成 v10 模块化存档对象（纯数据，不写文件）。
+ *
+ * 注意：不再深拷贝整个 WorldState 再 stringify；模块 export 同步产生纯数据后立即序列化，
+ * 单线程下与 tick 不会交错，快照对应同一时刻。
+ */
+export function createSaveFile(world: WorldState, savedAt = new Date().toISOString()): ModuleSaveFile {
+  const exported = saveCoordinator().exportSave(world, { savedAt, gameVersion: GAME_VERSION });
+  if (!exported.ok || !exported.text) {
+    throw new Error(exported.error ?? '存档序列化失败');
+  }
+  return JSON.parse(exported.text) as ModuleSaveFile;
+}
+
+/** 生成 v10 模块化存档文本（minified JSON，不含美化缩进；桌面层负责 gzip 落盘）。 */
+export function serializeSave(world: WorldState, options: SerializeSaveOptions | string = {}): string {
+  const normalized: SerializeSaveOptions =
+    typeof options === 'string' ? { savedAt: options } : options;
+  const exported = saveCoordinator().exportSave(world, {
+    savedAt: normalized.savedAt ?? new Date().toISOString(),
+    gameVersion: GAME_VERSION,
+    preservedModules: normalized.preservedModules,
+  });
+  if (!exported.ok || !exported.text) {
+    throw new Error(exported.error ?? '存档序列化失败');
+  }
+  return exported.text;
+}
+
+/**
+ * 生成旧单体格式（formatVersion 9）存档对象：只供旧档兼容测试/工具使用。
+ * 新保存一律使用 createSaveFile/serializeSave（v10 模块化）。
+ */
+export function createLegacySaveFile(world: WorldState, savedAt = new Date().toISOString()): SaveFile {
   return {
-    formatVersion: SAVE_FORMAT_VERSION,
+    formatVersion: SAVE_FORMAT_VERSION - 1 > 0 ? 9 : SAVE_FORMAT_VERSION,
     gameVersion: GAME_VERSION,
     savedAt,
     world: deepClone(world),
   };
 }
 
-export function serializeSave(world: WorldState, savedAt = new Date().toISOString()): string {
-  return JSON.stringify(createSaveFile(world, savedAt), null, 2);
+/** 旧单体格式文本（仅测试/工具；新存档不写此格式）。 */
+export function serializeLegacySave(world: WorldState, savedAt = new Date().toISOString()): string {
+  return JSON.stringify(createLegacySaveFile(world, savedAt), null, 2);
 }
 
 export function parseSave(text: string): ParseResult {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch (error) {
-    return { ok: false, error: `存档不是有效 JSON：${(error as Error).message}` };
+  const parsedResult = parseSaveJson(text);
+  if (!parsedResult.ok) {
+    return { ok: false, error: parsedResult.error, code: parsedResult.code };
   }
-  if (!isRecord(parsed)) return { ok: false, error: '存档根节点不是对象' };
-
-  const formatVersion = parsed.formatVersion;
-  if (typeof formatVersion !== 'number' || !Number.isInteger(formatVersion)) {
-    return { ok: false, error: '存档缺少有效的 formatVersion' };
+  const parsed = parsedResult.raw;
+  const classification = classifySaveDocument(parsed);
+  if (classification.kind === 'module') {
+    return parseModuleDocument(parsed);
   }
-  if (formatVersion > SAVE_FORMAT_VERSION) {
+  if (classification.kind === 'unsupported') {
     return {
       ok: false,
-      error: `存档格式版本 ${formatVersion} 高于当前支持的 ${SAVE_FORMAT_VERSION}，请使用更新版本的游戏读取。`,
+      error: classification.error ?? '存档版本高于当前支持版本',
+      code: classification.code ?? 'unsupported-version',
     };
   }
-  if (formatVersion < 1) {
-    return { ok: false, error: `不支持的存档格式版本 ${formatVersion}` };
+  if (classification.kind === 'unknown' || classification.formatVersion === null) {
+    return {
+      ok: false,
+      error: classification.error ?? '无法识别的存档格式',
+      code: classification.code ?? 'unknown-format',
+    };
   }
+  return parseLegacyDocument(parsed, classification.formatVersion);
+}
 
+/** 读取 v10 模块化存档：协调器构造候选世界并完成全部校验后返回。 */
+function parseModuleDocument(raw: Record<string, unknown>): ParseResult {
+  const result = saveCoordinator().restoreSaveDocument(raw);
+  if (!result.ok || !result.world) {
+    return {
+      ok: false,
+      error: result.error ?? '模块化存档读取失败',
+      code: result.code ?? 'unknown-format',
+      warnings: result.warnings,
+    };
+  }
+  const savedAt = result.savedAt ?? new Date().toISOString();
+  const gameVersion = result.gameVersion ?? GAME_VERSION;
+  return {
+    ok: true,
+    world: result.world,
+    savedAt,
+    gameVersion,
+    warnings: result.warnings,
+    preservedModules: result.preservedModules,
+    save: {
+      formatVersion: SAVE_FORMAT_VERSION,
+      gameVersion,
+      savedAt,
+      world: result.world,
+    },
+  };
+}
+
+/**
+ * 读取旧单体存档（formatVersion 1–9）：保留既有迁移链、旧档兼容处理、结构校验与不变量校验。
+ * 迁移结果不会立即改写文件；首次保存时由 serializeSave 写出 v10 模块化格式。
+ */
+function parseLegacyDocument(parsed: Record<string, unknown>, formatVersion: number): ParseResult {
+  const save = parsed as unknown as SaveFile;
   try {
-    const save = parsed as unknown as SaveFile;
     if (!isRecord(save.world)) return { ok: false, error: '存档缺少 world 数据' };
 
     let worldValue: unknown = save.world;

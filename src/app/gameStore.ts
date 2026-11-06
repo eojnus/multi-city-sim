@@ -93,6 +93,10 @@ import {
 } from '../simulation/agreements/agreements';
 import { DEMO_CONFIG } from '../data/config';
 import { SAVE_FORMAT_VERSION } from '../simulation/contracts/types';
+import {
+  MODULE_SAVE_FORMAT_VERSION,
+  MODULE_SAVE_KIND,
+} from '../simulation/persistence/types';
 import { POLICY_DEFINITIONS } from '../simulation/policies/definitions';
 import {
   cancelPolicy,
@@ -175,6 +179,82 @@ export interface Toast {
 
 export interface SaveSlotView extends SaveSlotInfo {
   label: string;
+}
+
+// ---------------------------------------------------------------- v1.7 存档契约适配
+// core/save.ts 由存档 owner 并行升级为新契约：
+//   serializeSave(world, { savedAt, preservedModules })
+//   parseSave(text) → { ok, world, savedAt, gameVersion, warnings, preservedModules, code, ... }
+// 平台层先按契约编码，并做一次轻量能力探测：新契约的 warnings 是必填数组，旧 ParseResult 没有
+// 该字段。未就位时退回旧调用方式（第二参数为 savedAt 字符串）；新 API 合入后自动走 options 路径，
+// 无需再改本文件。探测结果在每次成功读取后刷新，作为运行时兜底。
+
+export interface SaveSerializeOptions {
+  savedAt?: string;
+  preservedModules?: Record<string, unknown>;
+}
+
+/**
+ * 新旧 parseSave 返回的交集（新字段在旧 API 下为 undefined）。
+ * 用交叉类型而不是 extends：新契约若把 preservedModules 收窄为 Record<string, SaveModuleHeader>，
+ * 与这里的 Record<string, unknown> 取交集仍可安全读取/透传，不需要再改本文件。
+ */
+export type SaveParseOutcome = ReturnType<typeof parseSave> & {
+  savedAt?: string;
+  gameVersion?: string;
+  warnings?: string[];
+  preservedModules?: Record<string, unknown>;
+  code?: string;
+};
+
+const serializeSaveWithOptions = serializeSave as unknown as (
+  world: WorldState,
+  options?: SaveSerializeOptions,
+) => string;
+
+function detectModuleSaveApi(): boolean {
+  try {
+    // v10 模块化契约的 parseSave 即使在失败时也返回 warnings 数组；旧 ParseResult 没有该字段。
+    // 用一个“合法 JSON、但缺少必需模块”的 v10 文档做能力探测，避免首次保存前无法判断契约。
+    const probe = JSON.stringify({
+      formatVersion: MODULE_SAVE_FORMAT_VERSION,
+      kind: MODULE_SAVE_KIND,
+      gameVersion: 'probe',
+      savedAt: new Date(0).toISOString(),
+      worldMeta: {
+        tick: 0,
+        year: 2026,
+        month: 1,
+        randomState: 1,
+        seed: 20261101,
+        gameVersion: 'probe',
+      },
+      modules: {},
+    });
+    return Array.isArray((parseSave(probe) as unknown as SaveParseOutcome).warnings);
+  } catch {
+    return false;
+  }
+}
+
+/** 当前 core/save.ts 是否已是 v10 模块化契约（运行时探测，兼容并行开发期）。 */
+let moduleSaveApiAvailable = detectModuleSaveApi();
+
+export function isModuleSaveApiAvailable(): boolean {
+  return moduleSaveApiAvailable;
+}
+
+/** 读取并刷新契约探测：新 API 一定返回 warnings 数组。 */
+function readSaveText(text: string): SaveParseOutcome {
+  const parsed = parseSave(text) as unknown as SaveParseOutcome;
+  if (Array.isArray(parsed.warnings)) moduleSaveApiAvailable = true;
+  return parsed;
+}
+
+/** 按当前契约序列化：新 API 传 options（含 preservedModules），旧 API 传 savedAt 字符串。 */
+function serializeWorldSave(world: WorldState, options: SaveSerializeOptions = {}): string {
+  if (moduleSaveApiAvailable) return serializeSaveWithOptions(world, options);
+  return serializeSave(world, options.savedAt);
 }
 
 // ---------------------------------------------------------------- v0.8 股票市场视图
@@ -588,6 +668,17 @@ export class GameStore {
   autosaveDisabledReason: string | null = null;
   /** 自动存档暂停是否由“写入失败”引起（区别于读取到损坏存档；手动保存成功后解除）。 */
   autosaveWriteFailure = false;
+  /** 保存互斥：手动/自动保存串行执行；失败也会释放，绝不无限“正在保存”。 */
+  isSaving = false;
+  /** 最近一次读取得到的未知可选模块；重新保存时原样写回（未知模块无损保留）。 */
+  preservedModules: Record<string, unknown> | null = null;
+  /** 最近一次读取的非致命兼容提示（旧模块初始化、未知可选模块被保留等）。 */
+  lastLoadWarnings: string[] = [];
+  /** 最近一次保存/读取命中的稳定错误码（UI 诊断用，可能为 undefined）。 */
+  lastSaveErrorCode: string | null = null;
+  private saveQueue: Promise<unknown> = Promise.resolve();
+  /** 在途/排队的保存请求数（供 UI/测试观察；为 0 表示没有“正在保存”）。 */
+  pendingSaves = 0;
   layouts: Record<string, CityLayout> = {};
   // v0.8 股票市场窗口状态（纯 UI 视图状态，不参与模拟）。
   stockMarketOpen = false;
@@ -804,50 +895,89 @@ export class GameStore {
     }, kind === 'error' ? 6500 : 4200);
   }
 
+  /** 保存请求串行化：手动保存排队，自动保存在有保存在途时跳过（后续操作还会触发）。 */
+  private enqueueSave<T>(task: () => Promise<T>): Promise<T> {
+    this.pendingSaves += 1;
+    const run = this.saveQueue.then(task, task);
+    const settle = (): void => {
+      this.pendingSaves = Math.max(0, this.pendingSaves - 1);
+    };
+    this.saveQueue = run.then(settle, settle);
+    return run;
+  }
+
+  /**
+   * 生成一致快照：同步序列化后才 await 平台写入（JS 单线程下 tick 不可能与快照交错）。
+   * preservedModules 透传上次读取保留的未知可选模块，保存时不丢数据。
+   */
+  private buildSaveText(): string {
+    return serializeWorldSave(this.world, {
+      savedAt: new Date().toISOString(),
+      ...(this.preservedModules ? { preservedModules: this.preservedModules } : {}),
+    });
+  }
+
   async autosave(): Promise<void> {
     // 损坏的自动存档会保留原文件，直到玩家显式载入有效存档或开始新世界。
     if (this.autosaveDisabled) return;
-    const text = serializeSave(this.world);
-    let result: { ok: boolean; error?: string };
-    try {
-      result = await this.bridge.write('autosave', text);
-    } catch (error) {
-      // 桥接层抛异常同样按“写入失败”处理：暂停自动写入，绝不覆盖原自动存档。
-      result = { ok: false, error: (error as Error).message };
-    }
-    if (result.ok) {
-      this.lastSavedAt = new Date().toISOString();
-      this.lastAutoSaveError = null;
-      return;
-    }
-    this.pauseAutosaveAfterWriteFailure(result.error ?? '自动存档失败');
+    // 已有保存（手动或自动）在途/排队：跳过本次自动存档，避免用户操作被自动存档队列阻塞。
+    if (this.isSaving || this.pendingSaves > 0) return;
+    await this.enqueueSave(async () => {
+      this.isSaving = true;
+      try {
+        const text = this.buildSaveText();
+        const result = await this.bridge.write('autosave', text);
+        if (result.ok) {
+          this.lastSavedAt = new Date().toISOString();
+          this.lastAutoSaveError = null;
+          this.lastSaveErrorCode = null;
+          return;
+        }
+        this.lastSaveErrorCode = result.code ?? null;
+        this.pauseAutosaveAfterWriteFailure(result.error ?? '自动存档失败');
+      } catch (error) {
+        // 桥接层抛异常同样按“写入失败”处理：暂停自动写入，绝不覆盖原自动存档。
+        this.pauseAutosaveAfterWriteFailure((error as Error).message || '自动存档失败');
+      } finally {
+        // 失败也必须释放锁；否则 UI 会无限“正在保存”且后续自动存档全部被跳过。
+        this.isSaving = false;
+      }
+    });
   }
 
   async saveSlot(slot: string): Promise<boolean> {
-    const text = serializeSave(this.world);
-    let result: { ok: boolean; error?: string };
-    try {
-      result = await this.bridge.write(slot, text);
-    } catch (error) {
-      result = { ok: false, error: (error as Error).message };
-    }
-    if (result.ok) {
-      this.lastSavedAt = new Date().toISOString();
-      // 手动保存成功说明存档通道已恢复：解除“写入失败”导致的自动存档暂停。
-      // 读取到损坏自动存档导致的暂停仍需显式读取其他存档/开始新世界（保留原文件）。
-      if (this.autosaveWriteFailure) {
-        this.autosaveDisabled = false;
-        this.autosaveDisabledReason = null;
-        this.lastAutoSaveError = null;
-        this.autosaveWriteFailure = false;
+    return this.enqueueSave(async () => {
+      this.isSaving = true;
+      try {
+        const text = this.buildSaveText();
+        const result = await this.bridge.write(slot, text);
+        if (!result.ok) {
+          this.lastSaveErrorCode = result.code ?? null;
+          this.toast(`保存失败：${result.error ?? '未知错误'}；原存档未被修改。`, 'error');
+          this.emit();
+          return false;
+        }
+        this.lastSavedAt = new Date().toISOString();
+        this.lastSaveErrorCode = null;
+        // 手动保存成功说明存档通道已恢复：解除“写入失败”导致的自动存档暂停。
+        // 读取到损坏自动存档导致的暂停仍需显式读取其他存档/开始新世界（保留原文件）。
+        if (this.autosaveWriteFailure) {
+          this.autosaveDisabled = false;
+          this.autosaveDisabledReason = null;
+          this.lastAutoSaveError = null;
+          this.autosaveWriteFailure = false;
+        }
+        this.toast(`已保存到 ${slot}。`, 'success');
+        this.emit();
+        return true;
+      } catch (error) {
+        this.toast(`保存失败：${(error as Error).message}；原存档未被修改。`, 'error');
+        this.emit();
+        return false;
+      } finally {
+        this.isSaving = false;
       }
-      this.toast(`已保存到 ${slot}。`, 'success');
-      this.emit();
-      return true;
-    }
-    this.toast(`保存失败：${result.error ?? '未知错误'}；原存档未被修改。`, 'error');
-    this.emit();
-    return false;
+    });
   }
 
   async loadSlot(slot: string): Promise<boolean> {
@@ -867,19 +997,24 @@ export class GameStore {
   }
 
   loadFromText(text: string, sourceLabel = '存档'): boolean {
-    let parsed: ReturnType<typeof parseSave>;
+    let parsed: SaveParseOutcome;
     try {
-      parsed = parseSave(text);
+      parsed = readSaveText(text);
     } catch (error) {
-      parsed = { ok: false, error: `存档校验异常：${(error as Error).message}` };
+      parsed = { ok: false, error: `存档校验异常：${(error as Error).message}`, warnings: [] };
     }
     if (!parsed.ok || !parsed.world) {
+      this.lastSaveErrorCode = parsed.code ?? null;
       this.toast(`读取失败：${parsed.error ?? '未知错误'}；当前进度未被覆盖。`, 'error');
       this.emit();
       return false;
     }
     this.simulation = new Simulation(parsed.world);
     this.lastMigrationFrom = parsed.migratedFrom ?? null;
+    // 未知可选模块无损保留：重新保存时原样写回（新契约才可能返回该字段）。
+    this.preservedModules = parsed.preservedModules ?? null;
+    this.lastLoadWarnings = parsed.warnings ?? [];
+    this.lastSaveErrorCode = null;
     this.view = 'region';
     this.selectedCityId = this.world.cities[0]?.id ?? null;
     this.selectedBuildingId = null;
@@ -893,14 +1028,21 @@ export class GameStore {
     this.lastAutoSaveError = null;
     this.autosaveWriteFailure = false;
     this.rebuildLayouts();
-    const date = parsed.save?.savedAt ? new Date(parsed.save.savedAt).toLocaleString('zh-CN') : '未知时间';
-    this.lastSavedAt = parsed.save?.savedAt ?? null;
+    const savedAt = parsed.savedAt ?? parsed.save?.savedAt;
+    const date = savedAt ? new Date(savedAt).toLocaleString('zh-CN') : '未知时间';
+    this.lastSavedAt = savedAt ?? null;
     this.toast(
       parsed.migratedFrom
         ? `已从${sourceLabel}恢复（保存于 ${date}），旧格式 v${parsed.migratedFrom} 已迁移。`
         : `已从${sourceLabel}恢复（保存于 ${date}）。`,
       'success',
     );
+    if (this.lastLoadWarnings.length > 0) {
+      this.toast(
+        `读取完成，但有 ${this.lastLoadWarnings.length} 条兼容提示：${this.lastLoadWarnings.slice(0, 2).join('；')}`,
+        'warning',
+      );
+    }
     this.emit();
     return true;
   }
@@ -944,11 +1086,11 @@ export class GameStore {
       this.disableAutosave('自动存档内容为空');
       return false;
     }
-    let parsed: ReturnType<typeof parseSave>;
+    let parsed: SaveParseOutcome;
     try {
-      parsed = parseSave(read.text);
+      parsed = readSaveText(read.text);
     } catch (error) {
-      parsed = { ok: false, error: `存档校验异常：${(error as Error).message}` };
+      parsed = { ok: false, error: `存档校验异常：${(error as Error).message}`, warnings: [] };
     }
     if (!parsed.ok || !parsed.world) {
       this.disableAutosave(parsed.error ?? '自动存档损坏');
@@ -956,10 +1098,12 @@ export class GameStore {
     }
     this.simulation = new Simulation(parsed.world);
     this.lastMigrationFrom = parsed.migratedFrom ?? null;
+    this.preservedModules = parsed.preservedModules ?? null;
+    this.lastLoadWarnings = parsed.warnings ?? [];
     this.rebuildLayouts();
     this.selectedCityId = this.world.cities[0]?.id ?? null;
     this.view = 'region';
-    this.lastSavedAt = parsed.save?.savedAt ?? null;
+    this.lastSavedAt = (parsed.savedAt ?? parsed.save?.savedAt) ?? null;
     this.autosaveDisabled = false;
     this.autosaveDisabledReason = null;
     this.lastAutoSaveError = null;
@@ -1015,6 +1159,10 @@ export class GameStore {
     this.autosaveDisabledReason = null;
     this.lastAutoSaveError = null;
     this.autosaveWriteFailure = false;
+    // 新世界没有“上次读取保留的未知模块/兼容提示”，必须清空，避免旧模块数据串到新档。
+    this.preservedModules = null;
+    this.lastLoadWarnings = [];
+    this.lastSaveErrorCode = null;
     this.rebuildLayouts();
     this.toast('已开始新的世界；旧的手动存档仍保留。', 'info');
     void this.autosave();
@@ -1167,6 +1315,13 @@ export class GameStore {
         id: 'save-migrated',
         tone: 'info',
         text: `存档已从旧格式 v${this.lastMigrationFrom} 迁移：原有资金、持股、企业、人口和随机状态已保留，新增股权结构按规则生成。`,
+      });
+    }
+    if (this.lastLoadWarnings.length > 0) {
+      notices.push({
+        id: 'save-load-warnings',
+        tone: 'warning',
+        text: `读取存档时有 ${this.lastLoadWarnings.length} 条兼容提示：${this.lastLoadWarnings.slice(0, 2).join('；')}。未知可选模块已原样保留，重新保存不会丢失。`,
       });
     }
     return notices;

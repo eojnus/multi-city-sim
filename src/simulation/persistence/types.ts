@@ -15,9 +15,13 @@
  */
 
 import type { WorldState } from '../contracts/types';
+import { SAVE_FORMAT_VERSION } from '../contracts/types';
 
-/** 顶层（模块化）存档格式版本。旧单体格式为 1–9，本轮新格式为 10。 */
-export const MODULE_SAVE_FORMAT_VERSION = 10;
+/**
+ * 顶层（模块化）存档格式版本。旧单体格式为 1–9；本轮新格式 = SAVE_FORMAT_VERSION（10）。
+ * 单一来源：本常量与 contracts/types.ts 的 SAVE_FORMAT_VERSION 必须一致（测试校验）。
+ */
+export const MODULE_SAVE_FORMAT_VERSION = SAVE_FORMAT_VERSION;
 
 /** 存档顶层结构标识（写入存档，便于诊断；读取以 formatVersion 为准，本字段只做交叉校验）。 */
 export const MODULE_SAVE_KIND = 'lanwan-modules';
@@ -33,8 +37,8 @@ export const MAX_SAVE_RAW_BYTES = 128 * 1024 * 1024;
 /** 磁盘上压缩文件字节上限（gzip 后）。 */
 export const MAX_SAVE_COMPRESSED_BYTES = 64 * 1024 * 1024;
 
-/** 模块 ID：小写字母开头、小写字母/数字组成；注册后视为稳定契约，不得改名。 */
-export const SAVE_MODULE_ID_PATTERN = /^[a-z][a-z0-9]{1,31}$/;
+/** 模块 ID：小写字母开头，后接字母/数字（允许 camelCase，如 marketTrade）；注册后视为稳定契约，不得改名。 */
+export const SAVE_MODULE_ID_PATTERN = /^[a-z][a-zA-Z0-9]{1,31}$/;
 
 /** 模块 ID 的静态联合类型（新增模块时在此登记；运行时仍以字符串注册表为准）。 */
 export type SaveModuleId =

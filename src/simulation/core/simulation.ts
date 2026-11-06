@@ -28,6 +28,7 @@ import { transportTaxFactors } from '../government/taxes';
 import { settleGovernmentDebt } from '../government/debt';
 import { pushRealGdpPoint } from '../government/gdp-window';
 import { computeCityGdp, playerNetWorth, investInCompany, trimLog } from '../economy/gdp';
+import { applyHistoryPolicy } from '../persistence/historyPolicy';
 import { checkInvariants } from './invariants';
 import type { GoodsAudit } from './invariants';
 import { GOOD_IDS } from '../companies/company';
@@ -496,6 +497,21 @@ export class Simulation {
       if (problems.length > 0) {
         this.state = snapshot;
         return { ok: false, error: `本期结算未通过不变量校验：${problems.slice(0, 3).join('；')}`, invariants: problems };
+      }
+
+      // 19. v1.7 §五：历史记录与数据增长治理。
+      //     安全时点：月度结算与不变量校验全部完成之后、写日志/RNG 状态与返回之前。
+      //     只裁剪/聚合只读历史（银行快照/已结清贷款/财政流水/债券兑付/K 线/治理与选举），
+      //     不读 RNG、不改变结算顺序与推进等价性；策略幂等，异常时只记警告、不把本月判失败
+      //     （历史治理失败不得回滚已经完成的经济结算）。
+      try {
+        applyHistoryPolicy(this.state, this.config, logs);
+      } catch (error) {
+        logs.push({
+          tick: this.state.time.tick,
+          kind: 'warning',
+          message: `历史记录治理失败（不影响本月结算）：${(error as Error).message}`,
+        });
       }
 
       // 18. 日志与 RNG 状态

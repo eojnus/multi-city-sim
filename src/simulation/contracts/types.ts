@@ -2,9 +2,10 @@
 // 这些类型描述的是“演示方案 v0.2”的数据结构，不代表最终策划规则。
 // v0.2 新增证券/治理/居民投资/协议/通知数据；旧 v1 存档由 core/save.ts 迁移。
 
-export const SAVE_FORMAT_VERSION = 9;
+/** 顶层存档格式版本。v10 起为“模块化快照”格式；v1–v9 为旧单体 WorldState（读取时走既有迁移链）。 */
+export const SAVE_FORMAT_VERSION = 10;
 /** v1.6：本轮为“规则修复 + 经济规则调整”，新增字段全部可选、缺省安全，存档格式不升版。 */
-export const GAME_VERSION = '1.6.1';
+export const GAME_VERSION = '1.7.0';
 
 export type GoodId =
   | 'grain'
@@ -824,6 +825,37 @@ export interface StockClassHistory {
   companyName?: string;
   /** 股份类别被移除（企业退出）时的游戏月；存在即表示“已退出，不可交易”。 */
   exitedTick?: number;
+  /**
+   * v1.7 §五：超过最近 config.history.stockMonthlyMonths 个月的月线按年聚合后的真实 OHLCV。
+   * 旧存档/尚未产生超窗口月线时缺省；归档只由真实月线计算，不伪造无成交月份。
+   */
+  yearlyCandles?: StockYearCandle[];
+}
+
+/**
+ * v1.7 §五：股票月度 K 线的年度聚合归档（仅由真实月线计算，不新造行情）。
+ * 幂等键：year——同一股份类别每年只增量合并一次；Σ months = 该年真实有成交的月线根数。
+ */
+export interface StockYearCandle {
+  /** 游戏日历年（与 StockCandle.tick 对应的日历年）。 */
+  year: number;
+  /** 该年真实成交月份中最早一根月线的开盘价。 */
+  open: number;
+  /** 该年真实成交月份中的最高价。 */
+  high: number;
+  /** 该年真实成交月份中的最低价。 */
+  low: number;
+  /** 该年真实成交月份中最晚一根月线的收盘价。 */
+  close: number;
+  /** 该年真实成交月线的成交量合计。 */
+  volume: number;
+  /** 该年真实成交月线的成交笔数合计。 */
+  trades: number;
+  /** 参与汇总的真实月线根数（= 该年有成交的月份数；无成交月不生成、不补 0）。 */
+  months: number;
+  /** 参与汇总月线的最小/最大 tick（用于增量合并与审计）。 */
+  firstTick: number;
+  lastTick: number;
 }
 
 export interface FinancingOffer {
@@ -934,10 +966,31 @@ export interface CompanyControl {
   note: string;
 }
 
+/**
+ * v1.7 §五：已结束治理议案的年度聚合归档（只归档终态；open 议案永不归档）。
+ * 幂等键：year + companyId + kind；公司名称是归档时的快照，企业退出后仍可识别。
+ */
+export interface ArchivedMotionYear {
+  year: number;
+  companyId: string;
+  companyName: string;
+  kind: MotionKind;
+  count: number;
+  passed: number;
+  rejected: number;
+  /** 二元议案（dividendPolicy/operatorAppointment）赞成/反对票合计；选任议案恒为 0。 */
+  votesFor: number;
+  votesAgainst: number;
+  decidedFirstTick: number;
+  decidedLastTick: number;
+}
+
 export interface GovernanceState {
   boards: Board[];
   motions: Motion[];
   controls: CompanyControl[];
+  /** v1.7 §五：超过保留窗口的已结束议案按年聚合归档（旧档/未归档时缺省）。 */
+  motionYears?: ArchivedMotionYear[];
 }
 
 // ---------------------------------------------------------------- 居民投资实体
@@ -1098,9 +1151,24 @@ export interface ElectionRecord {
   note: string;
 }
 
+/**
+ * v1.7 §五：选举历史的年度聚合归档（只归档已有结果的记录，幂等键 cityId + year）。
+ * winnerId 不归档（候选人每届可能重建，保留展示用姓名快照）。
+ */
+export interface ArchivedElectionYear {
+  year: number;
+  cityId: string;
+  count: number;
+  playerWins: number;
+  lastWinnerName: string;
+  lastElectionTick: number;
+}
+
 export interface WorldPoliticsState {
   cities: CityPoliticsState[];
   elections: ElectionRecord[];
+  /** v1.7 §五：超过保留窗口的选举记录按 城市×年 聚合归档（旧档/未归档时缺省）。 */
+  electionYears?: ArchivedElectionYear[];
 }
 
 export interface FiscalEntry {
@@ -1141,9 +1209,24 @@ export interface FiscalEntry {
   companyId?: string;
 }
 
+/**
+ * v1.7 §五：财政流水的年度聚合归档。幂等键：year + cityId + kind。
+ * 余额不在账本（余额 = city.treasury）；归档只减少审计明细，不改变任何余额语义。
+ */
+export interface ArchivedFiscalYear {
+  year: number;
+  cityId: string;
+  kind: FiscalEntry['kind'];
+  count: number;
+  /** 归档流水金额合计（正=收入，负=支出），与明细逐笔相加守恒。 */
+  amount: number;
+}
+
 export interface FiscalState {
   ledger: FiscalEntry[];
   nextEntryId: number;
+  /** v1.7 §五：超过明细保留窗口的财政流水按 城市×年×kind 聚合归档（旧档/未归档时缺省）。 */
+  archivedLedger?: ArchivedFiscalYear[];
 }
 
 export interface ActivePolicy {
@@ -1986,6 +2069,43 @@ export interface BankMonthlyStats {
   note: string;
 }
 
+/** v1.7 §五：某借款人类别在某月的授信快照明细汇总。 */
+export interface CreditSnapshotKindMonth {
+  subjects: number;
+  totalLimit: number;
+  totalOutstanding: number;
+}
+
+/**
+ * v1.7 §五：授信快照的月度汇总（每主体快照只保留最新 1 条后，历史趋势仍在）。
+ * 幂等键：tick——同一 tick 只汇总一次；金额 = 该 tick 各主体快照 limit/outstanding 合计。
+ */
+export interface ArchivedCreditSnapshotMonth {
+  tick: number;
+  year: number;
+  month: number;
+  /** 该 tick 有快照的主体数（按 borrower kind+id 去重）。 */
+  subjects: number;
+  totalLimit: number;
+  totalOutstanding: number;
+  byBorrowerKind: Record<string, CreditSnapshotKindMonth>;
+}
+
+/**
+ * v1.7 §五：已结清（status='repaid'、未偿≈0）银行贷款的年度聚合归档。
+ * 幂等键：year + borrowerKind + purpose；Σ = 归档前被移除明细的对应字段合计。
+ */
+export interface ArchivedBankLoanYear {
+  year: number;
+  borrowerKind: BankOwner['kind'];
+  purpose: LoanPurpose;
+  status: LoanStatus;
+  count: number;
+  principal: number;
+  paidPrincipal: number;
+  paidInterest: number;
+}
+
 export interface BankingState {
   deposits: DepositAccount[];
   loans: LoanContract[];
@@ -1993,6 +2113,10 @@ export interface BankingState {
   lastMonth: BankMonthlyStats;
   nextAccountNumber: number;
   nextLoanNumber: number;
+  /** v1.7 §五：授信快照月度汇总，保留最近 config.history.bankingSnapshotMonths 个月。 */
+  snapshotMonths?: ArchivedCreditSnapshotMonth[];
+  /** v1.7 §五：已结清贷款的年度聚合归档（旧档/未归档时缺省）。 */
+  archivedLoans?: ArchivedBankLoanYear[];
 }
 
 // ---------------------------------------------------------------- 财政可见性（v0.7 数据层权限表达）
@@ -2166,6 +2290,26 @@ export interface BondPayment {
   note: string;
 }
 
+/**
+ * v1.7 §五：债券兑付流水的年度聚合归档。
+ * 幂等键：year + issuanceId + holderKind + holderId + kind；
+ * Σ 聚合 = 归档前被移除明细的 principalPaid/interestPaid/count 合计（同 tick 幂等键不变）。
+ */
+export interface ArchivedBondPaymentYear {
+  year: number;
+  issuanceId: string;
+  cityId: string;
+  holderKind: BondHolder['kind'];
+  holderId: string;
+  kind: BondPayment['kind'];
+  count: number;
+  principalPaid: number;
+  interestPaid: number;
+  /** 其中由银行无条件垫付的笔数/金额（政府借新还旧审计口径）。 */
+  bankAdvancedCount: number;
+  bankAdvancedAmount: number;
+}
+
 /** 债券全局账本（跨城持有人共用一本账；权威数据，禁止另建副本）。 */
 export interface BondState {
   issuances: BondIssuance[];
@@ -2174,6 +2318,8 @@ export interface BondState {
   nextIssuanceNumber: number;
   nextHoldingNumber: number;
   nextPaymentNumber: number;
+  /** v1.7 §五：超过明细保留窗口的兑付流水按 批次×持有人×年×kind 聚合归档（旧档/未归档时缺省）。 */
+  archivedPayments?: ArchivedBondPaymentYear[];
 }
 
 // ---------------------------------------------------------------- 政府银行债务、应付项与破产（v0.7）
@@ -2441,6 +2587,21 @@ export interface ConsumerBudgetSnapshot {
   note: string;
 }
 
+/**
+ * v1.7 §五：已结清居民消费贷的年度聚合归档。
+ * 幂等键：year + cityId + status；不保存 groupId，避免归档后出现悬空群体引用
+ * （读档结构校验 core/save.ts 对消费贷 groupId 比 referenceValidation 更严格，见交付报告）。
+ */
+export interface ArchivedHouseholdLoanYear {
+  year: number;
+  cityId: string;
+  status: HouseholdLoanStatus;
+  count: number;
+  principal: number;
+  paidPrincipal: number;
+  paidInterest: number;
+}
+
 /** 居民消费预算快照与消费贷款账本（权威数据）。 */
 export interface HouseholdFinanceState {
   loans: HouseholdLoanContract[];
@@ -2448,6 +2609,8 @@ export interface HouseholdFinanceState {
   /** 消费预算快照，按 tick 升序保留最近 N 个月。 */
   budgets: ConsumerBudgetSnapshot[];
   note: string;
+  /** v1.7 §五：已结清消费贷的年度聚合归档（旧档/未归档时缺省）。 */
+  archivedLoans?: ArchivedHouseholdLoanYear[];
 }
 
 // ---------------------------------------------------------------- 权限投影视图（store/UI 唯一允许读取的形状，v0.7）

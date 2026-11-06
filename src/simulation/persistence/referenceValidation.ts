@@ -54,14 +54,20 @@ export function validateCrossReferences(
       issues.push({ path, message: `引用了不存在的城市：${String(cityId)}` });
     }
   };
-  const requireCompany = (companyId: unknown, path: string): void => {
+  const requireCompany = (companyId: unknown, path: string, label?: string): void => {
     if (typeof companyId !== 'string' || !companyIds.has(companyId)) {
-      issues.push({ path, message: `引用了不存在的企业：${String(companyId)}` });
+      issues.push({
+        path,
+        message: `${label ? `${label} ` : ''}引用了不存在的企业：${String(companyId)}`,
+      });
     }
   };
-  const requireInvestor = (investorId: unknown, path: string): void => {
+  const requireInvestor = (investorId: unknown, path: string, label?: string): void => {
     if (typeof investorId !== 'string' || !investorIds.has(investorId)) {
-      issues.push({ path, message: `引用了不存在的居民投资实体：${String(investorId)}` });
+      issues.push({
+        path,
+        message: `${label ? `${label} ` : ''}引用了不存在的居民投资实体：${String(investorId)}`,
+      });
     }
   };
 
@@ -90,7 +96,11 @@ export function validateCrossReferences(
   }
   for (const holding of world.securities?.holdings ?? []) {
     if (holding.shares > 0 || !allowHistoricalMissing) {
-      requireCompany(holding.companyId, 'securities.holdings[].companyId');
+      requireCompany(
+        holding.companyId,
+        'securities.holdings[].companyId',
+        `持股记录 ${holding.shareClassId}/${holding.holder.type}:${holding.holder.id}`,
+      );
     }
   }
   for (const order of world.securities?.orders ?? []) {
@@ -123,8 +133,8 @@ export function validateCrossReferences(
     const active = holding.status === 'active';
     if (!active && allowHistoricalMissing) continue;
     const holder = holding.holder;
-    if (holder.kind === 'company') requireCompany(holder.id, 'bonds.holdings[].holder.id');
-    else if (holder.kind === 'investorGroup') requireInvestor(holder.id, 'bonds.holdings[].holder.id');
+    if (holder.kind === 'company') requireCompany(holder.id, 'bonds.holdings[].holder.id', `持债记录 ${holding.id}`);
+    else if (holder.kind === 'investorGroup') requireInvestor(holder.id, 'bonds.holdings[].holder.id', `持债记录 ${holding.id}`);
     // player 持有人不需要额外引用检查。
   }
   for (const payment of world.bonds?.payments ?? []) {
@@ -140,8 +150,8 @@ export function validateCrossReferences(
   for (const deposit of world.banking?.deposits ?? []) {
     const owner = deposit.owner;
     if (!owner) continue;
-    if (owner.kind === 'company') requireCompany(owner.id, 'banking.deposits[].owner.id');
-    else if (owner.kind === 'investorGroup') requireInvestor(owner.id, 'banking.deposits[].owner.id');
+    if (owner.kind === 'company') requireCompany(owner.id, 'banking.deposits[].owner.id', `存款 ${deposit.id}`);
+    else if (owner.kind === 'investorGroup') requireInvestor(owner.id, 'banking.deposits[].owner.id', `存款 ${deposit.id}`);
     else if (owner.kind === 'government') requireCity(owner.id, 'banking.deposits[].owner.id');
     // player / household（居民群体由 households.groups 承载）在结构校验中检查。
   }
@@ -153,8 +163,8 @@ export function validateCrossReferences(
       issues.push({ path: 'banking.loans[].borrower', message: `银行贷款 ${String(loan.id)} 缺少借款人` });
       continue;
     }
-    if (borrower.kind === 'company') requireCompany(borrower.id, 'banking.loans[].borrower.id');
-    else if (borrower.kind === 'investorGroup') requireInvestor(borrower.id, 'banking.loans[].borrower.id');
+    if (borrower.kind === 'company') requireCompany(borrower.id, 'banking.loans[].borrower.id', `贷款 ${String(loan.id)}`);
+    else if (borrower.kind === 'investorGroup') requireInvestor(borrower.id, 'banking.loans[].borrower.id', `贷款 ${String(loan.id)}`);
     else if (borrower.kind === 'government') requireCity(borrower.id, 'banking.loans[].borrower.id');
   }
 
@@ -203,7 +213,41 @@ export function validateCrossReferences(
 
   // ---- 设备市场：挂单企业引用（活跃委托必须引用现存企业） ----
   for (const offer of world.equipmentMarket?.offers ?? []) {
-    requireCompany(offer.companyId, 'equipmentMarket.offers[].companyId');
+    requireCompany(offer.companyId, 'equipmentMarket.offers[].companyId', `设备委托 ${offer.id}`);
+  }
+
+  // ---- 城外/城内待结算销售：卖方企业必须存在；买方为 'households' 占位或企业 ----
+  for (const sale of world.transport?.pendingSales ?? []) {
+    requireCompany(sale.sellerCompanyId, 'transport.pendingSales[].sellerCompanyId');
+    if (sale.buyerCompanyId !== 'households') {
+      requireCompany(sale.buyerCompanyId, 'transport.pendingSales[].buyerCompanyId');
+    }
+  }
+
+  // ---- 协议参与者/条目：活跃状态必须引用现存企业；declined/终态允许历史悬空 ----
+  for (const agreement of world.agreements ?? []) {
+    for (const participant of agreement.participants ?? []) {
+      if (participant.decision === 'declined' && allowHistoricalMissing) continue;
+      requireCompany(participant.companyId, 'agreements.participants[].companyId');
+    }
+    for (const item of agreement.items ?? []) {
+      const terminal = ['fulfilled', 'failed', 'declined'].includes(item.status);
+      if (terminal && allowHistoricalMissing) continue;
+      requireCompany(item.buyerCompanyId, 'agreements.items[].buyerCompanyId');
+      requireCompany(item.sellerCompanyId, 'agreements.items[].sellerCompanyId');
+    }
+  }
+
+  // ---- 公司治理：董事席位/控制权/在办议案必须引用现存企业；已终决议案允许历史悬空 ----
+  for (const board of world.governance?.boards ?? []) {
+    requireCompany(board.companyId, 'governance.boards[].companyId');
+  }
+  for (const control of world.governance?.controls ?? []) {
+    requireCompany(control.companyId, 'governance.controls[].companyId');
+  }
+  for (const motion of world.governance?.motions ?? []) {
+    if (motion.status !== 'open' && allowHistoricalMissing) continue;
+    requireCompany(motion.companyId, 'governance.motions[].companyId', `议案 ${motion.id}`);
   }
 
   // ---- 经营者：企业引用（离职经营者 companyId 为 null） ----

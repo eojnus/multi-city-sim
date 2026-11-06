@@ -1,14 +1,23 @@
 import type { DesktopSimApi, SaveSlotInfo } from './desktop';
+import { MAX_SAVE_RAW_BYTES } from '../simulation/persistence/types';
 
 const STORAGE_PREFIX = 'lanwan-save:';
+
 /**
- * v1.6 §三：世界状态（近上限 480 家企业 + 银行/证券/债券/维护费流水）在 15 个月即达 12MB，
- * 旧 8MB 上限会让正常游戏无法保存；上限提高到 64MiB（字节，UTF-8），并保留明确错误提示。
- * 必须与 electron/saveIpc.MAX_SAVE_BYTES 一致（tests/save-boundary-v17.test.ts 校验）。
+ * v1.7 存档系统：渲染层与平台层的边界（任务书 §六/§七）。
+ *
+ * 大小口径与主进程一致（src/simulation/persistence/types.ts）：
+ * - 原始文本（未压缩 UTF-8）≤ MAX_SAVE_RAW_BYTES = 128MiB；桌面版另有“磁盘 gzip ≤64MiB、
+ *   解压输出 ≤128MiB”两处主进程保护，渲染层只负责第一层预检。
+ * - 浏览器 localStorage 保存的是**未压缩文本**，容量通常只有 5–10MB，不能与桌面能力等同；
+ *   浏览器模式不假设能存桌面级存档，超限时明确提示使用桌面版。
  */
-export const MAX_SAVE_BYTES = 64 * 1024 * 1024;
-/** 与 electron/saveIpc.SAVE_TOO_LARGE_ERROR 完全一致的用户可见文案。 */
-export const SAVE_TOO_LARGE_ERROR = '存档过大（超过 64MB / 64MiB 限制）';
+export { MAX_SAVE_RAW_BYTES };
+/** 与 electron/saveIpc.SAVE_LIMIT_MESSAGES.raw + “未写入”完全一致的用户可见文案。 */
+export const SAVE_RAW_TOO_LARGE_ERROR = '存档过大（原始数据超过 128MiB 上限，未写入）';
+/** 浏览器 localStorage 的真实限制说明（不冒充桌面能力）。 */
+export const BROWSER_STORAGE_LIMITATION =
+  '浏览器本地存储容量通常只有 5–10MB，且保存的是未压缩文本；桌面版支持 128MiB 原始存档与 gzip 压缩。请使用桌面版保存大型存档。';
 
 /** 文本的 UTF-8 字节数（与主进程 Buffer.byteLength 口径一致；浏览器/Node 24 都有 TextEncoder）。 */
 export function saveTextByteLength(text: string): number {
@@ -16,29 +25,70 @@ export function saveTextByteLength(text: string): number {
 }
 
 /**
- * 渲染层写入/读取前的上限预检。
+ * 渲染层写入/读取前的大小预检（第一层：原始文本上限）。
  *
  * 必须按 UTF-8 字节判断：中文 1 个字 = 3 字节，只用 `text.length` 会放过主进程随后拒绝的
  * 存档（出现“预检通过但保存失败”的不一致）。快路径利用 length ≤ 字节数 ≤ 3×length：
  * 超上限的 length 直接拒绝，明显安全的小存档不做编码分配，只有边界灰区才精确编码。
  */
-export function isSaveTextTooLarge(text: string, maxBytes = MAX_SAVE_BYTES): boolean {
+export function isSaveTextTooLarge(text: string, maxBytes = MAX_SAVE_RAW_BYTES): boolean {
   if (text.length > maxBytes) return true;
   if (text.length * 3 <= maxBytes) return false;
   return saveTextByteLength(text) > maxBytes;
 }
 
 export type SaveReadCode = 'not-found' | 'read-error' | 'too-large' | 'invalid-slot';
+/** 写入错误码：与主进程 IPC 返回的 SaveIpcErrorCode 子集保持一致（字符串稳定，可跨 IPC）。 */
+export type SaveWriteCode =
+  | 'too-large'
+  | 'invalid-content'
+  | 'invalid-json'
+  | 'invalid-structure'
+  | 'invalid-slot'
+  | 'compression-failed'
+  | 'write-failed'
+  | 'browser-quota';
+
+export interface SaveWriteResult {
+  ok: boolean;
+  error?: string;
+  code?: SaveWriteCode;
+}
 
 export interface SaveBridge {
   mode: 'desktop' | 'browser';
   list(): Promise<SaveSlotInfo[]>;
   read(slot: string): Promise<{ ok: boolean; text?: string; error?: string; code?: SaveReadCode }>;
-  write(slot: string, text: string): Promise<{ ok: boolean; error?: string }>;
+  write(slot: string, text: string): Promise<SaveWriteResult>;
   remove(slot: string): Promise<{ ok: boolean; error?: string }>;
   onMenuAction(callback: (action: string) => void): () => void;
   quit(): void;
   saveDirectory?: string;
+}
+
+/** 浏览器 localStorage 配额错误判定（不同浏览器/内核名称不一）。 */
+function isStorageQuotaError(error: unknown): boolean {
+  if (typeof DOMException !== 'undefined' && error instanceof DOMException) {
+    return (
+      error.name === 'QuotaExceededError' ||
+      error.name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
+      error.code === 22 ||
+      error.code === 1014
+    );
+  }
+  const message = (error as Error)?.name ?? '';
+  return message === 'QuotaExceededError' || message === 'NS_ERROR_DOM_QUOTA_REACHED';
+}
+
+function browserWriteFailure(error: unknown): SaveWriteResult {
+  if (isStorageQuotaError(error)) {
+    return {
+      ok: false,
+      error: `保存失败：本地存储空间不足。${BROWSER_STORAGE_LIMITATION}`,
+      code: 'browser-quota',
+    };
+  }
+  return { ok: false, error: `保存失败：${(error as Error).message}`, code: 'write-failed' };
 }
 
 function getDesktop(): DesktopSimApi | undefined {
@@ -64,9 +114,14 @@ export function createSaveBridge(): SaveBridge {
         };
       },
       async write(slot, text) {
-        if (isSaveTextTooLarge(text)) return { ok: false, error: SAVE_TOO_LARGE_ERROR };
+        // 第一层预检：明显超限时不走 IPC（主进程仍会独立再校验一次）。
+        if (isSaveTextTooLarge(text)) {
+          return { ok: false, error: SAVE_RAW_TOO_LARGE_ERROR, code: 'too-large' };
+        }
         const result = await desktop.saves.write(slot, text);
-        return { ok: result.ok, error: result.error };
+        // DesktopSimApi 的 write 结果未声明 code；主进程会返回，运行时透传即可。
+        const code = (result as { code?: SaveWriteCode }).code;
+        return { ok: result.ok, error: result.error, code };
       },
       async remove(slot) {
         const result = await desktop.saves.remove(slot);
@@ -82,6 +137,7 @@ export function createSaveBridge(): SaveBridge {
   }
 
   // 浏览器回退：便于 `npm run dev:web` 和自动化截图验证；Electron 下始终走 IPC。
+  // 注意：localStorage 保存未压缩文本、容量约 5–10MB，不能冒充桌面存档能力。
   return {
     mode: 'browser',
     async list() {
@@ -100,10 +156,11 @@ export function createSaveBridge(): SaveBridge {
             formatVersion:
               typeof parsed.formatVersion === 'number' ? parsed.formatVersion : undefined,
             gameVersion: typeof parsed.gameVersion === 'string' ? parsed.gameVersion : undefined,
-            size: text.length,
+            // localStorage 存未压缩文本，size 即原始数据字节数。
+            size: saveTextByteLength(text),
           });
         } catch {
-          slots.push({ slot, exists: true, error: '浏览器存档损坏' });
+          slots.push({ slot, exists: true, error: '浏览器存档损坏（本地存储内容不是有效 JSON）' });
         }
       }
       return slots;
@@ -112,17 +169,19 @@ export function createSaveBridge(): SaveBridge {
       const text = localStorage.getItem(STORAGE_PREFIX + slot);
       if (text === null) return { ok: false, error: '存档不存在', code: 'not-found' };
       if (isSaveTextTooLarge(text)) {
-        return { ok: false, error: SAVE_TOO_LARGE_ERROR, code: 'too-large' };
+        return { ok: false, error: SAVE_RAW_TOO_LARGE_ERROR, code: 'too-large' };
       }
       return { ok: true, text };
     },
     async write(slot, text) {
-      if (isSaveTextTooLarge(text)) return { ok: false, error: SAVE_TOO_LARGE_ERROR };
+      if (isSaveTextTooLarge(text)) {
+        return { ok: false, error: SAVE_RAW_TOO_LARGE_ERROR, code: 'too-large' };
+      }
       try {
         localStorage.setItem(STORAGE_PREFIX + slot, text);
         return { ok: true };
       } catch (error) {
-        return { ok: false, error: (error as Error).message };
+        return browserWriteFailure(error);
       }
     },
     async remove(slot) {

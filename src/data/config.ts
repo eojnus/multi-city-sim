@@ -306,7 +306,13 @@ export const DEMO_CONFIG = {
     cooldownMonths: 2,
     maxActivePerCity: 2,
     maxHistory: 60,
-    ledgerLimit: 800,
+    /**
+     * v1.7 §五：财政流水全局条数上限（FIFO 丢最早）。
+     * 实测单月新增 84–322 条（24 月真实运行，max t23=322）；36 个月明细窗口最坏约
+     * 36×322≈11,592 条，故上限取 12,000，保证明细窗口与“当月明细完整”不被全局 FIFO 挤掉。
+     * 归档明细由 historyPolicy 按月聚合到 fiscal.archivedLedger，不改变余额语义。
+     */
+    ledgerLimit: 12_000,
     minBudget: 80_000,
     /** 非玩家政府的财政安全垫：至少保留这么多个月公共工资。 */
     aiReserveWageMonths: 1,
@@ -674,8 +680,12 @@ export const DEMO_CONFIG = {
     orderTtlTicks: 2,
     /** 每个成交月的成交笔数上限，避免无限循环。 */
     maxTradesPerTick: 200,
-    /** v0.8：每类股份保留的月度 K 线数量（真实成交，不虚构历史）。 */
-    historyMonths: 36,
+    /**
+     * v1.7 §五：每类股份保留的月度 K 线数量（真实成交，不虚构历史）。
+     * 任务书目标“最近 120 个月保留月线，更早按年聚合 OHLCV”；必须与
+     * config.history.stockMonthlyMonths 一致（recordStockTrade 按本值裁剪，历史治理按窗口归档）。
+     */
+    historyMonths: 120,
     /** v0.8：成交明细保留条数（防止存档无限增长）。 */
     tradeHistoryLimit: 400,
     /** v0.8：AI 投资行为参数（居民投资实体与企业，均为可替换的演示值）。 */
@@ -1104,6 +1114,41 @@ export const DEMO_CONFIG = {
     maxSnapshotsPerBorrower: 24,
     /** 银行月度统计保留月数。 */
     maxLoanPaymentsPerLoan: 60,
+  },
+  /**
+   * v1.7 §五：历史记录与数据增长治理（月度结算全部完成后的安全时点统一执行）。
+   *
+   * 原则：只裁剪/聚合“只读展示历史与派生缓存”，不删除未结清义务、有效资产、规则读取窗口；
+   * 归档幂等（重复执行不重复累计），且只改历史数组、不读 RNG、不改变结算顺序。
+   * 各窗口的时间边界与守恒等式见 `persistence/historyPolicy.ts` 各段注释；
+   * 数据归属与 UI 展示规则见 `docs/development/SAVE_SYSTEM_DESIGN.md` §7。
+   */
+  history: {
+    /** 关闭时 Simulation.tick 不执行历史治理（诊断/对照测试用；默认开启）。 */
+    enabled: true,
+    /**
+     * 授信快照：每主体只保留最新 1 条（规则只读最新一条），另按 tick 汇总最近 N 个月。
+     * 任务书要求 ≥120 月。
+     */
+    bankingSnapshotMonths: 120,
+    /**
+     * 已结清（status='repaid' 且未偿≈0）银行贷款：结清后超过 N 个月按 年×借款人类别×用途 聚合移除明细。
+     * 未结清/违约（defaulted/writtenOff）/有引用合同一律保留。
+     */
+    closedLoanArchiveMonths: 36,
+    /**
+     * 财政流水明细保留最近 N 个月（当月必须完整）；更早按 城市×年×kind 聚合到 fiscal.archivedLedger。
+     * 全局条数上限见 policies.ledgerLimit（已按实测提升）。
+     */
+    fiscalDetailMonths: 36,
+    /** 债券兑付流水明细保留最近 N 个月；更早按 批次×持有人×年×kind 聚合到 bonds.archivedPayments。 */
+    bondPaymentDetailMonths: 36,
+    /** 股票月线每类保留最近 N 个月；更早按年聚合真实 OHLCV（无成交月不生成）。 */
+    stockMonthlyMonths: 120,
+    /** 已结束治理议案保留最近 N 个月；更早按 公司×年×kind 聚合到 governance.motionYears（open 永不归档）。 */
+    governanceArchiveMonths: 12,
+    /** 选举记录保留最近 N 个月；更早按 城市×年 聚合到 politics.electionYears。 */
+    electionArchiveMonths: 12,
   },
 } as const;
 
