@@ -132,9 +132,13 @@ function saveCoordinator(): SaveCoordinator {
       hooks: {
         validateWorldStructure,
         afterWorldRestored: (world) => {
-          // 既有读取后修复（幂等）：股份汇总镜像、居民投资实体开局份额；再校验随机种子合法性。
+          // v1.7 验收修复：v10 模块化存档按“保存时的权威状态”恢复，**不在读档时预写
+          // investorLedger.openingShares**。开局份额的初始化时点必须是唯一的：第一次月度结算中
+          // 首次需要有效份额时（ensureInvestorOpeningShares 在股息归属/资金用途等确定性位置幂等调用）。
+          // 若读档时提前写入，会用“读档时点的投资实体净资产”计算起始份额，与直接推进时
+          // （tick 内、资产已被本月现金流影响后）计算的结果不同，导致后续经济结果分叉。
+          // 旧单体存档的兼容补齐仍在 parseLegacyDocument 中执行（一次性、幂等）。
           syncCompanyTotalSharesSafe(world);
-          ensureInvestorOpeningShares(world);
           if (world.seed !== world.seed >>> 0) throw new Error('随机种子状态无效');
         },
         checkInvariants,

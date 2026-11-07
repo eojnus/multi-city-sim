@@ -60,25 +60,21 @@ describe('v1.7 存档：真实世界往返', () => {
     expect(checkInvariants(parsed.world)).toEqual([]);
   });
 
-  it('新开局（0 月、尚未写入可选历史数组）也能保存并读回；读档幂等稳定', () => {
+  it('新开局（0 月、尚未写入可选历史数组）保存并读回：权威状态逐字段不变', () => {
     const world = Simulation.create().state;
+    // v1.4 语义：新开局不预写 openingShares（首次月度结算中需要有效份额时才计算）；
+    // v1.7 验收修复后，模块化读档也不预写，因此 0 月存档读回必须与保存时完全一致。
+    expect(world.households.groups.every((group) => group.investorLedger?.openingShares === undefined)).toBe(
+      true,
+    );
     const text = serializeSave(world, { savedAt: '2026-11-07T00:00:00.000Z' });
     const parsed = parseSave(text);
     expect(parsed.ok, parsed.error).toBe(true);
     if (!parsed.ok || !parsed.world) return;
-    // 首次读档会执行既有的一次性读取迁移（ensureInvestorOpeningShares 补齐居民投资实体
-    // 开局份额 investorLedger；旧单体格式同样如此），因此不强求与未迁移的 0 月世界逐字段相等；
-    // 要求：关键权威字段一致、不变量为空、再次存读档完全稳定（迁移幂等）。
-    expect(parsed.world.cities.map((city) => city.population.total)).toEqual(
-      world.cities.map((city) => city.population.total),
-    );
-    expect(parsed.world.companies.map((company) => [company.id, company.cash])).toEqual(
-      world.companies.map((company) => [company.id, company.cash]),
-    );
-    expect(parsed.world.player.cash).toBe(world.player.cash);
-    expect(parsed.world.seed).toBe(world.seed);
-    expect(parsed.world.rngState).toBe(world.rngState);
-    expect(parsed.world.time).toEqual(world.time);
+    expect(canonical(parsed.world)).toEqual(canonical(world));
+    expect(
+      parsed.world.households.groups.every((group) => group.investorLedger?.openingShares === undefined),
+    ).toBe(true);
     expect(checkInvariants(parsed.world)).toEqual([]);
 
     const second = parseSave(serializeSave(parsed.world, { savedAt: '2026-11-07T00:00:00.000Z' }));
