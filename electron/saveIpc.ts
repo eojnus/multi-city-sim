@@ -243,6 +243,65 @@ export async function decodeSavePayload(
   return { ok: true, text: buffer.toString('utf8'), compressed: false, rawBytes: diskBytes, diskBytes };
 }
 
+/** 单备份文件后缀：存档槽位 `${slot}.json` 的上一版本备份为 `${slot}.json.bak`。 */
+export const BACKUP_SUFFIX = '.bak';
+/** 列表扫描用的主档/备份后缀（备份文件名 = `${slot}.json.bak`）。 */
+const LIST_MAIN_SUFFIX = '.json';
+const LIST_BACKUP_SUFFIX = '.json.bak';
+
+/**
+ * 备份/恢复的复制策略。
+ *
+ * 优先硬链接：同目录下 link 是原子的且零拷贝，`.bak` 与“上一版本主档”共享 inode；
+ * 主档替换走 rename（只改目录项，不写 inode），因此硬链接备份内容不会被新主档覆盖。
+ * 文件系统不支持硬链接（如部分 Windows/FAT、跨设备）时回退 copyFile（EXCL 防覆盖）。
+ */
+function linkOrCopyFile(source: string, destination: string): void {
+  try {
+    fs.linkSync(source, destination);
+    return;
+  } catch {
+    // 回退到复制；目标名由调用方保证不存在（EXCL），避免误覆盖有效文件。
+  }
+  fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
+}
+
+/**
+ * 清理该槽位上次进程中断留下的临时文件（主档替换 temp / 备份生成 bak.next）。
+ * 只在同槽位写队列内调用；主档 `.bak` 绝不在此清理。
+ */
+/** 两个路径是否指向同一 inode（硬链接备份与主档可能是同一文件）。 */
+function isSameFile(first: string, second: string): boolean {
+  try {
+    const a = fs.statSync(first);
+    const b = fs.statSync(second);
+    return a.ino === b.ino && a.dev === b.dev;
+  } catch {
+    return false;
+  }
+}
+
+function removeStaleWriteArtifacts(full: string): void {
+  const dir = path.dirname(full);
+  const base = path.basename(full);
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const isTemp = name.startsWith(`${base}.tmp-`);
+    const isBakNext = name.startsWith(`${base}${BACKUP_SUFFIX}.next-`);
+    if (!isTemp && !isBakNext) continue;
+    try {
+      fs.rmSync(path.join(dir, name), { force: true });
+    } catch {
+      // 单个残留清理失败不影响本次写入（不影响主档/备份）。
+    }
+  }
+}
+
 export interface SaveHandlerOptions {
   /**
    * 大小上限覆盖（仅供测试注入更小阈值；生产不传，使用 DEFAULT_SAVE_LIMITS）。
@@ -260,6 +319,8 @@ interface SaveWriteResult {
   /** 磁盘 gzip 字节数。 */
   diskBytes?: number;
   compressed?: boolean;
+  /** 本次覆盖是否生成了“上一版本”备份（首次写入且无旧主档时为 false）。 */
+  backupCreated?: boolean;
   error?: string;
   code?: SaveIpcErrorCode;
 }
@@ -331,31 +392,67 @@ export function registerSaveHandlers(
       };
     }
     fs.mkdirSync(savesDirectory(), { recursive: true });
-    const temp = `${full}.tmp-${process.pid}-${Date.now()}-${++tempSequence}`;
-    const backup = `${full}.bak`;
-    fs.writeFileSync(temp, payload.buffer);
-    try {
-      if (fs.existsSync(full)) {
-        fs.rmSync(backup, { force: true });
-        fs.renameSync(full, backup);
+    const backup = `${full}${BACKUP_SUFFIX}`;
+    // 清理上次进程中断残留的 temp/bak.next（本槽位队列内，安全）；.bak 永不在此清理。
+    removeStaleWriteArtifacts(full);
+
+    // 中断恢复：主档缺失但 .bak 存在（旧替换算法在“主档→备份 / temp→主档”之间崩溃的窗口）。
+    // 先恢复主档再继续本次写入，既保证下一次“备份=上一版本”轮换有依据，也绝不让仅存备份被当垃圾。
+    if (!fs.existsSync(full) && fs.existsSync(backup)) {
+      try {
+        linkOrCopyFile(backup, full);
+      } catch (error) {
+        return {
+          ok: false,
+          slot,
+          error: `存档写入失败：主档缺失且无法从备份恢复（${(error as Error).message}）`,
+          code: 'write-failed',
+          bytes: rawBytes,
+        };
       }
+    }
+
+    const temp = `${full}.tmp-${process.pid}-${Date.now()}-${++tempSequence}`;
+    fs.writeFileSync(temp, payload.buffer);
+
+    // 第 1 步：先生成“下一份备份”（= 本次写入前的主档内容）。失败则主档完全不动。
+    // 顺序：link/copy 到 bak.next → 原子 rename 轮换到 .bak。旧 .bak 只在这一步被替换。
+    let backupCreated = false;
+    if (fs.existsSync(full)) {
+      const bakNext = `${backup}.next-${process.pid}-${Date.now()}-${++tempSequence}`;
+      try {
+        // 若主档与 .bak 已是同一 inode（中断恢复用硬链接把备份恢复成主档），备份已等于主档内容：
+        // 跳过 link+rename（POSIX 对同 inode 硬链接 rename 是 no-op，会留下 bak.next）。
+        if (fs.existsSync(backup) && isSameFile(full, backup)) {
+          backupCreated = true;
+        } else {
+          linkOrCopyFile(full, bakNext);
+          fs.renameSync(bakNext, backup);
+          backupCreated = true;
+        }
+      } catch (error) {
+        fs.rmSync(bakNext, { force: true });
+        fs.rmSync(temp, { force: true });
+        return {
+          ok: false,
+          slot,
+          error: `存档写入失败：备份生成失败，主档未改动（${(error as Error).message}）`,
+          code: 'write-failed',
+          bytes: rawBytes,
+        };
+      }
+    }
+
+    // 第 2 步：原子替换主档。rename 只改目录项，不存在“主档缺失”窗口；
+    // 失败时主档仍是旧版本，且 .bak 已与旧主档同内容，主/备至少一方完整可读。
+    try {
       fs.renameSync(temp, full);
-      fs.rmSync(backup, { force: true });
     } catch (error) {
       fs.rmSync(temp, { force: true });
-      if (fs.existsSync(backup)) {
-        try {
-          // 原子替换中途失败：恢复原档（只有恢复失败时才保留 .bak 交给人工处理）。
-          fs.rmSync(full, { force: true });
-          fs.renameSync(backup, full);
-        } catch {
-          // 保留 .bak。
-        }
-      }
       return {
         ok: false,
         slot,
-        error: `存档写入失败：${(error as Error).message}`,
+        error: `存档写入失败：主档替换失败，原档仍保留（${(error as Error).message}）`,
         code: 'write-failed',
         bytes: rawBytes,
       };
@@ -368,6 +465,48 @@ export function registerSaveHandlers(
       bytes: payload.rawBytes,
       diskBytes: payload.compressedBytes,
       compressed: true,
+      /** 本次覆盖是否生成了上一版本备份；首次写入没有旧主档时为 false。 */
+      backupCreated,
+    };
+  }
+
+  /** 解码一个存档文件（主档或备份），统一三层大小保护；供 read / read-backup / list 复用。 */
+  async function decodeFileAt(file: string): Promise<{
+    ok: boolean;
+    text?: string;
+    compressed?: boolean;
+    rawBytes?: number;
+    diskBytes?: number;
+    error?: string;
+    code?: SaveIpcErrorCode;
+  }> {
+    const stat = fs.statSync(file);
+    const compressed = isGzipPayload(readFileHeader(file));
+    const diskLimit = compressed ? limits.compressedBytes : limits.rawBytes;
+    if (stat.size > diskLimit) {
+      return { ok: false, error: tooLargeMessage(compressed ? 'compressed' : 'plainFile'), code: 'too-large' };
+    }
+    const decoded = await decodeSavePayload(fs.readFileSync(file), limits);
+    if (!decoded.ok || decoded.text === undefined) {
+      return { ok: false, error: decoded.error ?? '存档读取失败', code: decoded.code ?? 'read-failed' };
+    }
+    if (!decoded.text.trim()) return { ok: false, error: '存档文件为空', code: 'read-failed' };
+    return {
+      ok: true,
+      text: decoded.text,
+      compressed: decoded.compressed === true,
+      rawBytes: decoded.rawBytes,
+      diskBytes: stat.size,
+    };
+  }
+
+  /** 提取列表/备份展示用的顶层元信息（JSON 损坏时由调用方按读失败处理）。 */
+  function saveMetaOf(text: string): { savedAt?: string; formatVersion?: number; gameVersion?: string } {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    return {
+      savedAt: typeof parsed.savedAt === 'string' ? parsed.savedAt : undefined,
+      formatVersion: typeof parsed.formatVersion === 'number' ? parsed.formatVersion : undefined,
+      gameVersion: typeof parsed.gameVersion === 'string' ? parsed.gameVersion : undefined,
     };
   }
 
@@ -375,55 +514,95 @@ export function registerSaveHandlers(
     try {
       const dir = savesDirectory();
       fs.mkdirSync(dir, { recursive: true });
-      const files = fs.readdirSync(dir).filter((name) => name.endsWith('.json'));
-      // 顺序处理：大存档解压 + JSON.parse 峰值内存高，并发多个槽位可能撑爆内存；
-      // 每个槽位独立 try/catch，单个损坏文件不影响其他槽位。
+      const names = fs.readdirSync(dir);
+      // 顺序处理：大存档解压 + JSON.parse 峰值内存高；每个槽位独立 try/catch，坏文件不影响其他槽位。
       const slots: Record<string, unknown>[] = [];
-      for (const name of files) {
-        const slot = name.replace(/\.json$/, '');
+      const seen = new Set<string>();
+
+      // 主档：size 口径不变 = 解压后原始字节；diskSize = 磁盘文件字节；backupExists 标记同槽位 .bak。
+      for (const name of names) {
+        if (!name.endsWith(LIST_MAIN_SUFFIX)) continue;
+        const slot = name.slice(0, -LIST_MAIN_SUFFIX.length);
+        seen.add(slot);
         const full = path.join(dir, name);
+        const backup = `${full}${BACKUP_SUFFIX}`;
         try {
-          const stat = fs.statSync(full);
-          const header = readFileHeader(full);
-          const compressed = isGzipPayload(header);
-          const diskLimit = compressed ? limits.compressedBytes : limits.rawBytes;
-          if (stat.size > diskLimit) {
-            slots.push({
-              slot,
-              exists: true,
-              error: tooLargeMessage(compressed ? 'compressed' : 'plainFile'),
-              diskSize: stat.size,
-              size: undefined,
-              compressed,
-            });
-            continue;
-          }
-          const decoded = await decodeSavePayload(fs.readFileSync(full), limits);
+          const decoded = await decodeFileAt(full);
+          const backupExists = fs.existsSync(backup);
           if (!decoded.ok || decoded.text === undefined) {
             slots.push({
               slot,
               exists: true,
               error: decoded.error ?? '存档无法读取',
-              diskSize: stat.size,
+              diskSize: decoded.diskBytes,
               size: undefined,
               compressed: decoded.compressed === true,
+              backupExists,
             });
             continue;
           }
-          const parsed = JSON.parse(decoded.text) as Record<string, unknown>;
+          const meta = saveMetaOf(decoded.text);
           slots.push({
             slot,
             exists: true,
-            savedAt: typeof parsed.savedAt === 'string' ? parsed.savedAt : undefined,
-            formatVersion: typeof parsed.formatVersion === 'number' ? parsed.formatVersion : undefined,
-            gameVersion: typeof parsed.gameVersion === 'string' ? parsed.gameVersion : undefined,
-            // size = 原始数据大小（解压后字节）；diskSize = 磁盘压缩文件大小。二者不得混淆。
-            size: decoded.rawBytes ?? stat.size,
-            diskSize: stat.size,
-            compressed,
+            ...meta,
+            size: decoded.rawBytes ?? decoded.diskBytes,
+            diskSize: decoded.diskBytes,
+            compressed: decoded.compressed === true,
+            backupExists,
           });
         } catch (error) {
-          slots.push({ slot, exists: true, error: (error as Error).message });
+          slots.push({
+            slot,
+            exists: true,
+            error: (error as Error).message,
+            backupExists: fs.existsSync(backup),
+          });
+        }
+      }
+
+      // 仅备份存在的槽位（主档缺失：上次进程在替换窗口中断）→ 视为可恢复数据，
+      // 标记 recoveredFromBackup；读取由 saves:read 回退到备份，下一次写入先恢复主档。
+      // 该分支绝不删除备份，也不改变主档 size 口径。
+      for (const name of names) {
+        if (!name.endsWith(LIST_BACKUP_SUFFIX)) continue;
+        const slot = name.slice(0, -LIST_BACKUP_SUFFIX.length);
+        if (seen.has(slot)) continue;
+        const mainPath = path.join(dir, `${slot}${LIST_MAIN_SUFFIX}`);
+        if (fs.existsSync(mainPath)) continue;
+        seen.add(slot);
+        const backup = path.join(dir, name);
+        try {
+          const decoded = await decodeFileAt(backup);
+          if (!decoded.ok || decoded.text === undefined) {
+            slots.push({
+              slot,
+              exists: true,
+              error: decoded.error ?? '备份无法读取',
+              backupExists: true,
+              recoveredFromBackup: false,
+            });
+            continue;
+          }
+          const meta = saveMetaOf(decoded.text);
+          slots.push({
+            slot,
+            exists: true,
+            ...meta,
+            size: decoded.rawBytes ?? decoded.diskBytes,
+            diskSize: decoded.diskBytes,
+            compressed: decoded.compressed === true,
+            backupExists: true,
+            recoveredFromBackup: true,
+          });
+        } catch (error) {
+          slots.push({
+            slot,
+            exists: true,
+            error: (error as Error).message,
+            backupExists: true,
+            recoveredFromBackup: false,
+          });
         }
       }
       return { ok: true, slots };
@@ -435,39 +614,58 @@ export function registerSaveHandlers(
   ipcMain.handle('saves:read', async (_event, slot: string) => {
     try {
       const full = slotFile(slot);
-      if (!fs.existsSync(full)) {
+      const backup = `${full}${BACKUP_SUFFIX}`;
+      // 主档缺失但备份存在：上次进程在替换窗口中断 → 回退读备份并标记；
+      // 下一次写入会先把备份恢复成主档再轮换。备份绝不在此删除。
+      const recoveredFromBackup = !fs.existsSync(full) && fs.existsSync(backup);
+      const source = recoveredFromBackup ? backup : full;
+      if (!fs.existsSync(source)) {
         return { ok: false, slot, error: '存档不存在', code: 'not-found' };
       }
-      const stat = fs.statSync(full);
-      const compressed = isGzipPayload(readFileHeader(full));
-      // 读入前先按磁盘口径拦截异常大文件（gzip 用 64MiB、旧明文用 128MiB）。
-      const diskLimit = compressed ? limits.compressedBytes : limits.rawBytes;
-      if (stat.size > diskLimit) {
-        return {
-          ok: false,
-          slot,
-          error: tooLargeMessage(compressed ? 'compressed' : 'plainFile'),
-          code: 'too-large',
-        };
-      }
-      const decoded = await decodeSavePayload(fs.readFileSync(full), limits);
+      const decoded = await decodeFileAt(source);
       if (!decoded.ok || decoded.text === undefined) {
         return { ok: false, slot, error: decoded.error ?? '存档读取失败', code: decoded.code ?? 'read-failed' };
-      }
-      const text = decoded.text;
-      if (!text.trim()) {
-        return { ok: false, slot, error: '存档文件为空', code: 'read-failed' };
       }
       return {
         ok: true,
         slot,
-        text,
+        text: decoded.text,
         compressed: decoded.compressed === true,
         bytes: decoded.rawBytes,
-        diskBytes: stat.size,
+        diskBytes: decoded.diskBytes,
+        recoveredFromBackup,
       };
     } catch (error) {
       // 文件存在但读取失败（权限、占用、IO 错误）必须与“不存在”区分，避免被自动存档覆盖。
+      const message = (error as Error).message;
+      const code: SaveIpcErrorCode = message.includes('非法存档槽位') ? 'invalid-slot' : 'read-failed';
+      return { ok: false, slot, error: message, code };
+    }
+  });
+
+  ipcMain.handle('saves:read-backup', async (_event, slot: string) => {
+    try {
+      const full = slotFile(slot);
+      const backup = `${full}${BACKUP_SUFFIX}`;
+      if (!fs.existsSync(backup)) {
+        return { ok: false, slot, error: '备份不存在', code: 'not-found' };
+      }
+      const decoded = await decodeFileAt(backup);
+      if (!decoded.ok || decoded.text === undefined) {
+        return { ok: false, slot, error: decoded.error ?? '备份读取失败', code: decoded.code ?? 'read-failed' };
+      }
+      const meta = saveMetaOf(decoded.text);
+      return {
+        ok: true,
+        slot,
+        text: decoded.text,
+        compressed: decoded.compressed === true,
+        bytes: decoded.rawBytes,
+        diskBytes: decoded.diskBytes,
+        backupExists: true,
+        ...meta,
+      };
+    } catch (error) {
       const message = (error as Error).message;
       const code: SaveIpcErrorCode = message.includes('非法存档槽位') ? 'invalid-slot' : 'read-failed';
       return { ok: false, slot, error: message, code };

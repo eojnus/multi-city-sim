@@ -130,31 +130,36 @@ describe('saveIpc：写入失败原档不变', () => {
     expect(existsSync(slotPath('manual-new'))).toBe(false);
   });
 
-  it('IO 写入失败（模拟 rename 失败）：返回错误、回滚原档、不残留临时文件', async () => {
-    expect((await ipc('saves:write', 'manual-3', smallSaveText('original'))).ok).toBe(true);
+  it('IO 写入失败（模拟 rename 失败：temp→主档）：返回错误，主档仍为旧版本且备份可读', async () => {
+    const original = smallSaveText('original');
+    expect((await ipc('saves:write', 'manual-3', original)).ok).toBe(true);
     const before = readFileSync(slotPath('manual-3'));
 
-    // 第一次 rename 是 full→.bak（写新内容前备份原档）；失败后应回滚到原档。
+    // 新顺序：rename#1 = 备份轮换（bak.next→.bak），rename#2 = temp→主档。
+    // 注入 rename#2 失败：主档必须保持旧版本，已经生成的 .bak 仍可读，且无 .tmp 残留。
     const originalRename = fs.renameSync.bind(fs);
     let renameCalls = 0;
     vi.spyOn(fs, 'renameSync').mockImplementation((oldPath: any, newPath: any) => {
       renameCalls += 1;
-      if (renameCalls === 2) throw new Error('EIO: 模拟磁盘错误（temp→full）');
+      if (renameCalls === 2) throw new Error('EIO: 模拟磁盘错误（temp→主档）');
       return originalRename(oldPath, newPath);
     });
 
     const result = await ipc('saves:write', 'manual-3', smallSaveText('replacement'));
     expect(result.ok).toBe(false);
     expect(result.code).toBe('write-failed');
-    expect(result.error).toContain('存档写入失败');
+    expect(result.error).toContain('主档替换失败');
 
     vi.restoreAllMocks();
-    // 原档内容恢复，.bak 清理，且没有残留 .tmp。
+    // 主档仍是旧版本；.bak=旧主档内容（主/备至少一方有效，实际两方都有效）。
     expect(readFileSync(slotPath('manual-3')).equals(before)).toBe(true);
-    expect(saveFiles()).toEqual(['manual-3.json']);
+    expect(saveFiles()).toEqual(['manual-3.json', 'manual-3.json.bak']);
+    expect(saveFiles().some((name) => name.includes('.tmp-'))).toBe(false);
+    expect(readFileSync(`${slotPath('manual-3')}.bak`).equals(before)).toBe(true);
     const read = await ipc('saves:read', 'manual-3');
     expect(read.ok).toBe(true);
-    expect(read.text).toBe(smallSaveText('original'));
+    expect(read.text).toBe(original);
+    expect((await ipc('saves:read-backup', 'manual-3')).text).toBe(original);
   });
 });
 
@@ -172,8 +177,27 @@ describe('saveIpc：同槽位并发写串行化', () => {
     const read = await ipc('saves:read', 'race');
     expect(read.ok).toBe(true);
     expect(read.text).toBe(second);
-    // 串行执行：中途的临时/备份文件全部清理，只剩最终文件。
-    expect(saveFiles()).toEqual(['race.json']);
+    // 串行执行：主档=最后一次，.bak=倒数第二次；临时文件清理干净。
+    expect(saveFiles()).toEqual(['race.json', 'race.json.bak']);
+    expect((await ipc('saves:read-backup', 'race')).text).toBe(first);
+  });
+
+  it('同槽位并发保存 3 次：最终主档=第 3 次、.bak=第 2 次，无交错损坏', async () => {
+    const texts = [
+      smallSaveText('concurrent-1', '2026-11-01T00:00:00.000Z'),
+      smallSaveText('concurrent-2', '2026-11-02T00:00:00.000Z'),
+      smallSaveText('concurrent-3', '2026-11-03T00:00:00.000Z'),
+    ];
+    const results = await Promise.all([
+      ipc('saves:write', 'race3', texts[0]),
+      ipc('saves:write', 'race3', texts[1]),
+      ipc('saves:write', 'race3', texts[2]),
+    ]);
+    for (const result of results) expect(result.ok, JSON.stringify(result)).toBe(true);
+    expect((await ipc('saves:read', 'race3')).text).toBe(texts[2]);
+    expect((await ipc('saves:read-backup', 'race3')).text).toBe(texts[1]);
+    expect(saveFiles()).toEqual(['race3.json', 'race3.json.bak']);
+    expect(saveFiles().some((name) => name.includes('.tmp-'))).toBe(false);
   });
 
   it('并发写不同槽位互不阻塞、互不覆盖', async () => {
@@ -188,6 +212,54 @@ describe('saveIpc：同槽位并发写串行化', () => {
     expect((await ipc('saves:read', 'slot-a')).text).toBe(textA);
     expect((await ipc('saves:read', 'slot-b')).text).toBe(textB);
     expect(saveFiles().sort()).toEqual(['slot-a.json', 'slot-b.json']);
+  });
+});
+
+describe('saveIpc：备份生成失败与中断恢复', () => {
+  it('备份生成失败（link 与 copyFile 均失败）：中止写入、主档不动、不产生/不破坏 .bak、无 .tmp', async () => {
+    const original = smallSaveText('backup-fail-original');
+    expect((await ipc('saves:write', 'gen-fail', original)).ok).toBe(true);
+    const before = readFileSync(slotPath('gen-fail'));
+
+    vi.spyOn(fs, 'linkSync').mockImplementation(() => {
+      throw new Error('EIO: 模拟硬链接失败');
+    });
+    vi.spyOn(fs, 'copyFileSync').mockImplementation(() => {
+      throw new Error('EIO: 模拟复制失败');
+    });
+    const result = await ipc('saves:write', 'gen-fail', smallSaveText('backup-fail-new'));
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('write-failed');
+    expect(result.error).toContain('备份生成失败');
+
+    // 主档逐字节不变；备份尚未生成（不能出现半成品 .bak）；无临时残留。
+    expect(readFileSync(slotPath('gen-fail')).equals(before)).toBe(true);
+    expect(existsSync(`${slotPath('gen-fail')}.bak`)).toBe(false);
+    expect(saveFiles()).toEqual(['gen-fail.json']);
+    expect(saveFiles().some((name) => name.includes('.tmp-'))).toBe(false);
+
+    // 恢复文件系统能力后再次写入：正常轮换，.bak=旧主档。
+    vi.restoreAllMocks();
+    expect((await ipc('saves:write', 'gen-fail', smallSaveText('backup-fail-second'))).ok).toBe(true);
+    expect((await ipc('saves:read-backup', 'gen-fail')).text).toBe(original);
+  });
+
+  it('中断状态（主档缺失+备份存在）后下一次写入：先恢复主档再轮换，备份不被删除', async () => {
+    const first = smallSaveText('interrupt-1');
+    const second = smallSaveText('interrupt-2');
+    const third = smallSaveText('interrupt-3');
+    expect((await ipc('saves:write', 'recover', first)).ok).toBe(true);
+    expect((await ipc('saves:write', 'recover', second)).ok).toBe(true);
+    // 当前：主档=second，备份=first；再模拟中断删除主档 → 只剩备份 first。
+    rmSync(slotPath('recover'));
+
+    const result = await ipc('saves:write', 'recover', third);
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    // 下一次写入先把备份恢复为主档（first/上一版本），再轮换：
+    // 主档=third，.bak 仍是恢复出来的 first（未被删除/覆盖成 second）。
+    expect((await ipc('saves:read', 'recover')).text).toBe(third);
+    expect((await ipc('saves:read-backup', 'recover')).text).toBe(first);
+    expect(saveFiles()).toEqual(['recover.json', 'recover.json.bak']);
   });
 });
 

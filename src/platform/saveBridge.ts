@@ -55,10 +55,29 @@ export interface SaveWriteResult {
   code?: SaveWriteCode;
 }
 
+/**
+ * 备份读取结果（`saves:read-backup`）：成功覆盖后保留的“上一版本”存档。
+ * v1.7 验收修复：.json.bak 是上一版本（保留/轮换语义见 electron/saveIpc.ts 与 DESIGN §10）。
+ */
+export interface SaveBackupReadResult {
+  ok: boolean;
+  text?: string;
+  error?: string;
+  code?: SaveReadCode;
+  savedAt?: string;
+  formatVersion?: number;
+  gameVersion?: string;
+}
+
 export interface SaveBridge {
   mode: 'desktop' | 'browser';
   list(): Promise<SaveSlotInfo[]>;
   read(slot: string): Promise<{ ok: boolean; text?: string; error?: string; code?: SaveReadCode }>;
+  /**
+   * 读取上一版本备份（桌面 `.json.bak`）；浏览器模式没有桌面备份能力。
+   * 可选：旧测试替身/旧 preload 可能没有该能力，调用方需按 undefined 处理。
+   */
+  readBackup?(slot: string): Promise<SaveBackupReadResult>;
   write(slot: string, text: string): Promise<SaveWriteResult>;
   remove(slot: string): Promise<{ ok: boolean; error?: string }>;
   onMenuAction(callback: (action: string) => void): () => void;
@@ -111,6 +130,33 @@ export function createSaveBridge(): SaveBridge {
           text: result.text,
           error: result.error,
           code: result.code as SaveReadCode | undefined,
+        };
+      },
+      async readBackup(slot) {
+        // DesktopSimApi 类型来自 preload 的 api 对象；这里运行时透传，类型用可选方法兼容旧 preload。
+        const saves = desktop.saves as typeof desktop.saves & {
+          readBackup?: (slot: string) => Promise<{
+            ok: boolean;
+            text?: string;
+            error?: string;
+            code?: string;
+            savedAt?: string;
+            formatVersion?: number;
+            gameVersion?: string;
+          }>;
+        };
+        if (typeof saves.readBackup !== 'function') {
+          return { ok: false, error: '当前运行环境不支持读取备份', code: 'read-error' };
+        }
+        const result = await saves.readBackup(slot);
+        return {
+          ok: result.ok,
+          text: result.text,
+          error: result.error,
+          code: result.code as SaveReadCode | undefined,
+          savedAt: result.savedAt,
+          formatVersion: result.formatVersion,
+          gameVersion: result.gameVersion,
         };
       },
       async write(slot, text) {
@@ -172,6 +218,14 @@ export function createSaveBridge(): SaveBridge {
         return { ok: false, error: SAVE_RAW_TOO_LARGE_ERROR, code: 'too-large' };
       }
       return { ok: true, text };
+    },
+    async readBackup() {
+      // localStorage 只保留当前版本，没有文件级备份/轮换能力，不冒充桌面备份语义。
+      return {
+        ok: false,
+        error: '浏览器模式没有上一版本备份（localStorage 不保留历史版本）',
+        code: 'not-found',
+      };
     },
     async write(slot, text) {
       if (isSaveTextTooLarge(text)) {

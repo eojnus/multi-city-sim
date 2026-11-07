@@ -6,6 +6,8 @@ const api = {
     list: () => ipcRenderer.invoke('saves:list'),
     read: (slot: string) => ipcRenderer.invoke('saves:read', slot),
     write: (slot: string, text: string) => ipcRenderer.invoke('saves:write', slot, text),
+    // v1.7 验收修复：读取上一个版本的备份（成功覆盖后保留 `.json.bak`）。
+    readBackup: (slot: string) => ipcRenderer.invoke('saves:read-backup', slot),
     remove: (slot: string) => ipcRenderer.invoke('saves:remove', slot),
   },
   app: {

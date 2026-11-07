@@ -35,7 +35,7 @@ vi.mock('electron', () => ({
 }));
 
 import { Simulation } from '../src/simulation/core/simulation';
-import { parseSave, serializeLegacySave } from '../src/simulation/core/save';
+import { parseSave, serializeLegacySave, serializeSave } from '../src/simulation/core/save';
 import { checkInvariants } from '../src/simulation/core/invariants';
 import {
   MAX_SAVE_COMPRESSED_BYTES as PERSIST_MAX_COMPRESSED,
@@ -223,13 +223,18 @@ describe('IPC 写入：统一 gzip + 原子替换', () => {
     expect(checkInvariants(parsed.world!)).toEqual([]);
   });
 
-  it('覆盖写入使用 temp+rename+.bak 语义，成功后不残留临时/备份文件', async () => {
+  it('覆盖写入使用 temp+rename 原子替换，成功后保留上一版本 .bak、无 .tmp 残留', async () => {
     const first = legacySaveText('2026-11-01T00:00:00.000Z');
     const second = legacySaveText('2026-11-02T00:00:00.000Z');
     expect((await ipc('saves:write', 'manual-2', first)).ok).toBe(true);
-    expect((await ipc('saves:write', 'manual-2', second)).ok).toBe(true);
+    // 首次写入没有旧主档，不产生备份。
     expect(saveFiles()).toEqual(['manual-2.json']);
+    expect((await ipc('saves:write', 'manual-2', second)).ok).toBe(true);
+    // 覆盖成功后：主档=最新，.bak=上一版本；没有临时文件残留（.bak 是保留备份，不是残留）。
+    expect(saveFiles()).toEqual(['manual-2.json', 'manual-2.json.bak']);
+    expect(saveFiles().some((name) => name.includes('.tmp-'))).toBe(false);
     expect((await ipc('saves:read', 'manual-2')).text).toBe(second);
+    expect((await ipc('saves:read-backup', 'manual-2')).text).toBe(first);
   });
 
   it('结构无效的写入被拒绝且不产生文件（失败路径详见 save-failure-protection）', async () => {
@@ -238,6 +243,107 @@ describe('IPC 写入：统一 gzip + 原子替换', () => {
     expect(result.code).toBe('invalid-structure');
     expect(existsSync(slotPath('manual-3'))).toBe(false);
     expect(saveFiles()).toEqual([]);
+  });
+});
+
+describe('成功写入后备份保留/轮换/中断恢复（.json.bak）', () => {
+  it('成功覆盖后 .bak=上一版本（saves:read-backup 可解码），主档=最新', async () => {
+    const first = legacySaveText('2026-11-01T00:00:00.000Z');
+    const second = legacySaveText('2026-11-02T00:00:00.000Z');
+    expect((await ipc('saves:write', 'backup-1', first)).ok).toBe(true);
+    expect(existsSync(`${slotPath('backup-1')}.bak`)).toBe(false);
+    const write = await ipc('saves:write', 'backup-1', second);
+    expect(write.ok, JSON.stringify(write)).toBe(true);
+    expect(write.backupCreated).toBe(true);
+
+    expect((await ipc('saves:read', 'backup-1')).text).toBe(second);
+    const backup = await ipc('saves:read-backup', 'backup-1');
+    expect(backup.ok, JSON.stringify(backup)).toBe(true);
+    expect(backup.text).toBe(first);
+    // .bak 是真正的旧单体明文，可按旧格式读取。
+    const legacyParsed = parseSave(backup.text);
+    expect(legacyParsed.ok, legacyParsed.error).toBe(true);
+    expect(backup.formatVersion).toBe(9);
+
+    // 找不到备份时给出明确 not-found（不伪造备份内容）。
+    const missing = await ipc('saves:read-backup', 'no-such-slot');
+    expect(missing.ok).toBe(false);
+    expect(missing.code).toBe('not-found');
+  });
+
+  it('连续 3 次覆盖：.bak=第 2 次内容（单备份轮换），主档=第 3 次，无交错残留', async () => {
+    const a = legacySaveText('2026-11-01T00:00:00.000Z');
+    const b = legacySaveText('2026-11-02T00:00:00.000Z');
+    const c = legacySaveText('2026-11-03T00:00:00.000Z');
+    for (const text of [a, b, c]) expect((await ipc('saves:write', 'rotate', text)).ok).toBe(true);
+    expect(saveFiles()).toEqual(['rotate.json', 'rotate.json.bak']);
+    expect((await ipc('saves:read', 'rotate')).text).toBe(c);
+    expect((await ipc('saves:read-backup', 'rotate')).text).toBe(b);
+  });
+
+  it('旧版格式升级首次覆盖：.bak 保留升级前的旧明文，可被 parseSave 按旧格式读取', async () => {
+    const legacyText = legacySaveText('2026-10-01T00:00:00.000Z');
+    writeFileSync(slotPath('upgrade'), legacyText, 'utf8'); // 模拟 v1.6.1 旧明文主档
+    const v10Text = serializeSave(Simulation.create().state, '2026-10-02T00:00:00.000Z');
+    const write = await ipc('saves:write', 'upgrade', v10Text);
+    expect(write.ok, JSON.stringify(write)).toBe(true);
+    expect(write.backupCreated).toBe(true);
+
+    const backup = await ipc('saves:read-backup', 'upgrade');
+    expect(backup.ok, JSON.stringify(backup)).toBe(true);
+    // 逐字节保留升级前旧明文（不是从 v10 反推的“伪旧档”）。
+    expect(backup.text).toBe(legacyText);
+    const parsedLegacy = parseSave(backup.text);
+    expect(parsedLegacy.ok, parsedLegacy.error).toBe(true);
+    expect(backup.formatVersion).toBe(9);
+    // 主档已是 v10 新格式。
+    expect(parseSave((await ipc('saves:read', 'upgrade')).text).ok).toBe(true);
+  });
+
+  it('saves:list 增加 backupExists 且不改 size 口径（size=解压后原始字节）', async () => {
+    const first = legacySaveText('2026-11-01T00:00:00.000Z');
+    const second = legacySaveText('2026-11-02T00:00:00.000Z');
+    expect((await ipc('saves:write', 'listed-backup', first)).ok).toBe(true);
+    expect((await ipc('saves:write', 'listed-backup', second)).ok).toBe(true);
+    const list = await ipc('saves:list');
+    const entry = list.slots.find((item: { slot: string }) => item.slot === 'listed-backup');
+    expect(entry.backupExists).toBe(true);
+    expect(entry.size).toBe(Buffer.byteLength(second, 'utf8'));
+    expect(entry.diskSize).toBe(statSync(slotPath('listed-backup')).size);
+    expect(entry.recoveredFromBackup).toBeUndefined();
+
+    // 只有主档没有备份的槽位：backupExists=false（size 口径不变）。
+    writeFileSync(slotPath('no-backup'), first, 'utf8');
+    const list2 = await ipc('saves:list');
+    const entry2 = list2.slots.find((item: { slot: string }) => item.slot === 'no-backup');
+    expect(entry2.backupExists).toBe(false);
+    expect(entry2.size).toBe(Buffer.byteLength(first, 'utf8'));
+  });
+
+  it('主档缺失+备份存在（进程在替换窗口中断）：read 回退并标记，list 仍列出可恢复槽位', async () => {
+    const first = legacySaveText('2026-11-01T00:00:00.000Z');
+    const second = legacySaveText('2026-11-02T00:00:00.000Z');
+    expect((await ipc('saves:write', 'interrupted', first)).ok).toBe(true);
+    expect((await ipc('saves:write', 'interrupted', second)).ok).toBe(true);
+    // 模拟中断：主档丢失，仅剩 .bak（旧替换算法崩溃窗口）。
+    rmSync(slotPath('interrupted'));
+    expect(existsSync(`${slotPath('interrupted')}.bak`)).toBe(true);
+
+    const read = await ipc('saves:read', 'interrupted');
+    expect(read.ok, JSON.stringify(read)).toBe(true);
+    expect(read.recoveredFromBackup).toBe(true);
+    expect(read.text).toBe(first);
+
+    const list = await ipc('saves:list');
+    const entry = list.slots.find((item: { slot: string }) => item.slot === 'interrupted');
+    expect(entry).toBeDefined();
+    expect(entry.recoveredFromBackup).toBe(true);
+    expect(entry.backupExists).toBe(true);
+    expect(entry.size).toBe(Buffer.byteLength(first, 'utf8'));
+
+    // read-backup 与 read 均能取到同一份可恢复数据；备份绝不被删除。
+    expect((await ipc('saves:read-backup', 'interrupted')).text).toBe(first);
+    expect(existsSync(`${slotPath('interrupted')}.bak`)).toBe(true);
   });
 });
 
