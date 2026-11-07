@@ -10,6 +10,7 @@ import type {
   HolderRef,
   MarketState,
   Motion,
+  MotionKind,
   ShareKind,
   TradeAgreement,
 } from '../simulation/contracts/types';
@@ -868,6 +869,222 @@ function investTransportButton(options: InvestButtonOptions): string {
   return `<button ${attrs}>${esc(options.label)}</button>`;
 }
 
+
+// ---------------------------------------------------------------- v1.7 §五：历史明细窗口与年度归档（只读展示）
+
+/**
+ * 历史数据治理（simulation/persistence/historyPolicy.ts）在月结时把超过保留窗口的
+ * 只读明细归档为“年度/月度聚合”。这里只做两件事：
+ * 1) 在“近期明细”面板明确标注保留窗口，说明更早数据已归档、不是丢失；
+ * 2) 把语义明确的年度归档以只读“年度汇总（非逐笔）”折叠区块展示。
+ * 不修改世界状态、不把汇总当逐笔明细、不补造缺失数据。
+ */
+interface AnnualArchiveRow {
+  year: number;
+  cells: string[];
+}
+
+/** 只读年度汇总表（第一列为年份；空数据显示真实空状态，不伪造行）。 */
+function annualArchiveTable(
+  headers: readonly string[],
+  rows: readonly AnnualArchiveRow[],
+  testId: string,
+  emptyText: string,
+): string {
+  if (rows.length === 0) {
+    return `<p class="fin-hint" data-testid="${esc(testId)}-empty">${esc(emptyText)}</p>`;
+  }
+  return `<div class="table-wrap">
+    <table class="sec-table archive-table" data-testid="${esc(testId)}" aria-label="年度汇总（非逐笔）">
+      <thead><tr><th scope="col">年份</th>${headers
+        .map((header) => `<th scope="col">${esc(header)}</th>`)
+        .join('')}</tr></thead>
+      <tbody>${rows
+        .map(
+          (row) =>
+            `<tr><td>${esc(String(row.year))} 年</td>${row.cells
+              .map((cell) => `<td>${cell}</td>`)
+              .join('')}</tr>`,
+        )
+        .join('')}</tbody>
+    </table>
+  </div>`;
+}
+
+/** 只读“年度汇总（非逐笔）”折叠区块；标题与说明都显式区分汇总与逐笔明细。 */
+function annualArchiveBlock(options: {
+  testId: string;
+  title: string;
+  note: string;
+  body: string;
+}): string {
+  return `<details class="archive-block" data-testid="${esc(options.testId)}">
+    <summary>${esc(options.title)}</summary>
+    <p class="fin-hint archive-note">${esc(options.note)}</p>
+    ${options.body}
+  </details>`;
+}
+
+/** 财政流水年度归档（历史治理：城市×年×kind 聚合；仅市长可见，由调用点保证）。 */
+function renderFiscalAnnualArchive(store: GameStore, city: City): string {
+  const buckets = (store.world.fiscal.archivedLedger ?? []).filter(
+    (entry) => entry.cityId === city.id,
+  );
+  const years = [...new Set(buckets.map((entry) => entry.year))].sort((a, b) => b - a);
+  const rows: AnnualArchiveRow[] = years.map((year) => {
+    const list = buckets.filter((entry) => entry.year === year);
+    const count = list.reduce((sum, entry) => sum + entry.count, 0);
+    const income = list.reduce((sum, entry) => sum + Math.max(0, entry.amount), 0);
+    const expense = list.reduce((sum, entry) => sum + Math.max(0, -entry.amount), 0);
+    return {
+      year,
+      cells: [num(count), money(income), money(expense), signedMoney(income - expense)],
+    };
+  });
+  return annualArchiveBlock({
+    testId: 'fiscal-annual-archive',
+    title: '财政年度汇总（非逐笔）',
+    note: `按 城市×年×科目 归档的流水合计（${city.name}）；这是年度汇总，不是逐笔明细，也不能替代对逐笔来源的核对。`,
+    body: annualArchiveTable(
+      ['笔数', '收入', '支出', '净额'],
+      rows,
+      'fiscal-annual-archive-table',
+      '该城暂无已归档的财政流水年度汇总。',
+    ),
+  });
+}
+
+/** 债券兑付年度归档（历史治理：批次×持有人×年×kind 聚合；不展示破产垫付金额）。 */
+function renderBondPaymentAnnualArchive(store: GameStore): string {
+  // 公开汇总只含正常票息/到期兑付；破产处置兑付（银行垫付）金额属市长财政口径，不在此公开。
+  const buckets = (store.world.bonds?.archivedPayments ?? []).filter(
+    (entry) => entry.kind !== 'bankruptcyRedemption',
+  );
+  const years = [...new Set(buckets.map((entry) => entry.year))].sort((a, b) => b - a);
+  const rows: AnnualArchiveRow[] = years.map((year) => {
+    const list = buckets.filter((entry) => entry.year === year);
+    const count = list.reduce((sum, entry) => sum + entry.count, 0);
+    const principal = list.reduce((sum, entry) => sum + entry.principalPaid, 0);
+    const interest = list.reduce((sum, entry) => sum + entry.interestPaid, 0);
+    return { year, cells: [num(count), money(principal), money(interest)] };
+  });
+  return annualArchiveBlock({
+    testId: 'bond-payment-annual-archive',
+    title: '债券兑付年度汇总（非逐笔）',
+    note: '按 批次×持有人×年×类型 归档的正常票息与到期兑付合计；不逐笔列示持有人，破产处置兑付（银行垫付）属市长财政口径，不在本公开汇总内。',
+    body: annualArchiveTable(
+      ['笔数', '本金', '利息'],
+      rows,
+      'bond-payment-annual-archive-table',
+      '暂无已归档的债券兑付记录。',
+    ),
+  });
+}
+
+const MOTION_KIND_ARCHIVE_LABELS: Record<MotionKind, string> = {
+  dividendPolicy: '分红政策',
+  operatorAppointment: '经营者任命',
+  operatorElection: '经营者选任',
+};
+
+/** 治理议案年度归档（历史治理：公司×年×kind 聚合；open 议案永不归档，仍在逐笔列表）。 */
+function renderMotionAnnualArchive(store: GameStore, companyId: string): string {
+  const buckets = (store.world.governance.motionYears ?? []).filter(
+    (entry) => entry.companyId === companyId,
+  );
+  const years = [...new Set(buckets.map((entry) => entry.year))].sort((a, b) => b - a);
+  const rows: AnnualArchiveRow[] = years.map((year) => {
+    const list = buckets.filter((entry) => entry.year === year);
+    let count = 0;
+    let passed = 0;
+    let rejected = 0;
+    let votesFor = 0;
+    let votesAgainst = 0;
+    const kinds: string[] = [];
+    for (const entry of list) {
+      count += entry.count;
+      passed += entry.passed;
+      rejected += entry.rejected;
+      votesFor += entry.votesFor;
+      votesAgainst += entry.votesAgainst;
+      kinds.push(MOTION_KIND_ARCHIVE_LABELS[entry.kind] ?? entry.kind);
+    }
+    return {
+      year,
+      cells: [
+        esc([...new Set(kinds)].join('、') || '—'),
+        num(count),
+        num(passed),
+        num(rejected),
+        num(votesFor),
+        num(votesAgainst),
+      ],
+    };
+  });
+  return annualArchiveBlock({
+    testId: 'motion-annual-archive',
+    title: '议案年度汇总（非逐笔）',
+    note: '按 公司×年×类型 归档的已结束议案统计；待表决议案仍在逐笔列表中，不受归档影响。',
+    body: annualArchiveTable(
+      ['类型', '议案数', '通过', '否决', '赞成票', '反对票'],
+      rows,
+      'motion-annual-archive-table',
+      '该公司暂无已归档的议案年度统计。',
+    ),
+  });
+}
+
+/** 结清贷款年度归档（银行贷款：全部主体、仅笔数；居民消费贷：本城×年×状态）。 */
+function renderLoanAnnualArchive(store: GameStore, city: City): string {
+  const bankBuckets = store.world.banking?.archivedLoans ?? [];
+  const bankYears = [...new Set(bankBuckets.map((entry) => entry.year))].sort((a, b) => b - a);
+  const bankRows: AnnualArchiveRow[] = bankYears.map((year) => {
+    const list = bankBuckets.filter((entry) => entry.year === year);
+    return {
+      year,
+      cells: [
+        num(list.reduce((sum, entry) => sum + entry.count, 0)),
+        num(list.length),
+      ],
+    };
+  });
+  const householdBuckets = (store.world.householdFinance?.archivedLoans ?? []).filter(
+    (entry) => entry.cityId === city.id,
+  );
+  const householdYears = [...new Set(householdBuckets.map((entry) => entry.year))].sort(
+    (a, b) => b - a,
+  );
+  const householdRows: AnnualArchiveRow[] = householdYears.map((year) => {
+    const list = householdBuckets.filter((entry) => entry.year === year);
+    const count = list.reduce((sum, entry) => sum + entry.count, 0);
+    const principal = list.reduce((sum, entry) => sum + entry.principal, 0);
+    const paidPrincipal = list.reduce((sum, entry) => sum + entry.paidPrincipal, 0);
+    const paidInterest = list.reduce((sum, entry) => sum + entry.paidInterest, 0);
+    return {
+      year,
+      cells: [num(count), money(principal), money(paidPrincipal), money(paidInterest)],
+    };
+  });
+  return `<details class="archive-block" data-testid="bank-loan-annual-archive">
+    <summary>结清贷款年度汇总（非逐笔）</summary>
+    <p class="fin-hint archive-note">银行贷款归档按 年×借款人类别/用途 聚合（全部主体，只列笔数，避免暴露单个主体金额）；居民消费贷按 本城×年×状态 聚合。</p>
+    <h5 class="archive-subhead">银行贷款（全部主体，仅笔数）</h5>
+    ${annualArchiveTable(
+      ['结清笔数', '聚合类别数'],
+      bankRows,
+      'bank-loan-annual-archive-table',
+      '暂无已归档的银行贷款结清记录。',
+    )}
+    <h5 class="archive-subhead">居民消费贷（${esc(city.name)}）</h5>
+    ${annualArchiveTable(
+      ['结清笔数', '本金', '已还本金', '已还利息'],
+      householdRows,
+      'household-loan-annual-archive-table',
+      '本城暂无已归档的居民消费贷结清记录。',
+    )}
+  </details>`;
+}
+
 export function renderGovernmentSection(store: GameStore, city: City): string {
   const view = store.policyView(city.id);
   const politics = store.world.politics.cities.find((entry) => entry.cityId === city.id) ?? null;
@@ -880,6 +1097,7 @@ export function renderGovernmentSection(store: GameStore, city: City): string {
   const ledger = isPlayerMayor
     ? store.fiscalLedger.filter((entry) => entry.cityId === city.id).slice(0, 6)
     : [];
+  const fiscalArchive = isPlayerMayor ? renderFiscalAnnualArchive(store, city) : '';
 
   const activeCards =
     view.active.length === 0
@@ -1283,8 +1501,12 @@ export function renderGovernmentSection(store: GameStore, city: City): string {
       ${
         isPlayerMayor
           ? `<div class="fiscal-brief" data-testid="fiscal-ledger">
-              <div class="gov-sub-head"><span>财政流水</span><em>最近 ${ledger.length} 条</em></div>
+              <div class="gov-sub-head"><span>财政流水 · 逐笔明细</span><em>最近 ${ledger.length} 条</em></div>
+              <p class="fin-hint archive-note" data-testid="fiscal-ledger-window-note">仅显示最近 ${num(
+                DEMO_CONFIG.history.fiscalDetailMonths,
+              )} 个月逐笔明细（本面板取最近 ${ledger.length} 条）；更早财政流水已按 城市×年×科目 归档为年度汇总，不再逐笔展示。</p>
               <ul class="fiscal-list">${ledgerRows}</ul>
+              ${fiscalArchive}
             </div>`
           : `<div class="fiscal-brief is-restricted" data-testid="fiscal-restricted">
               <div class="gov-sub-head"><span>财政流水</span><em>仅市长可见</em></div>
@@ -1539,6 +1761,9 @@ export function renderCityTaxPanel(store: GameStore, city: City): string {
           : '<p class="fiscal-empty">尚无月度税收结算；推进 1 月后生成。</p>'
       }
       <p class="tax-note">${esc(view.note)}</p>
+      <p class="fin-hint" data-testid="tax-history-window-note">仅显示最近 6 个月逐月税收明细（本城保留最近 ${num(
+        DEMO_CONFIG.tax.historyMonths,
+      )} 个月）；更早税收记录不保留、也未归档为年度汇总（该历史是破产判定与 AI 预算的规则读取窗口，不参与展示归档）。</p>
     </div>`;
 }
 
@@ -1722,10 +1947,14 @@ export function renderBondMarketSection(store: GameStore): string {
           : ''
       }
       ${offerRows}
+      <p class="fin-hint archive-note" data-testid="bond-payment-window-note">本面板不逐笔列出兑付流水：最近 ${num(
+        DEMO_CONFIG.history.bondPaymentDetailMonths,
+      )} 个月的债券兑付可在市长财政流水与个人持债状态中核对；更早兑付已按 批次×持有人×年×类型 归档，见下方年度汇总。</p>
       <div class="bond-holdings">
         <div class="gov-sub-head"><span>我的持债</span><em>${num(holdings.length)} 条记录</em></div>
         ${holdingRows}
       </div>
+      ${renderBondPaymentAnnualArchive(store)}
     </section>`;
 }
 
@@ -2986,6 +3215,10 @@ export function renderCompanyDetail(
               </div>`
             : ''
         }
+        <p class="fin-hint archive-note" data-testid="motion-window-note">仅显示最近 ${num(
+          DEMO_CONFIG.history.governanceArchiveMonths,
+        )} 个月已结束议案的逐笔明细（“最近结束”最多展示 2 条）；更早议案已按 公司×年×类型 归档为年度统计，见下方年度汇总。</p>
+        ${renderMotionAnnualArchive(store, company.id)}
         <p class="fin-hint">表决按议案创建时的登记日快照计票：期间股份转手不会让同一批票被重复使用（演示规则）。</p>
         ${
           canVote || openMotions.some((motion) => store.motionEligibility(motion.id) > 0)
@@ -3653,6 +3886,10 @@ export function renderBankSection(store: GameStore, city: City): string {
           ? renderBankCompanyBlock(companyView)
           : '<p class="fin-hint">在左侧企业列表或地图选中本城企业后，这里显示企业账户、授信与贷款。</p>'
       }
+      <p class="fin-hint archive-note" data-testid="bank-loan-window-note">贷款列表仅显示最近 ${num(
+        DEMO_CONFIG.history.closedLoanArchiveMonths,
+      )} 个月结清贷款的逐笔明细（未结清/违约贷款始终保留）；更早结清贷款已按 年×类别 归档，见下方年度汇总。</p>
+      ${renderLoanAnnualArchive(store, city)}
       <p class="bank-note">${esc(view.note)}</p>
       <p class="fin-hint">逾期宽限 ${num(view.graceMonths)} 个月：第 2 个月仍欠付才标记违约；不收罚息，提前还款不收手续费。</p>
     </section>`;

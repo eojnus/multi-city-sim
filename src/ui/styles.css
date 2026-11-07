@@ -9712,3 +9712,35 @@ kbd {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+/* v1.7 §五：历史归档提示与只读“年度汇总（非逐笔）”区块。 */
+.archive-note {
+  margin: 2px 0 4px;
+  color: var(--faint);
+}
+
+.archive-block {
+  margin: 4px 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  padding: 3px 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.archive-block > summary {
+  cursor: pointer;
+  font-size: 6.6px;
+  color: var(--faint);
+  letter-spacing: 0.04em;
+}
+
+.archive-block .archive-subhead {
+  margin: 4px 0 2px;
+  font-size: 6.4px;
+  font-weight: 600;
+  color: var(--faint);
+}
+
+.archive-table {
+  font-size: 6.2px;
+}

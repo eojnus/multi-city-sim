@@ -17,6 +17,7 @@ import type {
   SectorId,
   ShareKind,
   StockClassHistory,
+  StockYearCandle,
   TradeActionResult,
   TradeFlow,
   ViewerIdentity,
@@ -321,6 +322,11 @@ export interface StockDetailView {
   bookPrice: number;
   changePct: number | null;
   candles: StockCandleView[];
+  /**
+   * v1.7 §五：超过最近 config.history.stockMonthlyMonths 个月的月线按自然年聚合后的
+   * 真实 OHLCV（只读历史，不新造行情）；旧档/未归档时为空数组。
+   */
+  yearlyCandles?: StockYearCandle[];
   bestBid: number | null;
   bestAsk: number | null;
   playerShares: number;
@@ -1657,6 +1663,7 @@ export class GameStore {
       bookPrice: 0,
       changePct: this.stockChangePct(candles, last ? last.price : null),
       candles,
+      yearlyCandles: this.stockYearlyCandles(entry.shareClassId),
       bestBid: null,
       bestAsk: null,
       playerShares: this.stockPlayerShares(entry.shareClassId),
@@ -1718,6 +1725,7 @@ export class GameStore {
       bookPrice: bookPrice(this.world, company),
       changePct: this.stockChangePct(candles, last ? last.price : null),
       candles,
+      yearlyCandles: this.stockYearlyCandles(classId),
       bestBid: bids.length > 0 ? Math.max(...bids.map((order) => order.limitPrice)) : null,
       bestAsk: asks.length > 0 ? Math.min(...asks.map((order) => order.limitPrice)) : null,
       playerShares,
@@ -1755,6 +1763,13 @@ export class GameStore {
       volume: candle.volume,
       trades: candle.trades,
     }));
+  }
+
+  /** v1.7：年度 OHLCV 归档（只读展示；归档由 historyPolicy 按真实月线生成）。 */
+  private stockYearlyCandles(classId: string): StockYearCandle[] {
+    const history = this.world.securities.history.find((entry) => entry.shareClassId === classId);
+    if (!history || !Array.isArray(history.yearlyCandles)) return [];
+    return history.yearlyCandles.map((candle) => ({ ...candle }));
   }
 
   private stockLastTrade(classId: string): { price: number; tick: number } | null {

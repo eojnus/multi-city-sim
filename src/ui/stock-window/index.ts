@@ -13,6 +13,8 @@ import type {
   StockMarketView,
   StockOrderView,
 } from '../../app/gameStore';
+import type { StockYearCandle } from '../../simulation/contracts/types';
+import { DEMO_CONFIG } from '../../data/config';
 import { esc, money, num, pct, tickDate } from '../format';
 import { renderCandleChart } from './chart';
 
@@ -211,6 +213,44 @@ function renderRow(row: StockListRow, selected: boolean): string {
     </button>`;
 }
 
+/**
+ * v1.7 §五：年度 OHLCV 归档的只读展示。
+ * 只由真实月线聚合而来（historyPolicy），这里不推算、不补造无成交月份。
+ */
+function renderYearlyCandles(rows: readonly StockYearCandle[]): string {
+  const body =
+    rows.length === 0
+      ? '<p class="fin-hint" data-testid="stock-yearly-archive-empty">暂无已归档的年度 OHLCV（月 K 明细未超过保留窗口或旧存档尚未归档）。</p>'
+      : `<div class="table-wrap">
+          <table class="sec-table archive-table" data-testid="stock-yearly-archive-table" aria-label="年度 OHLCV 汇总（非逐笔）">
+            <thead><tr>
+              <th scope="col">年份</th><th scope="col">开盘</th><th scope="col">最高</th>
+              <th scope="col">最低</th><th scope="col">收盘</th><th scope="col">成交量</th>
+              <th scope="col">成交笔数</th><th scope="col">有成交月数</th>
+            </tr></thead>
+            <tbody>${rows
+              .map(
+                (row) => `<tr>
+                  <td>${esc(String(row.year))} 年</td>
+                  <td>${num(row.open, 2)}</td>
+                  <td>${num(row.high, 2)}</td>
+                  <td>${num(row.low, 2)}</td>
+                  <td>${num(row.close, 2)}</td>
+                  <td>${num(row.volume)}</td>
+                  <td>${num(row.trades)}</td>
+                  <td>${num(row.months)}</td>
+                </tr>`,
+              )
+              .join('')}</tbody>
+          </table>
+        </div>`;
+  return `<details class="archive-block" data-testid="stock-yearly-archive">
+    <summary>年度 OHLCV 汇总（非逐笔）</summary>
+    <p class="fin-hint archive-note">按自然年聚合的真实月线 OHLCV；只统计有真实成交的月份，不补造无成交月份，也不能替代逐月 K 线。</p>
+    ${body}
+  </details>`;
+}
+
 function renderMarketPanel(view: StockMarketView): string {
   const detail = view.selected;
   if (!detail) {
@@ -257,6 +297,10 @@ function renderMarketPanel(view: StockMarketView): string {
       <span>${detail.lastTradeTick === null ? '退出前没有真实成交记录' : `最后真实成交：${esc(tickDate(detail.lastTradeTick))}`} · 股份已注销，不可再交易或恢复</span>
     </div>` : ''}
     ${renderCandleChart(detail.candles as readonly StockCandleView[])}
+    <p class="fin-hint archive-note" data-testid="stock-kline-window-note">月 K 只显示最近 ${num(
+      DEMO_CONFIG.securities.historyMonths,
+    )} 个月逐月成交明细（某月无成交则空档）；更早月线已按自然年聚合为年度 OHLCV，见下方年度汇总。</p>
+    ${renderYearlyCandles(detail.yearlyCandles ?? [])}
     <p class="stock-market-note">${esc(detail.note)}</p>`;
 }
 
