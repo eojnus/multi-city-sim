@@ -292,6 +292,34 @@ sync 函数重建；`city.lastMonth` 虽多写者，但存档归属唯一（worl
   出现“120 月明细窗口 + 更早年度 OHLCV 汇总”且年度汇总区块存在（空数据不伪造）；
 - 旧版明文 72 月存档读取→推进→写出 gzip v10→再读取成功；0 console 错误。
 
+### 13.5 修复轮构建、测试与验收证据
+
+- `npx tsc --noEmit` = 0；`npx tsc -p tsconfig.electron.json --noEmit` = 0；`npm run build` 成功。
+- **全量回归（修复后）**：154 个测试文件分 13 块、`--maxWorkers=1` 执行，**全部断言通过**
+  （1,295 项通过 / 1 项按设计跳过 / 0 failed；非零退出的块均为容器 `[vitest-worker] onTaskUpdate`
+  RPC 噪声，断言全绿，日志 `/tmp/v17-chunk-*.log`）。其中：
+  - `tests/persistence`：registry/ownership/module-migration/cross-references/roundtrip/
+    opening-shares-timing/backward-compatibility/save-failure-protection/history-policy/
+    long-run-save(12m)/save-large-payload 全绿；
+  - `tests/save-boundary-v17.test.ts` 21/21、`tests/persistence/save-failure-protection.test.ts` 21/21；
+  - `tests/ui-history-archive-v17.test.ts` 7/7 + 受影响 UI/acceptance 119/119；
+  - 既有迁移/旧档测试（migration-v4..v9、legacy-*、acceptance/migration-v7）、居民/投资/银行/债券/设备/
+    经济稳定性等全部通过。
+- **Electron 实际验证**：生产构建 + Xvfb，**35/35 检查、0 console 错误**（见 §13.4/§13.6）。
+
+### 13.6 修复轮 Electron 手动保存/读取验证范围
+
+- 启动/区域视图/人口/需求/设备链/生产计划/股票窗口/14 个月真实推进/财务面板/最小窗口等原有走查保留；
+- 手动保存→推进→读取逐字段比对通过；`manual-1` 第二次保存后 `.bak` 可读取且=上一版本、
+  list `backupExists=true`；连续保存轮换后主档与备份 savedAt 不同；
+- 72 月旧明文（53,313,078B）在同一槽位读取→推进 1 月→写出 gzip v10（1,344,690B）后，
+  `.bak` 逐字节等于升级前旧档（formatVersion 9 + world，可被旧格式读取）；
+- 损坏存档读取失败提示且不覆盖当前世界；含未知必需模块的存档被拒绝并提示更新版本；
+  自动保存成功且写出 v10 模块化存档；
+- 财政流水面板“近期逐笔明细 / 更早已按年度汇总归档”提示与年度汇总区块可见；股票 K 线
+  “120 月明细窗口 + 更早年度 OHLCV 汇总”提示与年度汇总区块存在（空数据不伪造）；
+- 旧版明文 72 月存档读取→推进→写出 gzip v10→再读取成功；全程 0 console 错误。
+
 ## 12. 工作区与推送状态
 
 - 开发基线 SHA：`31b66272e04bdaa8f0c10f80d5dfc91d551172bf`
@@ -299,7 +327,8 @@ sync 函数重建；`city.lastMonth` 虽多写者，但存档归属唯一（worl
   `2502e0e` docs(design) → `4d9af42` feat(v1.7) → `8504de5` test(v1.7) →
   `7282187` docs(v1.7)（**已推送的交付 HEAD**）→ 推送 SHA 回填提交（本地=远端，见 `git log -1`）
 - 验收修复轮（基线 `3efbc5c`）：`aa57472` fix(save 开局份额时点) → `c2f60f9` fix(save-ipc 备份保留)
-  → `85ad9b7` feat(ui 历史归档展示) → `docs(v1.7 修复轮)` → 推送 SHA 回填提交（见 `git log -1`）。
+  → `85ad9b7` feat(ui 历史归档展示) → `58cad62` docs(修复轮) → `64fe136` test(save 旧档夹具)
+  → `docs(v1.7 修复轮验证结果)`；**最终本地/远端 SHA 以 `git log -1` 与交付答复为准**。
 - 推送：`31b6627..7282187 feature/stock-market-ui-tax -> feature/stock-market-ui-tax`（**快进推送**），
   随后推送 SHA 回填/文档对齐提交；**最终本地 HEAD = `origin/feature/stock-market-ui-tax`** 以
   `git log -1` 为准（本轮最终 SHA 同时记录在交付答复中）；`origin/main` 仍
