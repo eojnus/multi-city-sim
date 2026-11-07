@@ -18,7 +18,7 @@ import { DEMO_CONFIG } from '../src/data/config';
 import type { FinanceResult } from '../src/simulation/finance/finance';
 import type { HouseholdGroup, WorldState } from '../src/simulation/contracts/types';
 import { round2 } from '../src/simulation/core/math';
-import { parseSave, serializeSave } from '../src/simulation/core/save';
+import { createLegacySaveFile, parseSave, serializeSave } from '../src/simulation/core/save';
 import { checkInvariants } from '../src/simulation/core/invariants';
 import {
   applyHouseholdIncome,
@@ -502,13 +502,14 @@ describe('居民投资份额与股息归属（v1.2 §1）', () => {
     if (!investors[0]) throw new Error('缺少投资实体');
     investors[0].cash = 250_000;
     const equity = cityInvestorEquity(world, CITY_ID);
-    // 模拟 v0.9/v1.1 旧档：没有账本、没有流水。
+    // 模拟 v0.9/v1.1 旧档：没有账本、没有流水。旧档必须用旧单体格式表达；
+    // v1.7 验收修复后，v10 模块化存档读取不再预写 openingShares（唯一初始化时点在 tick 内）。
     for (const group of householdGroups(world)) delete group.investorLedger;
     delete world.households.investorFundingHistory;
     delete world.households.investorUsageHistory;
     const cashBefore = new Map(householdGroups(world).map((group) => [group.id, group.cash]));
 
-    const restored = parseSave(serializeSave(world));
+    const restored = parseSave(JSON.stringify(createLegacySaveFile(world)));
     expect(restored.ok, restored.error).toBe(true);
     const loaded = restored.world;
     if (!loaded) throw new Error('读档结果缺少世界');
