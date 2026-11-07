@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-06T19:22:57.445Z",
+  "generatedAt": "2026-11-07T02:48:43.349Z",
   "electron": "38.8.6",
   "checks": [
     {
@@ -48,6 +48,11 @@
       "detail": "{\"isMayor\":true,\"restrictedBlock\":true,\"restrictedText\":\"财政口径仅市长可见 · AI 决策参考\\n          \\n            月政策预算155.8 万占参考税收 5.0%\\n            税收参考月数真实 0 月 / 估算 12 月真实月均 0 · 估算 3115.1 万/月\\n            债务 / GDP0.0%预警线 85%（非破产线）\\n            本月到期压力0.0%债券到期 0 · 贷款到期 0\\n            政府财政余额6000.0 万体检时点可用资金\\n          \\n          预算参考：近 12 月平均月税收 31151424（真实 0 月 + 估算 12 月）× 5%\",\"cardText\":\"已支出 0 / 总预算 80.0 万｜本月参考 80.0 万 · 预留 0 · 未支付 0 · 来源 —\",\"budgetVisible\":true,\"referenceVisible\":true}"
     },
     {
+      "name": "财政流水面板标注“近期逐笔明细 / 更早已按年度汇总归档”，归档区块与明细区分",
+      "pass": true,
+      "detail": "{\"noteExists\":true,\"noteText\":\"仅显示最近 36 个月逐笔明细（本面板取最近 6 条）；更早财政流水已按 城市×年×科目 归档为年度汇总，不再逐笔展示。\",\"ledgerVisible\":true,\"archiveVisible\":true,\"archiveText\":\"财政年度汇总（非逐笔）\\n    按 城市×年×科目 归档的流水合计（岚港）；这是年度汇总，不是逐笔明细，也不能替代对逐笔来源的核对。\\n    该城暂无已归档的财政流水年度汇总。\"}"
+    },
+    {
       "name": "离任后立即恢复非市长受限视图",
       "pass": true,
       "detail": "{\"isPlayerMayor\":false}"
@@ -80,7 +85,12 @@
     {
       "name": "股票市场大窗口仍可打开并显示行",
       "pass": true,
-      "detail": "{\"window\":true,\"rows\":65,\"title\":\"STOCK MARKET\\n          股票市场\\n          有投票权股份\"}"
+      "detail": "{\"window\":true,\"rows\":65,\"title\":\"STOCK MARKET\\n          股票市场\\n          有投票权股份\",\"klineNote\":\"月 K 只显示最近 120 个月逐月成交明细（某月无成交则空档）；更早月线已按自然年聚合为年度 OHLCV，见下方年度汇总。\",\"yearlyArchive\":true}"
+    },
+    {
+      "name": "股票 K 线窗口标注“120 月明细窗口 + 更早年度 OHLCV 汇总”，且年度汇总区块存在（空数据不伪造）",
+      "pass": true,
+      "detail": "{\"klineNote\":\"月 K 只显示最近 120 个月逐月成交明细（某月无成交则空档）；更早月线已按自然年聚合为年度 OHLCV，见下方年度汇总。\",\"yearlyArchive\":true}"
     },
     {
       "name": "14 个月真实 tick：商品价格均为正、单月变动不超过配置上限",
@@ -120,7 +130,7 @@
     {
       "name": "存读档保留设备/现金/人口/债券/设备储备/销售历史/生产计划/维护费快照/政策额度且完全一致",
       "pass": true,
-      "detail": "{\"saved\":true,\"loaded\":true,\"advanced\":\"2027 年 06 月\",\"toasts\":[\"已从manual-1恢复（保存于 2026/11/6 19:22:25）。\"],\"diffKeys\":[]}"
+      "detail": "{\"saved\":true,\"loaded\":true,\"advanced\":\"2027 年 06 月\",\"toasts\":[\"已保存到 manual-1。\",\"已从manual-1恢复（保存于 2026/11/7 02:48:07）。\"],\"diffKeys\":[]}"
     },
     {
       "name": "桌面存档为 v1.7 模块化格式（formatVersion 10 / kind / 11 模块 / 无旧 world 字段）",
@@ -128,14 +138,24 @@
       "detail": "{\"ok\":true,\"bytes\":6480415,\"formatVersion\":10,\"kind\":\"lanwan-modules\",\"hasWorld\":false,\"modules\":[\"banking\",\"bonds\",\"company\",\"equipment\",\"government\",\"management\",\"marketTrade\",\"politics\",\"population\",\"securities\",\"world\"]}"
     },
     {
+      "name": "成功覆盖后保留上一版本备份（.bak 可读取、内容为上一版、list 标记 backupExists）",
+      "pass": true,
+      "detail": "{\"ok\":true,\"backupOk\":true,\"backupFormatVersion\":10,\"backupKind\":\"lanwan-modules\",\"backupSavedAt\":\"2026-11-07T02:48:07.050Z\",\"firstSavedAt\":\"2026-11-07T02:48:07.050Z\",\"backupExistsInList\":true,\"recoveredFromBackup\":false}"
+    },
+    {
+      "name": "连续保存轮换：主档为最新版本、备份为上一版本（两者不是同一份）",
+      "pass": true,
+      "detail": "{\"ok\":true,\"mainSavedAt\":\"2026-11-07T02:48:13.646Z\",\"backupSavedAt\":\"2026-11-07T02:48:07.050Z\"}"
+    },
+    {
       "name": "损坏存档读取失败、给出可读错误且不覆盖当前世界",
       "pass": true,
-      "detail": "{\"ok\":false,\"beforeTick\":16,\"afterTick\":16,\"toasts\":[\"已从manual-1恢复（保存于 2026/11/6 19:22:25）。\",\"读取失败：存档不是有效 JSON：Expected double-quoted property name in JSON at position 49 (line 1 column 50)；当前进度未被覆盖。\"]}"
+      "detail": "{\"ok\":false,\"beforeTick\":16,\"afterTick\":16,\"toasts\":[\"已保存到 manual-1。\",\"读取失败：存档不是有效 JSON：Expected double-quoted property name in JSON at position 49 (line 1 column 50)；当前进度未被覆盖。\"]}"
     },
     {
       "name": "包含未知必需模块的存档被拒绝加载且不覆盖当前世界",
       "pass": true,
-      "detail": "{\"ok\":false,\"beforeTick\":16,\"afterTick\":16,\"toasts\":[\"已从manual-1恢复（保存于 2026/11/6 19:22:25）。\",\"读取失败：存档不是有效 JSON：Expected double-quoted property name in JSON at position 49 (line 1 column 50)；当前进度未被覆盖。\",\"读取失败：存档包含当前游戏不认识的必需模块 futureRequired，请使用更新版本的游戏读取。；当前进度未被覆盖。\"]}"
+      "detail": "{\"ok\":false,\"beforeTick\":16,\"afterTick\":16,\"toasts\":[\"已保存到 manual-1。\",\"读取失败：存档不是有效 JSON：Expected double-quoted property name in JSON at position 49 (line 1 column 50)；当前进度未被覆盖。\",\"读取失败：存档包含当前游戏不认识的必需模块 futureRequired，请使用更新版本的游戏读取。；当前进度未被覆盖。\"]}"
     },
     {
       "name": "自动保存成功且写出版本格式 v10 模块化存档（无旧 world 字段）",
@@ -150,7 +170,7 @@
     {
       "name": "72 月默认世界经桌面存档接口：读取成功→推进 1 月→写入成功（gzip）→再读取成功",
       "pass": true,
-      "detail": "{\"sourceBytes\":53313078,\"savedBytes\":1344692,\"savedIsGzip\":true,\"compressionRatio\":0.025,\"loadMs\":2811,\"tickMs\":8746,\"saveMs\":4222,\"reloadMs\":1216,\"startTick\":72,\"advancedTick\":73,\"companies\":477,\"toasts\":[\"已保存到 manual-t72b。\",\"已从manual-t72b恢复（保存于 2026/11/6 19:22:53）。\"]}"
+      "detail": "{\"sourceBytes\":53313078,\"savedBytes\":1344688,\"savedIsGzip\":true,\"compressionRatio\":0.025,\"backupExists\":true,\"backupBytes\":53313078,\"backupLegacyOk\":true,\"loadMs\":3183,\"tickMs\":8670,\"saveMs\":3908,\"reloadMs\":1567,\"startTick\":72,\"advancedTick\":73,\"companies\":477,\"toasts\":[\"已保存到 manual-t72。\",\"已从manual-t72恢复（保存于 2026/11/7 02:48:38）。\"]}"
     },
     {
       "name": "全程无控制台错误（过滤 GPU/GL 噪声）",
@@ -158,7 +178,7 @@
       "detail": ""
     }
   ],
-  "passed": 31,
-  "total": 31,
+  "passed": 35,
+  "total": 35,
   "consoleErrors": []
 }

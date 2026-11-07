@@ -14,7 +14,7 @@
 | §三 分模块快照架构 | 已实现 | `src/simulation/persistence/`：types/registry/saveCoordinator/migrations/scaffold/referenceValidation + 11 个模块（world/population/company/marketTrade/equipment/banking/government/bonds/securities/management/politics）；单一归属表 + 注册表拒绝重复/祖先重叠；候选世界一次性替换；未知必需模块/高版本拒绝、未知可选模块原样保留 |
 | §四 文件结构/接口 | 已实现 | 按任务书推荐结构落地；`core/save.ts` 保留兼容入口并委派；新增模块只需注册+归属声明；房地产接入示例见 DESIGN §4 |
 | §五 历史治理 | 已实现 | `historyPolicy.ts` A–F 六类归档（银行快照/已结清贷款/财政流水/债券流水/股票月线年度聚合/治理选举），月结安全时点执行、幂等、守恒；`lifecycle` 因终身计数语义明确不归档并记录原因；实测 72 月快照 18,853→779 条等 |
-| §六 文件/压缩/安全 | 已实现 | minified JSON + 桌面统一 gzip；旧明文/旧 gzip 可读；三层大小口径（原始 128MiB/压缩 64MiB/解压 128MiB）；写入 temp+rename+`.bak`、同槽位并发串行、失败不覆盖原档；浏览器 localStorage 限制如实说明 |
+| §六 文件/压缩/安全 | 已实现 | minified JSON + 桌面统一 gzip；旧明文/旧 gzip 可读；三层大小口径（原始 128MiB/压缩 64MiB/解压 128MiB）；写入 temp+rename+`.bak`（成功后**保留/轮换上一版本备份**、中断恢复）、同槽位并发串行、失败不覆盖原档；浏览器 localStorage 限制如实说明 |
 | §七 一致快照/性能 | 已实现+实测 | 渲染层同步“模块 export+序列化”取得同一 tick 快照；去掉整树 deepClone；120 月体积/耗时/内存见 §7；是否引入 Worker 按实测结论（见 §9） |
 | §八 兼容与迁移 | 已实现 | 旧单体明文/gzip v1–v9 全链继续可用（fixture+既有迁移测试）；v10 模块版本独立；未知/高版本保护；迁移失败原档保留 |
 | §九 测试验收 | 见 §8 | 新增 tests/persistence 9 个测试文件（含 roundtrip/registry/module-migration/cross-references/history-policy/backward-compatibility/save-failure-protection/long-run-save/ownership/save-large-payload）；全量回归结果见 §8 |
@@ -200,12 +200,106 @@ sync 函数重建；`city.lastMonth` 虽多写者，但存档归属唯一（worl
   不影响交易/价格）、`policies.ledgerLimit` 800→12,000（历史治理需要 36 月财政明细，仅 FIFO 上限保护，
   余额/收支语义不变）。两项均已在设计文档与测试中说明。
 
+## 13. v1.7 验收修复（修复轮）
+
+验收基线 `3efbc5c570687a473c34f8b1a60462aa3b1b4041`；修复轮不合并 main、不改写既有提交、不调整经济数值。
+
+### 13.1 新开局存读档改变后续经济结果（已修复）
+
+- 根因：v10 读档钩子在读档时调用 `ensureInvestorOpeningShares`，用“读档时点”的投资实体净资产
+  预写 `investorLedger.openingShares`；直接推进则在第一次月度结算中（资产已被当月现金流影响后）
+  才计算，导致同 rngState 下居民现金/股息/城市居民收入/投资实体现金分叉。
+- 修复：**移除 v10 读档时的 `ensureInvestorOpeningShares` 预写**；开局份额唯一初始化时点 =
+  第一次月度结算中首次需要有效份额时（tick 内确定性位置、按城市幂等）。v10 读档只做候选世界恢复、
+  结构/引用/不变量校验与派生镜像同步（`syncCompanyTotalSharesSafe`）。
+- 旧档兼容：旧单体（1–9）继续在读取时一次性补齐（按城市幂等；任一群体已有合法值则同城其余补 0，
+  不重算；未初始化城市才按无主净资产分配），不重复分配、不增减现金、不覆盖已有份额。
+- 回归：`tests/persistence/opening-shares-timing.test.ts`（tick 0 直接推进 vs 存档→读档→推进、
+  连续 6 tick 全量状态一致、中途读档不改变完整状态、旧档补齐幂等/不覆盖/不增减现金）；
+  `tests/persistence/roundtrip.test.ts` 的 0 月用例已收紧为“逐字段完全相等 + openingShares 不被补写”。
+- 设计文档：`SAVE_SYSTEM_DESIGN.md` §5.3（读取后修复规则与开局份额唯一时点）。
+- 测试结果：`tests/persistence/opening-shares-timing.test.ts` 6/6；`tests/persistence/roundtrip.test.ts`
+  6/6（0 月用例收紧后）；受影响的存档/迁移/居民/投资/模拟/兼容 30 个测试文件 **272 passed / 1 skipped
+  （按设计跳过 120 月长跑）/ 0 failed**。
+
+### 13.2 成功写入后的备份保留（已修复）
+
+- 缺陷：`electron/saveIpc.ts` 写入成功后执行 `fs.rmSync(`${full}.bak`)`，主档虽有替换期临时备份，
+  但成功保存后并不保留“上一版本”，与任务书/交付报告“旧档保留备份”矛盾，也无法从中断窗口之外的
+  普通误覆盖中恢复上一版。
+- 修复（平台层，不改经济数值/存档格式）：
+  1. **写序**：写 temp → 从当前主档生成下一份备份（同目录 `linkSync` 硬链接零拷贝，失败回退
+     `copyFileSync(..., COPYFILE_EXCL)`）到 `.bak.next-*` → 原子 `rename` 轮换为 `.bak` →
+     原子 `rename` temp→主档。主档替换无“缺失窗口”；备份生成失败立即中止（主档/旧备份不动）；
+     替换失败时主档仍为旧版本且 `.bak`=旧主档内容，主/备至少一方完整。
+  2. **保留/轮换语义**：成功覆盖后 `.bak`=上一版本且不删除（首次写入无旧主档则不产生备份）；
+     连续保存为单备份轮换（第 N 次成功后 .bak=N-1，N-2 被替换）；旧格式升级首次覆盖时 `.bak`
+     逐字节保留升级前旧明文，仍可被 `parseSave` 按旧格式读取。
+  3. **中断恢复**：主档缺失+`.bak` 存在时，`saves:read` 回退读备份并返回 `recoveredFromBackup:true`，
+     `saves:list` 仍列出该可恢复槽位（`backupExists:true`/`recoveredFromBackup:true`，`size` 口径不变）；
+     下一次写入先把备份恢复为主档再轮换；除轮换与用户显式删除槽位外不主动删 `.bak`。
+  4. **API**：新增 `saves:read-backup` IPC（返回备份解码结果，`electron/preload.ts` 与
+     `src/platform/saveBridge.ts` 的 `readBackup()` 已同步）；`saves:list` 增加 `backupExists`。
+- 测试（实测全绿）：`tests/save-boundary-v17.test.ts` **21/21**（成功覆盖 .bak=上一版本且可解码、连续 3 次轮换、
+  旧格式升级 .bak 保留旧明文、list `backupExists`/`size` 口径、主档缺失时 read/list 回退）；
+  `tests/persistence/save-failure-protection.test.ts` **21/21**（备份生成失败主档不动且不产生半成品、
+  temp→主档替换失败主/备可读、中断状态后下一次写先恢复主档、同槽位并发 3 次主档=第3/.bak=第2）。
+  `npx tsc --noEmit` 与 `npx tsc -p tsconfig.electron.json --noEmit` 均为 0。
+- 注意：备份轮换依赖同目录硬链接（不支持时自动回退复制）；`.bak` 是轮换语义下的“上一版本”，
+  不是无限历史版本；用户显式删除存档槽位时会连同 `.bak` 一起删除（等价于确认丢弃该槽位）。
+
+### 13.3 历史数据显示的 UI 标注与年度汇总（已修复）
+
+- 受影响面板与数据源（修复前只展示近期明细、无任何“旧数据已归档”提示）：
+  1. 财政流水逐笔：`src/ui/panels.ts`（`store.fiscalLedger` → `fiscal.archivedLedger`）；
+  2. 税收逐月：`panels.ts`（`store.taxView`；无归档规则，显式说明仅显示近期/保留窗口）；
+  3. 债券市场与我的持债：`panels.ts`（`bondMarketOffers/ownBondHoldings` → `bonds.archivedPayments`）；
+  4. 治理议案（公司详情）：`panels.ts`（`governanceView` → `governance.motionYears`）；
+  5. 股票 K 线与行情：`src/ui/stock-window/index.ts` + `gameStore.ts`（`securities.history[].yearlyCandles`）；
+  6. 银行/居民贷款：`panels.ts`（`bankView` → `banking.archivedLoans` / `householdFinance.archivedLoans`）；
+  7. 设备维护费：`panels.ts` 仅本月明细（`maintenanceHistory` 未归档、无历史面板）。
+- 修复内容：
+  1. 每个“近期明细”面板增加可见提示（`data-testid`：`fiscal-ledger-window-note`、`bond-…`、`motion-window-note`、
+     `bank-loan-window-note`、`stock-kline-window-note` 等），写明保留月数（36/12/12/36/120）与归档口径
+     （城市×年×科目 / 批次×持有人×年×类型 / 公司×年×类型 / 年×类别 / 自然年），明确“明细 ≠ 汇总”；
+  2. 只读“年度汇总（非逐笔）”折叠区块：财政年度汇总、债券兑付年度汇总（公开口径排除破产垫付）、
+     议案年度汇总、已结清贷款年度汇总（银行仅笔数 / 居民贷本城金额）、股票年度 OHLCV（真实月线聚合）；
+     空数据展示真实空状态，不伪造；
+  3. 权限口径：财政归档仅市长视图渲染；债券公开汇总不含破产处置（银行垫付）金额；
+  4. 未新增写操作、未改经济数值/存档格式；gameStore 仅增加只读投影字段。
+- 测试：新增 `tests/ui-history-archive-v17.test.ts` **7/7**；受影响 UI/acceptance/设备维护等 11 文件
+  **119/119** 全绿（另 `v15-crosscut` 10/10）；`npx tsc --noEmit` = 0。
+- 仍未覆盖（留后续）：选举历史（UI 无 elections 列表，`electionYears` 暂无消费方）、授信快照月度汇总
+  （UI 仅当前授信评估，无历史面板）、设备维护费历史与世界 history/log/notifications（未归档、无 UI 历史展示）。
+
+### 13.4 修复轮桌面实际操作与验证范围
+
+生产构建 + Xvfb `:99` 真实 Electron，**35/35 检查通过、0 console 错误**（证据
+`docs/evidence_v1.7/report.json` 与截图）：
+
+- 原有启动/人口/需求/设备链/生产计划/股票窗口/14 个月推进/财务面板/最小窗口等走查全部保留；
+- **手动保存→推进→读取逐字段一致**；v10 模块化格式校验（formatVersion 10 / kind /
+  11 模块 / 无旧 world）；
+- **保存备份**：成功覆盖后 `.bak` 可读取且内容=上一版本（list `backupExists=true`、
+  `recoveredFromBackup=false`、备份 savedAt=主档上一版 savedAt）；连续保存轮换后主档与备份
+  不是同一版本；
+- **旧格式升级备份**：72 月旧明文（53,313,078B）经同一槽位读取→推进 1 月→写入 v10 gzip
+  （1,344,690B）后，`.bak` 存在、逐字节等于升级前旧档（formatVersion 9 + world）；
+- **损坏/不兼容存档提示**：损坏 JSON 读取失败给出可读错误且不覆盖当前世界；含未知必需模块的
+  存档被拒绝并提示更新版本，当前世界不变；
+- **自动保存**成功且写出 v10 模块化存档；**历史数据 UI 标注**：财政流水面板出现
+  “近期逐笔明细 / 更早已按年度汇总归档”且年度归档区块可见（明细↔汇总区分）；股票 K 线窗口
+  出现“120 月明细窗口 + 更早年度 OHLCV 汇总”且年度汇总区块存在（空数据不伪造）；
+- 旧版明文 72 月存档读取→推进→写出 gzip v10→再读取成功；0 console 错误。
+
 ## 12. 工作区与推送状态
 
 - 开发基线 SHA：`31b66272e04bdaa8f0c10f80d5dfc91d551172bf`
 - 本轮提交链（基线之上）：`147e54c` feat(persistence) → `32a0548` fix(persistence) →
   `2502e0e` docs(design) → `4d9af42` feat(v1.7) → `8504de5` test(v1.7) →
   `7282187` docs(v1.7)（**已推送的交付 HEAD**）→ 推送 SHA 回填提交（本地=远端，见 `git log -1`）
+- 验收修复轮（基线 `3efbc5c`）：`aa57472` fix(save 开局份额时点) → `c2f60f9` fix(save-ipc 备份保留)
+  → `85ad9b7` feat(ui 历史归档展示) → `docs(v1.7 修复轮)` → 推送 SHA 回填提交（见 `git log -1`）。
 - 推送：`31b6627..7282187 feature/stock-market-ui-tax -> feature/stock-market-ui-tax`（**快进推送**），
   随后推送 SHA 回填/文档对齐提交；**最终本地 HEAD = `origin/feature/stock-market-ui-tax`** 以
   `git log -1` 为准（本轮最终 SHA 同时记录在交付答复中）；`origin/main` 仍

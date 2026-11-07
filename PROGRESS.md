@@ -38,6 +38,25 @@ v1.7.0（存档系统任务书）：统一存档管理器 + 分模块快照 + �
   120 月 raw 21,531,933/gzip 1,330,152（1.27MiB，**≤10MiB 目标达标**）；72 月 v10 minified 18.39MB（旧 pretty v9 53.31MB）；长期趋势 t72→t120 仅 +2.25MB（历史治理收敛）。
   经济规则/数值未改动；36 月 acceptance 轨迹 9/9 未因归档改变。
 
+## v1.7 验收修复轮（基线 3efbc5c，进行中）
+
+1. **新开局存读档改变后续经济结果（已修）**：v10 读档不再预写 `investorLedger.openingShares`；
+   唯一初始化时点 = 第一次月度结算中首次需要有效份额时（tick 内确定性、按城市幂等）。旧单体档仍在
+   读取时一次性补齐（幂等/不覆盖已有份额/不增减现金）。回归：`tests/persistence/opening-shares-timing.test.ts`
+   （tick0 A 直接推进 vs B 存档→读档→推进、连续 6 tick 全量一致、中途读档、旧档幂等）；
+   `roundtrip.test.ts` 0 月用例已收紧为逐字段完全相等。设计说明见 DESIGN §5.3。
+2. **成功写入后备份保留（已修）**：electron/saveIpc 写序 temp → hardlink/copy 生成 `.bak.next` →
+   原子 rename 成 `.bak` → 原子 rename temp→主档；成功后保留 `.bak`=上一版本（单备份轮换）；
+   旧格式升级同槽位覆盖保留旧明文备份；中断恢复：主档缺失+备份存在时 read/list 回退并标记
+   `recoveredFromBackup`，下一次写先恢复主档；新增 `saves:read-backup`、list `backupExists`；
+   除轮换/显式删槽位外不删 `.bak`。测试：save-boundary 21/21、save-failure-protection 21/21。
+   注意：`.bak` 是“上一版本”，不是无限历史；依赖同目录硬链接（失败回退 copyFile）。
+3. **历史数据显示（已修）**：UI 在财政流水/债券兑付/议案/银行-居民贷款/K 线等面板标注“近期明细窗口+
+   更早已归档为年度汇总”，并接入只读年度汇总区块（股票年度 OHLCV 等）；财政归档仅市长可见、
+   债券公开汇总排除破产垫付；未改经济数值/存档格式。测试：ui-history-archive-v17 7/7 + 受影响
+   UI/acceptance 119/119。未覆盖：选举历史列表、授信快照历史面板、设备维护费历史/世界日志展示。
+4. 修复轮仍待完成：受影响测试/构建/Electron 复验、提交推送（不合并 main、不改写既有提交）。
+
 ## Next（按序）
 
 1. 等用户验收；提交/推送状态见末尾；提醒撤销本轮 PAT。

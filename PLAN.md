@@ -220,3 +220,10 @@ SAVE_SYSTEM_DESIGN.md、Electron 实机验证；不改经济数值/玩法；推�
 - [x] 全量回归：152 文件 13 块，1,278 项通过，断言失败 0（容器 RPC 噪声另记）。
 - [x] 文档：SAVE_SYSTEM_DESIGN.md / DELIVERY_REPORT_v1.7.0.md / README v1.7.0 / PROGRESS 回填。
 - [ ] 提交 + 推送功能分支（见 PROGRESS/报告 §12；等待 PAT 可用性）。
+
+## v1.7 验收修复（基线 3efbc5c）
+
+- [x] 修复 tick0 存档读档改变后续经济结果（读档不预写 openingShares；唯一初始化时点在 tick 内）+ 回归。
+- [x] 成功写入后保留上一版本 `.bak`、轮换、旧格式升级备份、中断恢复、read-backup/list 标记 + 测试。
+- [x] UI 历史面板标注“近期明细 vs 已归档年度汇总”+ 只读年度汇总接入 + 测试。
+- [ ] 受影响测试/构建/Electron 复验、提交推送（不合并 main）。

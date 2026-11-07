@@ -318,6 +318,27 @@ app.whenReady().then(async () => {
       && mayorSwitch.budgetVisible
       && (!mayorSwitch.referenceVisible || /本月参考|预留|未支付/.test(mayorSwitch.cardText));
     check('市长：AI 体检受限财政口径出现，政策卡显示参考/预留/未支付与资金预算', mayorOk, JSON.stringify(mayorSwitch));
+    // v1.7 验收修复：财政流水面板必须明确“近期明细 vs 已归档年度汇总”，且归档区块只读、不伪造。
+    const fiscalArchiveUi = await read(win, `(() => {
+      const note = document.querySelector('[data-testid="fiscal-ledger-window-note"]');
+      const ledger = document.querySelector('[data-testid="fiscal-ledger"]');
+      const archive = document.querySelector('[data-testid="fiscal-annual-archive"]');
+      return {
+        noteExists: Boolean(note),
+        noteText: (note?.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 300),
+        ledgerVisible: Boolean(ledger),
+        archiveVisible: Boolean(archive),
+        archiveText: (archive?.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 200),
+      };
+    })()`);
+    check(
+      '财政流水面板标注“近期逐笔明细 / 更早已按年度汇总归档”，归档区块与明细区分',
+      fiscalArchiveUi.noteExists && fiscalArchiveUi.ledgerVisible
+        && /明细/.test(fiscalArchiveUi.noteText)
+        && /归档|年度汇总/.test(fiscalArchiveUi.noteText)
+        && fiscalArchiveUi.archiveVisible,
+      JSON.stringify(fiscalArchiveUi),
+    );
     const mayorReset = await read(win, `(() => { const s = window.__lanwan.store; s.world.player.roles.mayorCityId = null; s.emit(); return s.policyView('lanport').isPlayerMayor; })()`);
     await sleep(400);
     check('离任后立即恢复非市长受限视图', mayorReset === false, JSON.stringify({ isPlayerMayor: mayorReset }));
@@ -506,9 +527,16 @@ app.whenReady().then(async () => {
         window: Boolean(document.querySelector('[data-testid="stock-window"]')),
         rows: s.stockMarketView().rows.length,
         title: (document.querySelector('[data-testid="stock-window"] .stock-title')?.textContent ?? '').trim(),
+        klineNote: (document.querySelector('[data-testid="stock-kline-window-note"]')?.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 300),
+        yearlyArchive: Boolean(document.querySelector('[data-testid="stock-yearly-archive"], [data-testid="stock-yearly-archive-empty"]')),
       };
     })()`);
     check('股票市场大窗口仍可打开并显示行', stock.window && stock.rows > 0, JSON.stringify(stock));
+    check(
+      '股票 K 线窗口标注“120 月明细窗口 + 更早年度 OHLCV 汇总”，且年度汇总区块存在（空数据不伪造）',
+      stock.klineNote.includes('120') && /年度|归档/.test(stock.klineNote) && stock.yearlyArchive === true,
+      JSON.stringify({ klineNote: stock.klineNote, yearlyArchive: stock.yearlyArchive }),
+    );
     await capture(win, 'v09-06-stock-regression.png');
     await read(win, `(() => { window.__lanwan.store.closeStockMarket(); window.__lanwan.store.emit(); return true; })()`);
     await sleep(400);
@@ -807,6 +835,56 @@ app.whenReady().then(async () => {
     );
     await capture(win, 'v09-07-save-load.png');
 
+    // ---- 9a. v1.7 验收修复：成功覆盖后保留上一版本备份（.bak 轮换） ----
+    step('9a. 保存备份保留与轮换');
+    const backupCheck = await read(win, `(async () => {
+      const s = window.__lanwan.store;
+      const firstRead = await s.bridge.read('manual-1');
+      if (!firstRead.ok || !firstRead.text) return { ok: false, error: '首次存档读取失败：' + String(firstRead.error) };
+      const firstParsed = JSON.parse(firstRead.text);
+      const savedAgain = await s.saveSlot('manual-1');
+      if (!savedAgain) return { ok: false, error: '第二次保存失败' };
+      const backup = typeof s.bridge.readBackup === 'function' ? await s.bridge.readBackup('manual-1') : { ok: false, error: '无 readBackup' };
+      const list = await s.bridge.list();
+      const entry = (list || []).find((item) => item.slot === 'manual-1') || null;
+      let backupParsed = null;
+      if (backup.ok && backup.text) { try { backupParsed = JSON.parse(backup.text); } catch { backupParsed = null; } }
+      return {
+        ok: true,
+        backupOk: backup.ok,
+        backupFormatVersion: backupParsed ? backupParsed.formatVersion : null,
+        backupKind: backupParsed ? backupParsed.kind : null,
+        backupSavedAt: backupParsed ? backupParsed.savedAt : null,
+        firstSavedAt: firstParsed.savedAt,
+        backupExistsInList: entry ? entry.backupExists === true : null,
+        recoveredFromBackup: entry ? entry.recoveredFromBackup === true : null,
+      };
+    })()`);
+    check(
+      '成功覆盖后保留上一版本备份（.bak 可读取、内容为上一版、list 标记 backupExists）',
+      backupCheck.ok === true && backupCheck.backupOk === true
+        && backupCheck.backupFormatVersion === 10 && backupCheck.backupKind === 'lanwan-modules'
+        && backupCheck.backupExistsInList === true && backupCheck.recoveredFromBackup === false
+        && typeof backupCheck.firstSavedAt === 'string' && backupCheck.backupSavedAt === backupCheck.firstSavedAt,
+      JSON.stringify(backupCheck),
+    );
+    const rotation = await read(win, `(async () => {
+      const s = window.__lanwan.store;
+      const main = await s.bridge.read('manual-1');
+      const backup = typeof s.bridge.readBackup === 'function' ? await s.bridge.readBackup('manual-1') : { ok: false };
+      if (!main.ok || !main.text || !backup.ok || !backup.text) return { ok: false };
+      const mainDoc = JSON.parse(main.text);
+      const backupDoc = JSON.parse(backup.text);
+      return { ok: true, mainSavedAt: mainDoc.savedAt, backupSavedAt: backupDoc.savedAt };
+    })()`);
+    check(
+      '连续保存轮换：主档为最新版本、备份为上一版本（两者不是同一份）',
+      rotation.ok === true && typeof rotation.mainSavedAt === 'string' && typeof rotation.backupSavedAt === 'string'
+        && rotation.mainSavedAt !== rotation.backupSavedAt,
+      JSON.stringify(rotation),
+    );
+    await capture(win, 'v17-02-backup-rotation.png');
+
     // ---- 9b. v1.7：损坏/不兼容存档提示、自动保存、v10 模块格式 ----
     step('9b. v1.7 损坏/不兼容存档提示、自动保存');
     fs.writeFileSync(path.join(savesDir, 'manual-corrupt.json'), '{ "formatVersion": 10, "kind": "lanwan-modules", broken');
@@ -911,10 +989,10 @@ app.whenReady().then(async () => {
         s.tick();
         const tickMs = Math.round(performance.now() - t1);
         const t2 = performance.now();
-        const saved = await s.saveSlot('manual-t72b');
+        const saved = await s.saveSlot('manual-t72');
         const saveMs = Math.round(performance.now() - t2);
         const t3 = performance.now();
-        const reloaded = await s.loadSlot('manual-t72b');
+        const reloaded = await s.loadSlot('manual-t72');
         const reloadMs = Math.round(performance.now() - t3);
         return {
           saved, loaded, reloaded, startTick, advancedTick: s.world.time.tick, companies,
@@ -922,17 +1000,34 @@ app.whenReady().then(async () => {
           toasts: (s.toasts || []).map((entry) => entry.message),
         };
       })()`);
-      const savedFile = path.join(savesDir, 'manual-t72b.json');
+      const savedFile = path.join(savesDir, 'manual-t72.json');
       const savedBytes = fs.existsSync(savedFile) ? fs.statSync(savedFile).size : 0;
       const savedHead = fs.existsSync(savedFile) ? fs.readFileSync(savedFile).subarray(0, 2) : Buffer.alloc(0);
       // v1.6.1 §三 长期方案：桌面存档对 ≥4MiB 文本 gzip 落盘（.json 后缀 + gzip 魔数，格式版本仍 9）。
       const savedIsGzip = savedHead.length === 2 && savedHead[0] === 0x1f && savedHead[1] === 0x8b;
+      // v1.7 验收修复：旧版明文升级并在**同一槽位**首次覆盖后，.bak 必须保留升级前的旧档内容（可被旧格式读取）。
+      const backupFile = path.join(savesDir, 'manual-t72.json.bak');
+      const backupExists = fs.existsSync(backupFile);
+      let backupLegacyOk = false;
+      let backupBytes = 0;
+      if (backupExists) {
+        const backupBuffer = fs.readFileSync(backupFile);
+        backupBytes = backupBuffer.length;
+        backupLegacyOk = backupBuffer[0] === 0x7b && (() => {
+          try {
+            const parsed = JSON.parse(backupBuffer.toString('utf8'));
+            return parsed.formatVersion === 9 && Object.prototype.hasOwnProperty.call(parsed, 'world');
+          } catch { return false; }
+        })();
+      }
       check(
         '72 月默认世界经桌面存档接口：读取成功→推进 1 月→写入成功（gzip）→再读取成功',
         t72.loaded && t72.reloaded && t72.advancedTick === t72.startTick + 1 && t72.saved
-          && savedBytes > 0 && savedBytes < t72Bytes * 0.3 && savedIsGzip,
+          && savedBytes > 0 && savedBytes < t72Bytes * 0.3 && savedIsGzip
+          && backupExists && backupBytes === t72Bytes && backupLegacyOk,
         JSON.stringify({
           sourceBytes: t72Bytes, savedBytes, savedIsGzip, compressionRatio: Number((savedBytes / t72Bytes).toFixed(3)),
+          backupExists, backupBytes, backupLegacyOk,
           loadMs: t72.loadMs, tickMs: t72.tickMs, saveMs: t72.saveMs, reloadMs: t72.reloadMs,
           startTick: t72.startTick, advancedTick: t72.advancedTick, companies: t72.companies,
           toasts: t72.toasts,
